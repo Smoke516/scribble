@@ -1,0 +1,11 @@
+/home/seawn/scribble/target/release/deps/linux_raw_sys-41614f959a2f75a4.d: /home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/lib.rs /home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/elf.rs /home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/x86_64/errno.rs /home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/x86_64/general.rs /home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/x86_64/ioctl.rs
+
+/home/seawn/scribble/target/release/deps/liblinux_raw_sys-41614f959a2f75a4.rlib: /home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/lib.rs /home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/elf.rs /home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/x86_64/errno.rs /home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/x86_64/general.rs /home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/x86_64/ioctl.rs
+
+/home/seawn/scribble/target/release/deps/liblinux_raw_sys-41614f959a2f75a4.rmeta: /home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/lib.rs /home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/elf.rs /home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/x86_64/errno.rs /home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/x86_64/general.rs /home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/x86_64/ioctl.rs
+
+/home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/lib.rs:
+/home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/elf.rs:
+/home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/x86_64/errno.rs:
+/home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/x86_64/general.rs:
+/home/seawn/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/linux-raw-sys-0.4.15/src/x86_64/ioctl.rs:
