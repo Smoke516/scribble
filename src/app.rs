@@ -15,6 +15,7 @@ pub enum AppMode {
     InputFolder,
     Move,
     Help,
+    DeleteConfirm,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +92,11 @@ pub struct App {
     pub move_item_id: Option<Uuid>,
     pub move_item_type: Option<TreeItemType>,
     
+    // Delete confirmation
+    pub delete_item_id: Option<Uuid>,
+    pub delete_item_type: Option<TreeItemType>,
+    pub delete_item_name: String,
+    
     // Preview mode
     pub preview_enabled: bool,
     
@@ -135,6 +141,11 @@ impl App {
             // Move operation
             move_item_id: None,
             move_item_type: None,
+            
+            // Delete confirmation
+            delete_item_id: None,
+            delete_item_type: None,
+            delete_item_name: String::new(),
             
             // Preview mode
             preview_enabled: false,
@@ -316,24 +327,43 @@ impl App {
         }
     }
 
-    pub fn delete_current_item(&mut self) -> Result<(), String> {
+    pub fn start_delete_confirmation(&mut self) -> Result<(), String> {
         if let Some(item) = self.get_selected_item().cloned() {
-            match item.item_type {
+            self.delete_item_id = Some(item.id);
+            self.delete_item_type = Some(item.item_type.clone());
+            self.delete_item_name = item.name.clone();
+            self.mode = AppMode::DeleteConfirm;
+            Ok(())
+        } else {
+            Err("Nothing to delete".to_string())
+        }
+    }
+
+    pub fn confirm_delete(&mut self) -> Result<(), String> {
+        if let (Some(item_id), Some(item_type)) = (self.delete_item_id, self.delete_item_type.clone()) {
+            match item_type {
                 TreeItemType::Note => {
-                    self.notebook.remove_note(item.id);
+                    self.notebook.remove_note(item_id);
                     if let Some(ref current_note) = self.current_note {
-                        if current_note.id == item.id {
+                        if current_note.id == item_id {
                             self.current_note = None;
                             self.editor_content.clear();
                         }
                     }
-                    self.set_message("Note deleted".to_string());
+                    self.set_message(format!("Note '{}' deleted", self.delete_item_name));
                 }
                 TreeItemType::Folder => {
-                    self.notebook.remove_folder(item.id)?;
-                    self.set_message("Folder deleted".to_string());
+                    self.notebook.remove_folder(item_id)?;
+                    self.set_message(format!("Folder '{}' deleted", self.delete_item_name));
                 }
             }
+            
+            // Clear deletion state
+            self.delete_item_id = None;
+            self.delete_item_type = None;
+            self.delete_item_name.clear();
+            self.mode = AppMode::Normal;
+            
             self.refresh_tree_view();
             
             // Adjust selection if needed
@@ -343,8 +373,16 @@ impl App {
             
             Ok(())
         } else {
-            Err("Nothing to delete".to_string())
+            Err("No item selected for deletion".to_string())
         }
+    }
+
+    pub fn cancel_delete(&mut self) {
+        self.delete_item_id = None;
+        self.delete_item_type = None;
+        self.delete_item_name.clear();
+        self.mode = AppMode::Normal;
+        self.set_message("Deletion cancelled".to_string());
     }
 
     pub fn toggle_folder_expansion(&mut self) {

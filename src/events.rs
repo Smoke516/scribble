@@ -14,6 +14,7 @@ pub fn handle_event(app: &mut App, event: Event) -> Result<(), Box<dyn std::erro
             AppMode::InputFolder => handle_input_folder_mode(app, key),
             AppMode::Move => handle_move_mode(app, key),
             AppMode::Help => handle_help_mode(app, key),
+            AppMode::DeleteConfirm => handle_delete_confirm_mode(app, key),
         }
     }
     Ok(())
@@ -144,7 +145,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         
         // Delete (only if not Ctrl+D)
         KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Err(e) = app.delete_current_item() {
+            if let Err(e) = app.start_delete_confirmation() {
                 app.set_message(e);
             }
         }
@@ -640,5 +641,26 @@ fn handle_help_mode(app: &mut App, key: KeyEvent) {
             app.mode = AppMode::Normal;
         }
         _ => {}
+    }
+}
+
+fn handle_delete_confirm_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        // Confirm deletion with 'y' or Enter
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            if let Err(e) = app.confirm_delete() {
+                app.set_message(e);
+            }
+        }
+        
+        // Cancel deletion with 'n', Esc, or any other key
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.cancel_delete();
+        }
+        
+        // Any other key cancels the operation
+        _ => {
+            app.cancel_delete();
+        }
     }
 }
