@@ -24,6 +24,36 @@ A powerful terminal-based note-taking app with folder organization, markdown sup
 - **Multiple modes** - Normal, Insert, Search, and Command modes like in Vim
 - **Real-time updates** - See your changes reflected immediately
 
+## 🎬 Demo
+
+See Scribble in action! We've included comprehensive demo materials:
+
+### Quick Demo
+```bash
+# Build the project
+cargo build --release
+
+# Run the demo with sample files
+./target/release/scribble demo_files/
+```
+
+**Try these features:**
+- Navigate with `↑/↓` or `j/k`
+- Press `Enter` to open files and see **beautiful syntax highlighting**
+- Use `Tab` to switch between panes
+- Press `/` for search, `Ctrl+F` for advanced search
+- Press `q` to quit
+
+### Create a Recording
+```bash
+./create_demo.sh
+```
+This creates an `asciinema` recording perfect for sharing!
+
+📖 **Full demo guide:** See [DEMO_GUIDE.md](DEMO_GUIDE.md) for detailed instructions
+
+---
+
 ## Installation
 
 ### Prerequisites
