@@ -51,6 +51,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         AppMode::InputNote => draw_input_note_dialog(f, app),
         AppMode::InputFolder => draw_input_folder_dialog(f, app),
         AppMode::Help => draw_help_dialog(f, app),
+        AppMode::DeleteConfirm => draw_delete_confirm_dialog(f, app),
         _ => {},
     }
 }
@@ -512,6 +513,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::InputFolder => "NEW FOLDER",
         AppMode::Move => "MOVE",
         AppMode::Help => "HELP",
+        AppMode::DeleteConfirm => "DELETE?",
     };
 
     let pane_text = match app.focused_pane {
@@ -528,6 +530,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::InputNote | AppMode::InputFolder => TokyoNightTheme::mode_input(),
         AppMode::Move => TokyoNightTheme::mode_command(), // Use command style for move mode
         AppMode::Help => TokyoNightTheme::mode_search(), // Use search style for help mode
+        AppMode::DeleteConfirm => Style::default().fg(TokyoNightTheme::RED).bg(TokyoNightTheme::BG_HIGHLIGHT).add_modifier(Modifier::BOLD),
     };
     
     // Create enhanced message display with operation result feedback
@@ -907,7 +910,7 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from(vec![
             Span::styled("    ", Style::default()),
             Span::styled("d      ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Delete selected note or folder", TokyoNightTheme::help_text()),
+            Span::styled("   Delete selected note or folder (with confirmation)", TokyoNightTheme::help_text()),
         ]),
         Line::from(vec![
             Span::styled("    ", Style::default()),
@@ -994,6 +997,61 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         .style(TokyoNightTheme::normal())
         .wrap(Wrap { trim: false })
         .alignment(Alignment::Left);
+
+    f.render_widget(paragraph, area);
+}
+
+fn draw_delete_confirm_dialog(f: &mut Frame, app: &App) {
+    let area = centered_rect(60, 30, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title("⚠️  Confirm Deletion")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(TokyoNightTheme::RED))
+        .style(TokyoNightTheme::popup());
+
+    let item_type = if let Some(ref item_type) = app.delete_item_type {
+        match item_type {
+            TreeItemType::Note => "note",
+            TreeItemType::Folder => "folder",
+        }
+    } else {
+        "item"
+    };
+
+    let content = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Are you sure you want to delete this ", TokyoNightTheme::help_text()),
+            Span::styled(item_type, Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled("?", TokyoNightTheme::help_text()),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  📝 ", Style::default().fg(TokyoNightTheme::YELLOW)),
+            Span::styled(&app.delete_item_name, Style::default().fg(TokyoNightTheme::FG).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Press ", TokyoNightTheme::help_text()),
+            Span::styled("'y'", Style::default().fg(TokyoNightTheme::GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(" or ", TokyoNightTheme::help_text()),
+            Span::styled("Enter", Style::default().fg(TokyoNightTheme::GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(" to confirm, ", TokyoNightTheme::help_text()),
+            Span::styled("'n'", Style::default().fg(TokyoNightTheme::RED).add_modifier(Modifier::BOLD)),
+            Span::styled(" or ", TokyoNightTheme::help_text()),
+            Span::styled("Esc", Style::default().fg(TokyoNightTheme::RED).add_modifier(Modifier::BOLD)),
+            Span::styled(" to cancel", TokyoNightTheme::help_text()),
+        ]),
+        Line::from(""),
+    ];
+
+    let paragraph = Paragraph::new(content)
+        .block(block)
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false });
 
     f.render_widget(paragraph, area);
 }
