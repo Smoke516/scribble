@@ -246,3 +246,37 @@ impl TokyoNightTheme {
             .add_modifier(Modifier::BOLD)
     }
 }
+
+/// Monochrome icon constants for consistent theming
+pub struct Icons;
+
+impl Icons {
+    // File tree icons
+    pub const FOLDER_CLOSED: &'static str = "▶";
+    pub const FOLDER_OPEN: &'static str = "▼";
+    pub const NOTE: &'static str = "●";
+    pub const ROOT: &'static str = "~";
+    
+    // Status indicators
+    pub const SAVED: &'static str = "●";
+    pub const MODIFIED: &'static str = "○";
+    pub const SAVING: &'static str = "◐";
+    pub const ERROR: &'static str = "✗";
+    
+    // Mode indicators
+    pub const EDITOR: &'static str = "▣";
+    pub const PREVIEW: &'static str = "◈";
+    pub const SEARCH: &'static str = "◉";
+    
+    // Navigation
+    pub const BREADCRUMB_SEPARATOR: &'static str = "▸";
+    pub const EXPLORER: &'static str = "≡";
+    
+    // Alternative icon sets (you can switch between these)
+    pub const FOLDER_CLOSED_ALT: &'static str = "►";
+    pub const FOLDER_OPEN_ALT: &'static str = "▽";
+    pub const NOTE_ALT: &'static str = "◦";
+    pub const FOLDER_CLOSED_SIMPLE: &'static str = "+";
+    pub const FOLDER_OPEN_SIMPLE: &'static str = "-";
+    pub const NOTE_SIMPLE: &'static str = "•";
+}
