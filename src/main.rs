@@ -1,4 +1,5 @@
 mod app;
+mod autocomplete;
 mod events;
 mod models;
 mod preview;

@@ -319,6 +319,11 @@ fn draw_editor_pane(f: &mut Frame, app: &App, area: Rect, is_split_view: bool) {
             );
             f.set_cursor_position((cursor_area.x, cursor_area.y));
         }
+        
+        // Draw autocompletion popup if active
+        if app.autocomplete_state.active && app.mode == AppMode::Insert && is_focused {
+            draw_autocomplete_popup(f, app, editor_chunks[1]);
+        }
     } else {
         draw_welcome_screen(f, app, area, block);
     }
@@ -1053,6 +1058,84 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         .alignment(Alignment::Left);
 
     f.render_widget(paragraph, area);
+}
+
+fn draw_autocomplete_popup(f: &mut Frame, app: &App, editor_area: Rect) {
+    if !app.autocomplete_state.active || app.autocomplete_state.suggestions.is_empty() {
+        return;
+    }
+
+    // Calculate popup position based on cursor
+    let cursor_x = app.editor_cursor.1;
+    let cursor_y = app.editor_cursor.0.saturating_sub(app.editor_scroll);
+
+    // Position popup below cursor, but adjust if it would go off screen
+    let popup_height = (app.autocomplete_state.suggestions.len() as u16 + 2).min(8); // Max 6 suggestions + border
+    let popup_width = 40;
+    
+    let popup_x = editor_area.x + cursor_x.min(editor_area.width.saturating_sub(popup_width));
+    let popup_y = if cursor_y + popup_height < editor_area.height {
+        editor_area.y + cursor_y + 1 // Below cursor
+    } else {
+        editor_area.y + cursor_y.saturating_sub(popup_height) // Above cursor
+    };
+
+    let popup_area = Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    // Clear the area behind the popup
+    f.render_widget(Clear, popup_area);
+
+    // Create list items for suggestions
+    let items: Vec<ListItem> = app.autocomplete_state.suggestions
+        .iter()
+        .enumerate()
+        .map(|(i, suggestion)| {
+            let is_selected = i == app.autocomplete_state.selected_index;
+            
+            let icon = if suggestion.trigger.starts_with("#") {
+                "#"
+            } else if suggestion.trigger == "-" || suggestion.trigger == "*" {
+                "•"
+            } else if suggestion.trigger.contains("`") {
+                "`"
+            } else if suggestion.trigger == "[" || suggestion.trigger == "![" {
+                "🔗"
+            } else if suggestion.trigger == "**" || suggestion.trigger == "*" {
+                "*"
+            } else if suggestion.trigger == "|" {
+                "📋"
+            } else {
+                "📝"
+            };
+            
+            let style = if is_selected {
+                Style::default().fg(TokyoNightTheme::BG).bg(TokyoNightTheme::BLUE)
+            } else {
+                Style::default().fg(TokyoNightTheme::FG)
+            };
+            
+            let line = Line::from(vec![
+                Span::styled(format!("{} ", icon), Style::default().fg(TokyoNightTheme::CYAN)),
+                Span::styled(&suggestion.description, style),
+            ]);
+            
+            ListItem::new(line).style(style)
+        })
+        .collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("💡 Autocomplete")
+        .border_style(Style::default().fg(TokyoNightTheme::BLUE))
+        .style(Style::default().bg(TokyoNightTheme::BG_POPUP));
+
+    let list = List::new(items).block(block);
+    f.render_widget(list, popup_area);
 }
 
 fn draw_delete_confirm_dialog(f: &mut Frame, app: &App) {

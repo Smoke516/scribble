@@ -234,10 +234,48 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
 fn handle_insert_mode(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
-            app.mode = AppMode::Normal;
-            // Auto-save on exit insert mode
-            if let Err(e) = app.save_current_note() {
-                app.set_message(e);
+            if app.autocomplete_state.active {
+                app.cancel_autocomplete();
+            } else {
+                app.mode = AppMode::Normal;
+                // Auto-save on exit insert mode
+                if let Err(e) = app.save_current_note() {
+                    app.set_message(e);
+                }
+            }
+        }
+        
+        KeyCode::Tab => {
+            if app.autocomplete_state.active {
+                app.apply_autocomplete();
+            } else {
+                app.editor_content.push_str("    "); // 4 spaces
+                app.mark_modified();
+                update_cursor_position(app);
+                app.update_autocompletion();
+            }
+        }
+        
+        KeyCode::Up => {
+            if app.autocomplete_state.active {
+                app.previous_autocomplete_suggestion();
+            } else {
+                if app.editor_cursor.0 > 0 {
+                    app.editor_cursor.0 -= 1;
+                    app.adjust_scroll_to_cursor();
+                }
+            }
+        }
+        
+        KeyCode::Down => {
+            if app.autocomplete_state.active {
+                app.next_autocomplete_suggestion();
+            } else {
+                let lines = app.editor_content.lines().count() as u16;
+                if app.editor_cursor.0 < lines.saturating_sub(1) {
+                    app.editor_cursor.0 += 1;
+                    app.adjust_scroll_to_cursor();
+                }
             }
         }
         
@@ -264,15 +302,21 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                 app.editor_content.push(c);
                 app.mark_modified();
                 update_cursor_position(app);
+                app.update_autocompletion();
             }
         }
         
         KeyCode::Enter => {
-            app.editor_content.push('\n');
-            app.mark_modified();
-            app.editor_cursor.0 += 1;
-            app.editor_cursor.1 = 0;
-            app.adjust_scroll_to_cursor();
+            if app.autocomplete_state.active {
+                app.apply_autocomplete();
+            } else {
+                app.editor_content.push('\n');
+                app.mark_modified();
+                app.editor_cursor.0 += 1;
+                app.editor_cursor.1 = 0;
+                app.adjust_scroll_to_cursor();
+                app.update_autocompletion();
+            }
         }
         
         KeyCode::Backspace => {
@@ -280,27 +324,7 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                 app.editor_content.pop();
                 app.mark_modified();
                 update_cursor_position(app);
-            }
-        }
-        
-        KeyCode::Tab => {
-            app.editor_content.push_str("    "); // 4 spaces
-            app.mark_modified();
-            update_cursor_position(app);
-        }
-        
-        KeyCode::Up => {
-            if app.editor_cursor.0 > 0 {
-                app.editor_cursor.0 -= 1;
-                app.adjust_scroll_to_cursor();
-            }
-        }
-        
-        KeyCode::Down => {
-            let lines = app.editor_content.lines().count() as u16;
-            if app.editor_cursor.0 < lines.saturating_sub(1) {
-                app.editor_cursor.0 += 1;
-                app.adjust_scroll_to_cursor();
+                app.update_autocompletion();
             }
         }
         
@@ -315,6 +339,7 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Left => {
             if app.editor_cursor.1 > 0 {
                 app.editor_cursor.1 -= 1;
+                app.update_autocompletion();
             }
         }
         
@@ -325,6 +350,7 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                 .unwrap_or("");
             if (app.editor_cursor.1 as usize) < current_line.len() {
                 app.editor_cursor.1 += 1;
+                app.update_autocompletion();
             }
         }
         

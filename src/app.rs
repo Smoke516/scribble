@@ -1,3 +1,4 @@
+use crate::autocomplete::{AutocompleteState, MarkdownAutocomplete};
 use crate::models::{Note, Folder, NotebookData, FolderTreeNode};
 use crate::search::{EnhancedSearch, SearchQuery, SearchResult};
 use uuid::Uuid;
@@ -100,6 +101,10 @@ pub struct App {
     // Preview mode
     pub preview_enabled: bool,
     
+    // Autocompletion
+    pub autocomplete_state: AutocompleteState,
+    pub markdown_autocomplete: MarkdownAutocomplete,
+    
     // Visual feedback
     pub save_status: SaveStatus,
     pub last_operation: Option<String>,
@@ -149,6 +154,10 @@ impl App {
             
             // Preview mode
             preview_enabled: false,
+            
+            // Autocompletion
+            autocomplete_state: AutocompleteState::new(),
+            markdown_autocomplete: MarkdownAutocomplete::new(),
             
             // Visual feedback
             save_status: SaveStatus::Saved,
@@ -582,6 +591,109 @@ impl App {
                 self.operation_result_time = None;
             }
         }
+    }
+    
+    /// Check if autocompletion should be triggered and update state
+    pub fn update_autocompletion(&mut self) {
+        if let Some(completions) = self.markdown_autocomplete.check_for_completions(
+            &self.editor_content,
+            self.editor_cursor.0 as usize,
+            self.editor_cursor.1 as usize,
+        ) {
+            self.autocomplete_state.activate(completions.0, completions.1);
+        } else {
+            self.autocomplete_state.deactivate();
+        }
+    }
+    
+    /// Apply the selected autocompletion
+    pub fn apply_autocomplete(&mut self) -> bool {
+        if !self.autocomplete_state.active {
+            return false;
+        }
+        
+        if let Some(suggestion) = self.autocomplete_state.get_selected_suggestion() {
+            let lines: Vec<&str> = self.editor_content.lines().collect();
+            if self.editor_cursor.0 as usize >= lines.len() {
+                return false;
+            }
+            
+            let _current_line = lines[self.editor_cursor.0 as usize];
+            let line_start = self.get_line_start_position(self.editor_cursor.0 as usize);
+            
+            // Calculate the absolute position in the content
+            let trigger_abs_pos = line_start + self.autocomplete_state.trigger_start_pos;
+            let cursor_abs_pos = line_start + self.editor_cursor.1 as usize;
+            
+            // Remove the trigger text and insert the completion
+            let mut new_content = String::new();
+            new_content.push_str(&self.editor_content[..trigger_abs_pos]);
+            new_content.push_str(&suggestion.completion);
+            new_content.push_str(&self.editor_content[cursor_abs_pos..]);
+            
+            self.editor_content = new_content;
+            
+            // Update cursor position
+            let completion_end_pos = trigger_abs_pos + suggestion.completion.len();
+            let new_cursor_pos = if suggestion.cursor_offset >= 0 {
+                completion_end_pos + suggestion.cursor_offset as usize
+            } else {
+                completion_end_pos.saturating_sub((-suggestion.cursor_offset) as usize)
+            };
+            
+            // Convert absolute position back to line/column
+            self.update_cursor_from_absolute_position(new_cursor_pos);
+            
+            self.autocomplete_state.deactivate();
+            self.mark_modified();
+            return true;
+        }
+        
+        false
+    }
+    
+    /// Move to next autocomplete suggestion
+    pub fn next_autocomplete_suggestion(&mut self) {
+        self.autocomplete_state.next_suggestion();
+    }
+    
+    /// Move to previous autocomplete suggestion
+    pub fn previous_autocomplete_suggestion(&mut self) {
+        self.autocomplete_state.previous_suggestion();
+    }
+    
+    /// Cancel autocompletion
+    pub fn cancel_autocomplete(&mut self) {
+        self.autocomplete_state.deactivate();
+    }
+    
+    /// Get the absolute character position of the start of a line
+    fn get_line_start_position(&self, line_index: usize) -> usize {
+        let lines: Vec<&str> = self.editor_content.lines().collect();
+        let mut pos = 0;
+        for i in 0..line_index.min(lines.len()) {
+            pos += lines[i].len() + 1; // +1 for the newline character
+        }
+        pos
+    }
+    
+    /// Update cursor position from absolute character position
+    fn update_cursor_from_absolute_position(&mut self, abs_pos: usize) {
+        let lines: Vec<&str> = self.editor_content.lines().collect();
+        let mut current_pos = 0;
+        
+        for (line_index, line) in lines.iter().enumerate() {
+            if current_pos + line.len() >= abs_pos {
+                self.editor_cursor.0 = line_index as u16;
+                self.editor_cursor.1 = (abs_pos - current_pos) as u16;
+                return;
+            }
+            current_pos += line.len() + 1; // +1 for newline
+        }
+        
+        // If we get here, position is at the end
+        self.editor_cursor.0 = lines.len().saturating_sub(1) as u16;
+        self.editor_cursor.1 = lines.last().unwrap_or(&"").len() as u16;
     }
 
     pub fn open_in_external_editor(&mut self) -> Result<(), String> {
