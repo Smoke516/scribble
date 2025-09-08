@@ -243,6 +243,45 @@ impl App {
             self.focused_pane = FocusedPane::Editor;
         }
     }
+    
+    pub fn open_note_by_id(&mut self, note_id: Uuid) {
+        // First, select the note (load it into the editor)
+        self.select_note(note_id);
+        
+        // Then, update the tree selection to highlight the note
+        self.navigate_to_note(note_id);
+        
+        // Make sure editor is focused
+        self.focused_pane = FocusedPane::Editor;
+    }
+    
+    fn navigate_to_note(&mut self, note_id: Uuid) {
+        // Find the note in the tree items and select it
+        for (index, item) in self.folder_tree_items.iter().enumerate() {
+            if item.id == note_id && item.item_type == TreeItemType::Note {
+                self.selected_folder_index = index;
+                
+                // If the note is in a folder, make sure the folder is expanded
+                if let Some(note) = self.notebook.notes.get(&note_id) {
+                    if let Some(folder_id) = note.folder_id {
+                        if let Some(folder) = self.notebook.folders.get_mut(&folder_id) {
+                            folder.expanded = true;
+                            self.refresh_tree_view(); // Refresh to show the expanded folder
+                            
+                            // Re-find the note index after refresh
+                            for (idx, item) in self.folder_tree_items.iter().enumerate() {
+                                if item.id == note_id && item.item_type == TreeItemType::Note {
+                                    self.selected_folder_index = idx;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
 
     pub fn create_new_note(&mut self, title: String, folder_id: Option<Uuid>) {
         let note = Note::new(title, folder_id);
@@ -410,8 +449,20 @@ impl App {
                 let total_matches: usize = self.enhanced_search_results.iter()
                     .map(|r| r.matches.len())
                     .sum();
-                self.set_message(format!("Found {} notes with {} matches for '{}'", 
-                    self.enhanced_search_results.len(), total_matches, query));
+                    
+                if !self.enhanced_search_results.is_empty() {
+                    // Extract needed data first to avoid borrowing issues
+                    let first_note_id = self.enhanced_search_results[0].note.id;
+                    let first_note_title = self.enhanced_search_results[0].note.title.clone();
+                    let results_count = self.enhanced_search_results.len();
+                    
+                    // Automatically navigate to and open the first search result
+                    self.open_note_by_id(first_note_id);
+                    self.set_message(format!("Found {} notes with {} matches for '{}' - Opened first result: '{}'", 
+                        results_count, total_matches, query, first_note_title));
+                } else {
+                    self.set_message(format!("No matches found for '{}'", query));
+                }
             }
             Err(e) => {
                 self.set_message(format!("Search error: {}", e));
@@ -426,8 +477,20 @@ impl App {
                 let total_matches: usize = self.enhanced_search_results.iter()
                     .map(|r| r.matches.len())
                     .sum();
-                self.set_message(format!("Enhanced search found {} notes with {} matches", 
-                    self.enhanced_search_results.len(), total_matches));
+                    
+                if !self.enhanced_search_results.is_empty() {
+                    // Extract needed data first to avoid borrowing issues
+                    let first_note_id = self.enhanced_search_results[0].note.id;
+                    let first_note_title = self.enhanced_search_results[0].note.title.clone();
+                    let results_count = self.enhanced_search_results.len();
+                    
+                    // Automatically navigate to and open the first search result
+                    self.open_note_by_id(first_note_id);
+                    self.set_message(format!("Enhanced search found {} notes with {} matches - Opened first result: '{}'", 
+                        results_count, total_matches, first_note_title));
+                } else {
+                    self.set_message("No matches found".to_string());
+                }
             }
             Err(e) => {
                 self.set_message(format!("Search error: {}", e));
