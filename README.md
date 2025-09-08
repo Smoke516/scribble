@@ -63,7 +63,7 @@ This creates an `asciinema` recording perfect for sharing!
 
 ```bash
 # Clone the repository
-git clone <your-repo-url>
+git clone https://github.com/Smoke516/scribble.git
 cd scribble
 
 # Build and install
