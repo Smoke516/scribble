@@ -842,6 +842,7 @@ fn handle_recent_files_mode(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
             app.show_recent_files = false;
+            app.mode = AppMode::Normal;
         }
         
         KeyCode::Enter => {
