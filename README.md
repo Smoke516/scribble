@@ -17,6 +17,15 @@ A powerful terminal-based note-taking app with folder organization, markdown sup
 - **🔍 Full-text search** - Search through all your notes by title or content
 - **⌨️ Vim-like navigation** - Familiar keyboard shortcuts for efficient navigation
 
+### 🚀 Productivity Features
+- **🔍 Fuzzy Search** - Intelligent search that finds matches even with typos (`Ctrl+F`)
+- **⚡ Quick Jump** - Instant note navigation with `Ctrl+J` - like VS Code's quick open
+- **📋 Recent Files** - Quick access to recently opened notes (`Ctrl+R`)
+- **👁️ Live Preview** - Real-time markdown preview in split-screen mode (`Ctrl+P`)
+- **↩️ Undo/Delete Safety** - Safely delete with full undo capability (`u` to undo)
+- **🔗 Note Linking** - Wiki-style `[[Note Title]]` links between notes (`Ctrl+L` to follow)
+- **💾 Session Persistence** - Remembers your last opened note and editor state
+
 ### Interface
 - **Tokyo Night theme** - Beautiful dark theme with carefully chosen colors
 - **Two-pane layout** - Left pane for folder/note navigation, right pane for editing
@@ -120,8 +129,19 @@ cargo run
 ### Search and Navigation
 | Key | Action |
 |-----|--------|
-| `/` | Search notes by content or title |
+| `/` | Search notes by content or title (regular search) |
+| `Ctrl+F` | Fuzzy search mode |
+| `Tab` (in search) | Switch between regular and fuzzy search |
+| `Ctrl+J` | Quick Jump - fuzzy search all notes |
+| `Ctrl+R` | Show recent files |
+| `u` | Undo last delete |
+| `Ctrl+L` | Follow link at cursor |
 | `?` | Show help message |
+
+### Live Preview
+| Key | Action |
+|-----|--------|
+| `Ctrl+P` / `F2` | Toggle live markdown preview (split-screen) |
 
 ### File Operations
 | Key | Action |

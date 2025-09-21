@@ -38,8 +38,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(notebook) => {
             app.notebook = notebook;
             app.refresh_tree_view();
-            app.set_message(format!("Loaded {} notes across {} folders", 
-                app.notebook.notes.len(), app.notebook.folders.len()));
+            // Start with no note selected - show welcome page instead
+            app.set_welcome_message();
         }
         Err(e) => {
             app.set_message(format!("Failed to load notebook: {}. Starting fresh.", e));

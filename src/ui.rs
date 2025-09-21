@@ -22,6 +22,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ])
         .split(size);
 
+    // Main layout with folders and editor
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -33,11 +34,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // Draw breadcrumb
     draw_breadcrumb(f, app, chunks[0]);
     
-    // Draw folder tree
-    draw_folder_tree(f, app, main_chunks[0]);
+    // Draw folder tree with recent files if enabled
+    draw_folder_tree_with_recent(f, app, main_chunks[0]);
     
     // Draw editor
     draw_editor(f, app, main_chunks[1]);
+    
     
     // Draw status bar
     draw_status_bar(f, app, chunks[2]);
@@ -52,6 +54,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         AppMode::InputFolder => draw_input_folder_dialog(f, app),
         AppMode::Help => draw_help_dialog(f, app),
         AppMode::DeleteConfirm => draw_delete_confirm_dialog(f, app),
+        AppMode::QuickJump => draw_quick_jump_dialog(f, app),
+        AppMode::RecentFiles => draw_recent_files_dialog(f, app),
         _ => {},
     }
 }
@@ -80,6 +84,14 @@ fn draw_breadcrumb(f: &mut Frame, app: &App, area: Rect) {
             .bg(TokyoNightTheme::BG_DARK));
     
     f.render_widget(breadcrumb, area);
+}
+
+fn draw_folder_tree_with_recent(f: &mut Frame, app: &mut App, area: Rect) {
+    if app.show_recent_files {
+        draw_recent_files_panel(f, app, area);
+    } else {
+        draw_folder_tree(f, app, area);
+    }
 }
 
 fn draw_folder_tree(f: &mut Frame, app: &mut App, area: Rect) {
@@ -503,8 +515,8 @@ fn draw_welcome_screen(f: &mut Frame, app: &App, area: Rect, block: Block) {
             Span::styled("Tab", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
             Span::styled("   Switch panes", TokyoNightTheme::help_text()),
             Span::raw("       "),
-            Span::styled("Ctrl+M", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled(" Toggle preview", TokyoNightTheme::help_text()),
+            Span::styled("Ctrl+P", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(" Live preview", TokyoNightTheme::help_text()),
         ]),
         
         Line::from(""),
@@ -572,6 +584,8 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::Move => "MOVE",
         AppMode::Help => "HELP",
         AppMode::DeleteConfirm => "DELETE?",
+        AppMode::QuickJump => "QUICK JUMP",
+        AppMode::RecentFiles => "RECENT",
     };
 
     let pane_text = match app.focused_pane {
@@ -589,6 +603,8 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::Move => TokyoNightTheme::mode_command(), // Use command style for move mode
         AppMode::Help => TokyoNightTheme::mode_search(), // Use search style for help mode
         AppMode::DeleteConfirm => Style::default().fg(TokyoNightTheme::RED).bg(TokyoNightTheme::BG_HIGHLIGHT).add_modifier(Modifier::BOLD),
+        AppMode::QuickJump => TokyoNightTheme::mode_search(), // Use search style for quick jump
+        AppMode::RecentFiles => TokyoNightTheme::mode_command(), // Use command style for recent files
     };
     
     // Create enhanced message display with operation result feedback
@@ -918,7 +934,7 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from(vec![
             Span::styled("    ", Style::default()),
             Span::styled("Tab    ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Switch between sidebar and editor", TokyoNightTheme::help_text()),
+            Span::styled("   Switch between panes (folders ↔ editor)", TokyoNightTheme::help_text()),
         ]),
         Line::from(vec![
             Span::styled("    ", Style::default()),
@@ -955,8 +971,36 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         ]),
         Line::from(vec![
             Span::styled("    ", Style::default()),
-            Span::styled("Ctrl+M ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Toggle live markdown preview", TokyoNightTheme::help_text()),
+            Span::styled("Ctrl+P/F2", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled("  Toggle live markdown preview", TokyoNightTheme::help_text()),
+        ]),
+        Line::from(""),
+        
+        // Productivity Features
+        Line::from(vec![
+            Span::styled("🚀 ", Style::default().fg(TokyoNightTheme::YELLOW)),
+            Span::styled("Productivity Features", Style::default().fg(TokyoNightTheme::MAGENTA).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("    ", Style::default()),
+            Span::styled("Ctrl+J ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled("   Quick Jump - Fuzzy search & navigate to any note", TokyoNightTheme::help_text()),
+        ]),
+        Line::from(vec![
+            Span::styled("    ", Style::default()),
+            Span::styled("Ctrl+R ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled("   Show recent files list (when no note open)", TokyoNightTheme::help_text()),
+        ]),
+        Line::from(vec![
+            Span::styled("    ", Style::default()),
+            Span::styled("Ctrl+L ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled("   Follow [[wiki-style]] link at cursor", TokyoNightTheme::help_text()),
+        ]),
+        Line::from(vec![
+            Span::styled("    ", Style::default()),
+            Span::styled("u      ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled("   Undo last delete operation (restore from trash)", TokyoNightTheme::help_text()),
         ]),
         Line::from(""),
         
@@ -992,12 +1036,27 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from(vec![
             Span::styled("    ", Style::default()),
             Span::styled("Ctrl+F ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Advanced search with regex & case options", TokyoNightTheme::help_text()),
+            Span::styled("   Fuzzy search mode (smart matching)", TokyoNightTheme::help_text()),
         ]),
         Line::from(vec![
             Span::styled("    ", Style::default()),
-            Span::styled("Ctrl+R ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Find and replace in current note", TokyoNightTheme::help_text()),
+            Span::styled("Tab    ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled("   (in search) Switch between regular/fuzzy search", TokyoNightTheme::help_text()),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("🔄 ", Style::default().fg(TokyoNightTheme::ORANGE)),
+            Span::styled("Advanced Features:", Style::default().fg(TokyoNightTheme::ORANGE).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled("    ", Style::default()),
+            Span::styled("[[links]]", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled("  Wiki-style note linking - auto-detected", TokyoNightTheme::help_text()),
+        ]),
+        Line::from(vec![
+            Span::styled("    ", Style::default()),
+            Span::styled("Auto-save", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled("  Notes are automatically saved when editing", TokyoNightTheme::help_text()),
         ]),
         Line::from(""),
         
@@ -1191,4 +1250,218 @@ fn draw_delete_confirm_dialog(f: &mut Frame, app: &App) {
         .wrap(Wrap { trim: false });
 
     f.render_widget(paragraph, area);
+}
+
+// New UI functions for the latest features
+
+fn draw_recent_files_panel(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!("{} Recent Files", Icons::CLOCK))
+        .border_style(TokyoNightTheme::border_focused());
+
+    let recent_files = app.get_recent_files_display();
+    
+    let items: Vec<ListItem> = recent_files
+        .iter()
+        .enumerate()
+        .map(|(i, (_note_id, title, last_accessed))| {
+            let is_selected = i == app.recent_files_selected;
+            
+            let style = if is_selected {
+                TokyoNightTheme::selected()
+            } else {
+                Style::default().fg(TokyoNightTheme::FG)
+            };
+            
+            let line = Line::from(vec![
+                Span::styled(format!("{}  ", i + 1), Style::default().fg(TokyoNightTheme::COMMENT)),
+                Span::styled(format!("{} ", Icons::NOTE), TokyoNightTheme::note_icon()),
+                Span::styled(title, Style::default().fg(TokyoNightTheme::FG)),
+                Span::styled(format!("  ({})", last_accessed), Style::default().fg(TokyoNightTheme::COMMENT)),
+            ]);
+            
+            ListItem::new(line).style(style)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .style(TokyoNightTheme::normal());
+
+    f.render_widget(list, area);
+}
+
+fn draw_quick_jump_dialog(f: &mut Frame, app: &App) {
+    let area = centered_rect(80, 60, f.area());
+    f.render_widget(Clear, area);
+
+    let _block = Block::default()
+        .title(format!("{} Quick Jump", Icons::SEARCH))
+        .borders(Borders::ALL)
+        .border_style(TokyoNightTheme::border_focused())
+        .style(TokyoNightTheme::popup());
+
+    // Split area for input and results
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // Input box
+            Constraint::Min(5),     // Results
+            Constraint::Length(2),  // Help text
+        ])
+        .split(area);
+
+    // Draw input box
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .title("Search")
+        .border_style(TokyoNightTheme::border_focused());
+
+    let input_text = if app.quick_jump_query.is_empty() {
+        "Type to search notes..."
+    } else {
+        &app.quick_jump_query
+    };
+
+    let input_style = if app.quick_jump_query.is_empty() {
+        Style::default().fg(TokyoNightTheme::COMMENT)
+    } else {
+        Style::default().fg(TokyoNightTheme::FG)
+    };
+
+    let input_paragraph = Paragraph::new(input_text)
+        .block(input_block)
+        .style(input_style);
+
+    f.render_widget(input_paragraph, chunks[0]);
+
+    // Draw results
+    let results_block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!("Results ({})", app.quick_jump_results.len()))
+        .border_style(TokyoNightTheme::border_inactive());
+
+    let results = app.get_quick_jump_results_display();
+    let items: Vec<ListItem> = results
+        .iter()
+        .enumerate()
+        .map(|(i, (_note_id, title, folder))| {
+            let is_selected = i == app.quick_jump_selected;
+            
+            let style = if is_selected {
+                Style::default().fg(TokyoNightTheme::BG).bg(TokyoNightTheme::BLUE)
+            } else {
+                Style::default().fg(TokyoNightTheme::FG)
+            };
+            
+            let line = Line::from(vec![
+                Span::styled(format!("{} ", Icons::NOTE), TokyoNightTheme::note_icon()),
+                Span::styled(title, Style::default().fg(TokyoNightTheme::FG)),
+                Span::styled(format!("  in {}", folder), Style::default().fg(TokyoNightTheme::COMMENT)),
+            ]);
+            
+            ListItem::new(line).style(style)
+        })
+        .collect();
+
+    let results_list = List::new(items)
+        .block(results_block)
+        .style(TokyoNightTheme::normal());
+
+    f.render_widget(results_list, chunks[1]);
+
+    // Draw help text
+    let help_text = "↑↓: Navigate • Enter: Open • Esc: Cancel";
+    let help_paragraph = Paragraph::new(help_text)
+        .style(Style::default().fg(TokyoNightTheme::COMMENT))
+        .alignment(Alignment::Center);
+
+    f.render_widget(help_paragraph, chunks[2]);
+}
+
+fn draw_recent_files_dialog(f: &mut Frame, app: &App) {
+    let area = centered_rect(70, 50, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(format!("{} Recent Files", Icons::CLOCK))
+        .borders(Borders::ALL)
+        .border_style(TokyoNightTheme::border_focused())
+        .style(TokyoNightTheme::popup());
+
+    let recent_files = app.get_recent_files_display();
+    
+    if recent_files.is_empty() {
+        let content = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("No recent files yet.", Style::default().fg(TokyoNightTheme::COMMENT)),
+            ]),
+            Line::from(vec![
+                Span::styled("Open some notes to see them here!", Style::default().fg(TokyoNightTheme::COMMENT)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Press Esc to close", Style::default().fg(TokyoNightTheme::COMMENT)),
+            ]),
+        ];
+        
+        let paragraph = Paragraph::new(content)
+            .block(block)
+            .alignment(Alignment::Center);
+            
+        f.render_widget(paragraph, area);
+    } else {
+        // Split area for list and help
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(5),     // File list
+                Constraint::Length(2),  // Help text
+            ])
+            .split(area);
+
+        let items: Vec<ListItem> = recent_files
+            .iter()
+            .enumerate()
+            .map(|(i, (_note_id, title, last_accessed))| {
+                let is_selected = i == app.recent_files_selected;
+                
+                let style = if is_selected {
+                    Style::default().fg(TokyoNightTheme::BG).bg(TokyoNightTheme::BLUE)
+                } else {
+                    Style::default().fg(TokyoNightTheme::FG)
+                };
+                
+                let line = Line::from(vec![
+                    Span::styled(format!("{}  ", i + 1), Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{} ", Icons::NOTE), TokyoNightTheme::note_icon()),
+                    Span::styled(title, Style::default().fg(TokyoNightTheme::FG)),
+                    Span::styled(format!("  ({})", last_accessed), Style::default().fg(TokyoNightTheme::COMMENT)),
+                ]);
+                
+                ListItem::new(line).style(style)
+            })
+            .collect();
+
+        let files_block = Block::default()
+            .borders(Borders::ALL)
+            .title("Select a file")
+            .border_style(TokyoNightTheme::border_inactive());
+
+        let list = List::new(items)
+            .block(files_block)
+            .style(TokyoNightTheme::normal());
+
+        f.render_widget(list, chunks[0]);
+
+        // Help text
+        let help_text = "↑↓: Navigate • Enter: Open • 1-9: Quick select • Esc: Cancel";
+        let help_paragraph = Paragraph::new(help_text)
+            .style(Style::default().fg(TokyoNightTheme::COMMENT))
+            .alignment(Alignment::Center);
+
+        f.render_widget(help_paragraph, chunks[1]);
+    }
 }
