@@ -17,6 +17,8 @@ pub enum AppMode {
     Move,
     Help,
     DeleteConfirm,
+    QuickJump,
+    RecentFiles,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -110,6 +112,17 @@ pub struct App {
     pub last_operation: Option<String>,
     pub operation_result: Option<OperationResult>,
     pub operation_result_time: Option<std::time::Instant>,
+    
+    // Quick jump and recent files
+    pub quick_jump_query: String,
+    pub quick_jump_results: Vec<Uuid>,
+    pub quick_jump_selected: usize,
+    pub recent_files_selected: usize,
+    pub show_recent_files: bool,
+    
+    // Live preview
+    pub preview_content: String,
+    pub preview_scroll: u16,
 }
 
 impl App {
@@ -164,6 +177,17 @@ impl App {
             last_operation: None,
             operation_result: None,
             operation_result_time: None,
+            
+            // Quick jump and recent files
+            quick_jump_query: String::new(),
+            quick_jump_results: Vec::new(),
+            quick_jump_selected: 0,
+            recent_files_selected: 0,
+            show_recent_files: false,
+            
+            // Live preview
+            preview_content: String::new(),
+            preview_scroll: 0,
         };
         
         // Create default folder structure
@@ -246,10 +270,16 @@ impl App {
     pub fn select_note(&mut self, note_id: Uuid) {
         if let Some(note) = self.notebook.notes.get(&note_id).cloned() {
             self.current_note = Some(note.clone());
-            self.editor_content = note.content;
+            self.editor_content = note.content.clone();
             self.editor_cursor = (0, 0);
             self.editor_scroll = 0;
             self.focused_pane = FocusedPane::Editor;
+            
+            // Track recent file access
+            self.notebook.add_recent_file(note_id);
+            
+            // Update preview if enabled
+            self.update_preview_content();
         }
     }
     
@@ -365,6 +395,9 @@ impl App {
             self.notebook.notes.insert(updated_note.id, updated_note.clone());
             self.current_note = Some(updated_note);
             self.refresh_tree_view();
+            
+            // Update preview content
+            self.update_preview_content();
             
             self.mark_saved();
             self.set_operation_success("Note saved successfully".to_string(), Some("💾".to_string()));
@@ -514,6 +547,295 @@ impl App {
     pub fn clear_search_history(&mut self) {
         self.enhanced_search.clear_history();
         self.set_message("Search history cleared".to_string());
+    }
+
+    // New fuzzy search method
+    pub fn fuzzy_search_notes(&mut self, query: String) {
+        let results = self.notebook.fuzzy_search_notes(&query);
+        
+        if !results.is_empty() {
+            // Convert to search results format for compatibility
+            self.search_results = results.iter().map(|(note, _score)| (*note).clone()).collect();
+            
+            // Extract needed data before mutable operations
+            let first_note_id = results[0].0.id;
+            let first_note_title = results[0].0.title.clone();
+            let first_score = results[0].1;
+            let results_count = results.len();
+            
+            // Automatically navigate to and open the first search result
+            self.open_note_by_id(first_note_id);
+            self.set_operation_success(
+                format!("Found {} notes for '{}' - Opened: '{}' (score: {})", 
+                    results_count, query, first_note_title, first_score),
+                Some("🔍".to_string())
+            );
+        } else {
+            self.search_results.clear();
+            self.set_operation_error(
+                format!("No fuzzy matches found for '{}'", query),
+                Some("❓".to_string())
+            );
+        }
+    }
+
+    // Undo delete functionality
+    pub fn undo_last_delete(&mut self) -> Result<(), String> {
+        match self.notebook.undo_last_delete() {
+            Ok(message) => {
+                self.refresh_tree_view();
+                self.set_operation_success(message, Some("↩️".to_string()));
+                Ok(())
+            }
+            Err(message) => {
+                self.set_operation_error(message.clone(), Some("❌".to_string()));
+                Err(message)
+            }
+        }
+    }
+
+    // Note linking functionality
+    pub fn parse_current_note_links(&mut self) {
+        if let Some(ref note) = self.current_note {
+            let note_id = note.id;
+            self.notebook.parse_links_in_note(note_id);
+        }
+    }
+
+    pub fn follow_link_at_cursor(&mut self) -> Result<(), String> {
+        if let Some(ref _note) = self.current_note {
+            // Simple implementation: find [[...]] pattern around cursor
+            let cursor_pos = (self.editor_cursor.0 as usize) * self.editor_content.lines().count().max(1) + self.editor_cursor.1 as usize;
+            
+            if let Some(link_title) = self.extract_link_at_position(cursor_pos) {
+                if let Some(target_id) = self.notebook.find_note_by_title(&link_title) {
+                    self.open_note_by_id(target_id);
+                    self.set_operation_success(
+                        format!("Followed link to: {}", link_title),
+                        Some("🔗".to_string())
+                    );
+                    Ok(())
+                } else {
+                    // Offer to create the note
+                    self.set_operation_error(
+                        format!("Note '{}' not found. Press Ctrl+N to create it.", link_title),
+                        Some("🔍".to_string())
+                    );
+                    Err(format!("Note '{}' not found", link_title))
+                }
+            } else {
+                Err("No link found at cursor position".to_string())
+            }
+        } else {
+            Err("No note currently open".to_string())
+        }
+    }
+
+    fn extract_link_at_position(&self, pos: usize) -> Option<String> {
+        use regex::Regex;
+        
+        let link_regex = Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
+        
+        for mat in link_regex.find_iter(&self.editor_content) {
+            if pos >= mat.start() && pos <= mat.end() {
+                if let Some(cap) = link_regex.captures(&self.editor_content[mat.start()..mat.end()]) {
+                    if let Some(title) = cap.get(1) {
+                        return Some(title.as_str().to_string());
+                    }
+                }
+            }
+        }
+        
+        None
+    }
+
+    pub fn get_backlinks_for_current_note(&self) -> Vec<String> {
+        if let Some(ref note) = self.current_note {
+            self.notebook.get_backlinks(note.id)
+                .iter()
+                .filter_map(|link| {
+                    self.notebook.notes.get(&link.source_note_id)
+                        .map(|source_note| source_note.title.clone())
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn get_outgoing_links_for_current_note(&self) -> Vec<String> {
+        if let Some(ref note) = self.current_note {
+            self.notebook.get_outgoing_links(note.id)
+                .iter()
+                .map(|link| link.target_note_title.clone())
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    // Recent Files functionality
+    pub fn toggle_recent_files(&mut self) {
+        self.show_recent_files = !self.show_recent_files;
+        if self.show_recent_files {
+            self.recent_files_selected = 0;
+        }
+    }
+
+    pub fn get_recent_files_display(&self) -> Vec<(Uuid, String, String)> {
+        self.notebook.get_recent_files()
+            .iter()
+            .filter_map(|rf| {
+                self.notebook.notes.get(&rf.note_id)
+                    .map(|note| (
+                        rf.note_id,
+                        note.title.clone(),
+                        rf.last_accessed.format("%m/%d %H:%M").to_string()
+                    ))
+            })
+            .collect()
+    }
+
+    pub fn select_recent_file(&mut self, index: usize) {
+        let recent_files = self.get_recent_files_display();
+        if let Some((note_id, _, _)) = recent_files.get(index) {
+            self.open_note_by_id(*note_id);
+            self.show_recent_files = false;
+        }
+    }
+
+    // Quick Jump functionality
+    pub fn start_quick_jump(&mut self) {
+        self.mode = AppMode::QuickJump;
+        self.quick_jump_query.clear();
+        self.quick_jump_selected = 0;
+        self.update_quick_jump_results();
+    }
+
+    pub fn update_quick_jump_results(&mut self) {
+        if self.quick_jump_query.is_empty() {
+            // Show recent files when no query
+            self.quick_jump_results = self.notebook.get_recent_files()
+                .iter()
+                .map(|rf| rf.note_id)
+                .collect();
+        } else {
+            // Use fuzzy search
+            let results = self.notebook.fuzzy_search_notes(&self.quick_jump_query);
+            self.quick_jump_results = results.iter()
+                .map(|(note, _score)| note.id)
+                .collect();
+        }
+        
+        // Reset selection
+        self.quick_jump_selected = 0;
+    }
+
+    pub fn quick_jump_navigate_up(&mut self) {
+        if self.quick_jump_selected > 0 {
+            self.quick_jump_selected -= 1;
+        }
+    }
+
+    pub fn quick_jump_navigate_down(&mut self) {
+        if self.quick_jump_selected < self.quick_jump_results.len().saturating_sub(1) {
+            self.quick_jump_selected += 1;
+        }
+    }
+
+    pub fn quick_jump_select(&mut self) {
+        if let Some(&note_id) = self.quick_jump_results.get(self.quick_jump_selected) {
+            self.open_note_by_id(note_id);
+            self.mode = AppMode::Normal;
+            self.quick_jump_query.clear();
+        }
+    }
+
+    pub fn cancel_quick_jump(&mut self) {
+        self.mode = AppMode::Normal;
+        self.quick_jump_query.clear();
+    }
+
+    pub fn get_quick_jump_results_display(&self) -> Vec<(Uuid, String, String)> {
+        self.quick_jump_results.iter()
+            .filter_map(|&note_id| {
+                self.notebook.notes.get(&note_id)
+                    .map(|note| {
+                        let folder_name = if let Some(folder_id) = note.folder_id {
+                            self.notebook.folders.get(&folder_id)
+                                .map(|f| f.name.clone())
+                                .unwrap_or_else(|| "Unknown".to_string())
+                        } else {
+                            "Root".to_string()
+                        };
+                        (note_id, note.title.clone(), folder_name)
+                    })
+            })
+            .collect()
+    }
+
+    // Live Preview functionality
+    pub fn update_preview_content(&mut self) {
+        if self.preview_enabled {
+            self.preview_content = self.render_markdown_preview(&self.editor_content);
+        }
+    }
+
+    fn render_markdown_preview(&self, content: &str) -> String {
+        // Simple markdown-to-text conversion for now
+        // In the future, this could use pulldown-cmark for proper rendering
+        content.lines()
+            .map(|line| {
+                if line.starts_with("# ") {
+                    format!("▉ {}", &line[2..])
+                } else if line.starts_with("## ") {
+                    format!("▊ {}", &line[3..])
+                } else if line.starts_with("### ") {
+                    format!("▋ {}", &line[4..])
+                } else if line.starts_with("- ") || line.starts_with("* ") {
+                    format!("• {}", &line[2..])
+                } else if line.starts_with("> ") {
+                    format!("│ {}", &line[2..])
+                } else if line.starts_with("```") {
+                    "┌─────────────────────────────────────┐".to_string()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn preview_scroll_up(&mut self) {
+        self.preview_scroll = self.preview_scroll.saturating_sub(1);
+    }
+
+    pub fn preview_scroll_down(&mut self) {
+        self.preview_scroll = self.preview_scroll.saturating_add(1);
+    }
+
+    // Welcome page functionality
+    pub fn set_welcome_message(&mut self) {
+        let note_count = self.notebook.notes.len();
+        let folder_count = self.notebook.folders.len();
+        
+        if note_count == 0 {
+            self.set_message("Welcome to Scribble! Press 'n' to create your first note or '?' for help".to_string());
+        } else {
+            self.set_message(format!(
+                "Welcome back! Loaded {} notes across {} folders. Press 'n' for new note, '?' for help", 
+                note_count, folder_count
+            ));
+        }
+        
+        // Start with focus on the folder tree to encourage exploration
+        self.focused_pane = FocusedPane::Folders;
+        
+        // Clear any selected note - show welcome in editor pane
+        self.current_note = None;
+        self.editor_content.clear();
+        self.editor_cursor = (0, 0);
+        self.editor_scroll = 0;
     }
 
     pub fn navigate_up(&mut self) {

@@ -15,6 +15,8 @@ pub fn handle_event(app: &mut App, event: Event) -> Result<(), Box<dyn std::erro
             AppMode::Move => handle_move_mode(app, key),
             AppMode::Help => handle_help_mode(app, key),
             AppMode::DeleteConfirm => handle_delete_confirm_mode(app, key),
+            AppMode::QuickJump => handle_quick_jump_mode(app, key),
+            AppMode::RecentFiles => handle_recent_files_mode(app, key),
         }
     }
     Ok(())
@@ -23,6 +25,11 @@ pub fn handle_event(app: &mut App, event: Event) -> Result<(), Box<dyn std::erro
 fn handle_normal_mode(app: &mut App, key: KeyEvent) {
     
     match key.code {
+        // Quick jump (Ctrl+J) - check this BEFORE basic j navigation
+        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.start_quick_jump();
+        }
+        
         // Navigation
         KeyCode::Char('j') | KeyCode::Down => {
             if (app.focused_pane == FocusedPane::Editor || app.focused_pane == FocusedPane::Preview) && app.current_note.is_some() {
@@ -155,16 +162,17 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             app.start_move_item();
         }
         
-        // Search
+        // Search (regular search)
         KeyCode::Char('/') => {
             app.mode = AppMode::Search;
             app.input_buffer.clear();
         }
         
-        // Advanced search (Ctrl+F)
+        // Fuzzy search (Ctrl+F - replaces advanced search)
         KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.mode = AppMode::SearchAdvanced;
+            app.mode = AppMode::Search; // Use same search mode but will trigger fuzzy search
             app.input_buffer.clear();
+            app.set_message("Fuzzy search mode - type to search".to_string());
         }
         
         // Search and replace (Ctrl+R)
@@ -190,8 +198,11 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             }
         }
         
-        // Toggle markdown preview (Ctrl+M)
-        KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        // Toggle markdown preview (Ctrl+P or F2)
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.toggle_preview();
+        }
+        KeyCode::F(2) => {
             app.toggle_preview();
         }
         
@@ -222,6 +233,26 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         // Quit
         KeyCode::Char('q') => app.quit(),
         
+        // Undo last delete
+        KeyCode::Char('u') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Err(e) = app.undo_last_delete() {
+                app.set_message(e);
+            }
+        }
+        
+        // Follow link at cursor (Ctrl+L or Enter on a link)
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Err(e) = app.follow_link_at_cursor() {
+                app.set_message(e);
+            }
+        }
+        
+        // Recent files (Ctrl+R)
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) && !app.current_note.is_some() => {
+            app.toggle_recent_files();
+        }
+        
+        
         // Help
         KeyCode::Char('?') => {
             app.mode = AppMode::Help;
@@ -242,6 +273,8 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                 if let Err(e) = app.save_current_note() {
                     app.set_message(e);
                 }
+                // Parse links when exiting insert mode
+                app.parse_current_note_links();
             }
         }
         
@@ -249,9 +282,8 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
             if app.autocomplete_state.active {
                 app.apply_autocomplete();
             } else {
-                app.editor_content.push_str("    "); // 4 spaces
+                insert_str_at_cursor(app, "    "); // 4 spaces
                 app.mark_modified();
-                update_cursor_position(app);
                 app.update_autocompletion();
             }
         }
@@ -262,6 +294,13 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
             } else {
                 if app.editor_cursor.0 > 0 {
                     app.editor_cursor.0 -= 1;
+                    // Ensure cursor column doesn't exceed the new line length
+                    let lines: Vec<&str> = app.editor_content.lines().collect();
+                    if let Some(current_line) = lines.get(app.editor_cursor.0 as usize) {
+                        if app.editor_cursor.1 > current_line.len() as u16 {
+                            app.editor_cursor.1 = current_line.len() as u16;
+                        }
+                    }
                     app.adjust_scroll_to_cursor();
                 }
             }
@@ -271,9 +310,15 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
             if app.autocomplete_state.active {
                 app.next_autocomplete_suggestion();
             } else {
-                let lines = app.editor_content.lines().count() as u16;
-                if app.editor_cursor.0 < lines.saturating_sub(1) {
+                let lines: Vec<&str> = app.editor_content.lines().collect();
+                if app.editor_cursor.0 < (lines.len() as u16).saturating_sub(1) {
                     app.editor_cursor.0 += 1;
+                    // Ensure cursor column doesn't exceed the new line length
+                    if let Some(current_line) = lines.get(app.editor_cursor.0 as usize) {
+                        if app.editor_cursor.1 > current_line.len() as u16 {
+                            app.editor_cursor.1 = current_line.len() as u16;
+                        }
+                    }
                     app.adjust_scroll_to_cursor();
                 }
             }
@@ -287,7 +332,7 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                             app.set_message(e);
                         }
                     }
-                    'm' => {
+                    'p' => {
                         app.toggle_preview();
                     }
                     'u' => {
@@ -299,10 +344,10 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                     _ => {}
                 }
             } else {
-                app.editor_content.push(c);
+                insert_char_at_cursor(app, c);
                 app.mark_modified();
-                update_cursor_position(app);
                 app.update_autocompletion();
+                app.update_preview_content(); // Update preview as we type
             }
         }
         
@@ -310,22 +355,21 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
             if app.autocomplete_state.active {
                 app.apply_autocomplete();
             } else {
-                app.editor_content.push('\n');
+                insert_char_at_cursor(app, '\n');
                 app.mark_modified();
                 app.editor_cursor.0 += 1;
                 app.editor_cursor.1 = 0;
                 app.adjust_scroll_to_cursor();
                 app.update_autocompletion();
+                app.update_preview_content();
             }
         }
         
         KeyCode::Backspace => {
-            if !app.editor_content.is_empty() {
-                app.editor_content.pop();
-                app.mark_modified();
-                update_cursor_position(app);
-                app.update_autocompletion();
-            }
+            delete_char_before_cursor(app);
+            app.mark_modified();
+            app.update_autocompletion();
+            app.update_preview_content();
         }
         
         // Page Up/Down scrolling in insert mode
@@ -354,6 +398,11 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
             }
         }
         
+        // Function keys work in insert mode too
+        KeyCode::F(2) => {
+            app.toggle_preview();
+        }
+        
         _ => {}
     }
 }
@@ -367,10 +416,28 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) {
         
         KeyCode::Enter => {
             if !app.input_buffer.is_empty() {
-                app.search_notes(app.input_buffer.clone());
+                // Check if we're in fuzzy search mode (triggered by Ctrl+F)
+                if app.status_message.contains("Fuzzy search mode") {
+                    app.fuzzy_search_notes(app.input_buffer.clone());
+                } else {
+                    app.search_notes(app.input_buffer.clone());
+                }
             }
             app.mode = AppMode::Normal;
             app.input_buffer.clear();
+        }
+        
+        KeyCode::Tab => {
+            // Tab switches between regular and fuzzy search
+            if !app.input_buffer.is_empty() {
+                if app.status_message.contains("Fuzzy search mode") {
+                    app.search_notes(app.input_buffer.clone());
+                    app.set_message("Regular search mode - type to search".to_string());
+                } else {
+                    app.fuzzy_search_notes(app.input_buffer.clone());
+                    app.set_message("Fuzzy search mode - type to search".to_string());
+                }
+            }
         }
         
         KeyCode::Char(c) => {
@@ -502,17 +569,65 @@ fn handle_input_folder_mode(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn update_cursor_position(app: &mut App) {
+
+fn get_cursor_byte_index(app: &App) -> usize {
     let lines: Vec<&str> = app.editor_content.lines().collect();
-    let current_line_index = app.editor_cursor.0 as usize;
+    let mut byte_index = 0;
     
-    if current_line_index < lines.len() {
-        let current_line = lines[current_line_index];
-        app.editor_cursor.1 = current_line.len() as u16;
-    } else {
-        // We're at the end, position cursor after the last line
-        app.editor_cursor.0 = lines.len() as u16;
-        app.editor_cursor.1 = 0;
+    // Add up all the characters from previous lines
+    for (i, line) in lines.iter().enumerate() {
+        if i < app.editor_cursor.0 as usize {
+            byte_index += line.len() + 1; // +1 for the newline character
+        } else {
+            break;
+        }
+    }
+    
+    // Add the column position within the current line
+    if let Some(current_line) = lines.get(app.editor_cursor.0 as usize) {
+        byte_index += (app.editor_cursor.1 as usize).min(current_line.len());
+    }
+    
+    // Make sure we don't exceed the content length
+    byte_index.min(app.editor_content.len())
+}
+
+fn insert_char_at_cursor(app: &mut App, c: char) {
+    let cursor_index = get_cursor_byte_index(app);
+    app.editor_content.insert(cursor_index, c);
+    
+    // Move cursor forward
+    app.editor_cursor.1 += 1;
+}
+
+fn insert_str_at_cursor(app: &mut App, s: &str) {
+    let cursor_index = get_cursor_byte_index(app);
+    app.editor_content.insert_str(cursor_index, s);
+    
+    // Move cursor forward by the length of inserted string
+    app.editor_cursor.1 += s.len() as u16;
+}
+
+fn delete_char_before_cursor(app: &mut App) {
+    if app.editor_content.is_empty() {
+        return;
+    }
+    
+    let cursor_index = get_cursor_byte_index(app);
+    if cursor_index > 0 {
+        app.editor_content.remove(cursor_index - 1);
+        
+        // Move cursor back
+        if app.editor_cursor.1 > 0 {
+            app.editor_cursor.1 -= 1;
+        } else if app.editor_cursor.0 > 0 {
+            // We deleted a newline, move to end of previous line
+            app.editor_cursor.0 -= 1;
+            let lines: Vec<&str> = app.editor_content.lines().collect();
+            if let Some(prev_line) = lines.get(app.editor_cursor.0 as usize) {
+                app.editor_cursor.1 = prev_line.len() as u16;
+            }
+        }
     }
 }
 
@@ -688,5 +803,72 @@ fn handle_delete_confirm_mode(app: &mut App, key: KeyEvent) {
         _ => {
             app.cancel_delete();
         }
+    }
+}
+
+fn handle_quick_jump_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.cancel_quick_jump();
+        }
+        
+        KeyCode::Enter => {
+            app.quick_jump_select();
+        }
+        
+        KeyCode::Up => {
+            app.quick_jump_navigate_up();
+        }
+        
+        KeyCode::Down => {
+            app.quick_jump_navigate_down();
+        }
+        
+        KeyCode::Char(c) => {
+            app.quick_jump_query.push(c);
+            app.update_quick_jump_results();
+        }
+        
+        KeyCode::Backspace => {
+            app.quick_jump_query.pop();
+            app.update_quick_jump_results();
+        }
+        
+        _ => {}
+    }
+}
+
+fn handle_recent_files_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.show_recent_files = false;
+        }
+        
+        KeyCode::Enter => {
+            app.select_recent_file(app.recent_files_selected);
+        }
+        
+        KeyCode::Up => {
+            if app.recent_files_selected > 0 {
+                app.recent_files_selected -= 1;
+            }
+        }
+        
+        KeyCode::Down => {
+            let max_index = app.get_recent_files_display().len().saturating_sub(1);
+            if app.recent_files_selected < max_index {
+                app.recent_files_selected += 1;
+            }
+        }
+        
+        // Numbers for quick selection
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            if let Some(digit) = c.to_digit(10) {
+                let index = (digit as usize).saturating_sub(1);
+                app.select_recent_file(index);
+            }
+        }
+        
+        _ => {}
     }
 }

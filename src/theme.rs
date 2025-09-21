@@ -267,6 +267,7 @@ impl Icons {
     pub const EDITOR: &'static str = "▣";
     pub const PREVIEW: &'static str = "◈";
     pub const SEARCH: &'static str = "◉";
+    pub const CLOCK: &'static str = "◷";
     
     // Navigation
     pub const BREADCRUMB_SEPARATOR: &'static str = "▸";
