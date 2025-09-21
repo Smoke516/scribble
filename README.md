@@ -20,7 +20,7 @@ A powerful terminal-based note-taking app with folder organization, markdown sup
 ### 🚀 Productivity Features
 - **🔍 Fuzzy Search** - Intelligent search that finds matches even with typos (`Ctrl+F`)
 - **⚡ Quick Jump** - Instant note navigation with `Ctrl+J` - like VS Code's quick open
-- **📋 Recent Files** - Quick access to recently opened notes (`Ctrl+R`)
+- **📋 Recent Files** - Quick access to recently opened notes (`Ctrl+O`)
 - **👁️ Live Preview** - Real-time markdown preview in split-screen mode (`Ctrl+P`)
 - **↩️ Undo/Delete Safety** - Safely delete with full undo capability (`u` to undo)
 - **🔗 Note Linking** - Wiki-style `[[Note Title]]` links between notes (`Ctrl+L` to follow)
@@ -133,7 +133,7 @@ cargo run
 | `Ctrl+F` | Fuzzy search mode |
 | `Tab` (in search) | Switch between regular and fuzzy search |
 | `Ctrl+J` | Quick Jump - fuzzy search all notes |
-| `Ctrl+R` | Show recent files |
+| `Ctrl+O` | Show recent files |
 | `u` | Undo last delete |
 | `Ctrl+L` | Follow link at cursor |
 | `?` | Show help message |

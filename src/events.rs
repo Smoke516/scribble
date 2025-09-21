@@ -247,8 +247,8 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             }
         }
         
-        // Recent files (Ctrl+R)
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) && !app.current_note.is_some() => {
+        // Recent files (Ctrl+O)
+        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.toggle_recent_files();
         }
         

@@ -989,8 +989,8 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         ]),
         Line::from(vec![
             Span::styled("    ", Style::default()),
-            Span::styled("Ctrl+R ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Show recent files list (when no note open)", TokyoNightTheme::help_text()),
+            Span::styled("Ctrl+O ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled("   Show recent files list", TokyoNightTheme::help_text()),
         ]),
         Line::from(vec![
             Span::styled("    ", Style::default()),
