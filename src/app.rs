@@ -676,8 +676,14 @@ impl App {
 
     // Recent Files functionality
     pub fn toggle_recent_files(&mut self) {
-        self.show_recent_files = !self.show_recent_files;
         if self.show_recent_files {
+            // If already showing, turn off and return to normal
+            self.show_recent_files = false;
+            self.mode = AppMode::Normal;
+        } else {
+            // Show recent files and enter RecentFiles mode
+            self.show_recent_files = true;
+            self.mode = AppMode::RecentFiles;
             self.recent_files_selected = 0;
         }
     }
@@ -701,6 +707,7 @@ impl App {
         if let Some((note_id, _, _)) = recent_files.get(index) {
             self.open_note_by_id(*note_id);
             self.show_recent_files = false;
+            self.mode = AppMode::Normal;
         }
     }
 
