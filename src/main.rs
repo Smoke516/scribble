@@ -10,6 +10,11 @@ mod theme;
 mod ui;
 
 use app::App;
+use std::env;
+
+// Version information from Cargo.toml
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event},
     execute,
@@ -22,6 +27,26 @@ use std::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Handle command line arguments
+    let args: Vec<String> = env::args().collect();
+    for arg in &args[1..] {
+        match arg.as_str() {
+            "--version" | "-v" => {
+                println!("{} {}", PKG_NAME, VERSION);
+                return Ok(());
+            }
+            "--help" | "-h" => {
+                print_help();
+                return Ok(());
+            }
+            _ => {
+                eprintln!("Unknown argument: {}", arg);
+                eprintln!("Use --help for usage information");
+                std::process::exit(1);
+            }
+        }
+    }
+    
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -99,4 +124,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     terminal.show_cursor()?;
 
     result
+}
+
+fn print_help() {
+    println!("{}  v{}\n", PKG_NAME, VERSION);
+    println!("A powerful terminal-based note-taking app with folder organization,");
+    println!("markdown support, and syntax highlighting.\n");
+    println!("USAGE:");
+    println!("    {}              Start the application", PKG_NAME);
+    println!("    {} --version     Show version information", PKG_NAME);
+    println!("    {} --help        Show this help message\n", PKG_NAME);
+    println!("FEATURES:");
+    println!("  • 📝 Rich markdown editing with live preview");
+    println!("  • 🗂️  Hierarchical folder organization");
+    println!("  • 🔍 Fuzzy search and quick jump navigation");
+    println!("  • 🔗 Wiki-style [[note linking]]");
+    println!("  • ⚡ Auto-save and intelligent autocompletion");
+    println!("  • 🎨 Beautiful Tokyo Night theme");
+    println!("  • 🚀 Vim-inspired keybindings\n");
+    println!("Once started, press '?' for in-app help.");
 }

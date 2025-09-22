@@ -1,10 +1,12 @@
-# Scribble ✏️
+# Scribble ✏️ v1.0.0
 
 A powerful terminal-based note-taking app with folder organization, markdown support, and syntax highlighting.
 
+![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)
 ![Terminal Interface](https://img.shields.io/badge/interface-terminal-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)
+![Language](https://img.shields.io/badge/language-Rust-orange)
 
 ## Features
 
@@ -25,13 +27,18 @@ A powerful terminal-based note-taking app with folder organization, markdown sup
 - **↩️ Undo/Delete Safety** - Safely delete with full undo capability (`u` to undo)
 - **🔗 Note Linking** - Wiki-style `[[Note Title]]` links between notes (`Ctrl+L` to follow)
 - **💾 Session Persistence** - Remembers your last opened note and editor state
+- **🆔 Version Display** - Always know what version you're running (`--version` or in-app help)
+- **🎯 Smart Autocompletion** - Intelligent markdown completion with context awareness
+- **🏷️ Enhanced Help System** - Comprehensive in-app help with organized shortcuts (`?`)
 
 ### Interface
 - **Tokyo Night theme** - Beautiful dark theme with carefully chosen colors
 - **Two-pane layout** - Left pane for folder/note navigation, right pane for editing
 - **Clean, responsive UI** - Works beautifully in any terminal size
+- **Enhanced Welcome Screen** - Professional onboarding with organized quick-start guide
 - **Multiple modes** - Normal, Insert, Search, and Command modes like in Vim
 - **Real-time updates** - See your changes reflected immediately
+- **Version-aware Interface** - Always shows current version in help and welcome screens
 
 ## 🎬 Demo
 
@@ -80,9 +87,55 @@ cargo build --release
 cargo install --path .
 ```
 
+### Verify Installation
+```bash
+# Check version
+scribble --version
+# Output: scribble 1.0.0
+
+# View help
+scribble --help
+```
+
 ### Run without installing
 ```bash
 cargo run
+```
+
+## Command Line Options
+
+Scribble supports several command line options:
+
+```bash
+scribble              # Start the application
+scribble --version    # Show version information  
+scribble -v           # Show version (short form)
+scribble --help       # Show detailed help
+scribble -h           # Show help (short form)
+```
+
+### Command Line Help Output
+```
+scribble v1.0.0
+
+A powerful terminal-based note-taking app with folder organization,
+markdown support, and syntax highlighting.
+
+USAGE:
+    scribble              Start the application
+    scribble --version    Show version information
+    scribble --help       Show this help message
+
+FEATURES:
+  • 📝 Rich markdown editing with live preview
+  • 🗂️  Hierarchical folder organization
+  • 🔍 Fuzzy search and quick jump navigation
+  • 🔗 Wiki-style [[note linking]]
+  • ⚡ Auto-save and intelligent autocompletion
+  • 🎨 Beautiful Tokyo Night theme
+  • 🚀 Vim-inspired keybindings
+
+Once started, press '?' for in-app help.
 ```
 
 ## Quick Start
@@ -93,17 +146,24 @@ cargo run
    ```
 
 2. **First time setup:**
-   - The app starts with some default folders and a welcome note
+   - The app starts with an enhanced welcome screen showing version 1.0.0
+   - The welcome screen provides organized quick-start categories:
+     - 📝 **Creating Content**: `n` (new note), `f` (folder), `i` (edit)
+     - 🧭 **Navigation**: `Tab` (switch panes), `j/k` (move), `Enter` (open)
+     - 🔍 **Essential Tools**: `/` (search), `Ctrl+P` (preview), `?` (help)
    - Use `j/k` or arrow keys to navigate the folder tree
 
 3. **Create your first note:**
    - Press `n` to create a new note
    - Enter insert mode automatically and start writing in markdown
+   - Press `Ctrl+P` to see live preview while editing
 
 4. **Navigate and organize:**
    - Press `f` to create a new folder
    - Use `Enter` to open notes or expand/collapse folders
    - Press `Tab` to switch between panes
+   - Try `Ctrl+J` for instant note jumping
+   - Use `Ctrl+O` to access recent files
 
 5. **Use external editor:**
    - Press `e` to open the current note in your external editor
@@ -126,17 +186,17 @@ cargo run
 | `e` | Open note in external editor |
 | `Esc` | Return to normal mode |
 
-### Search and Navigation
+### 🚀 Productivity & Navigation
 | Key | Action |
 |-----|--------|
 | `/` | Search notes by content or title (regular search) |
-| `Ctrl+F` | Fuzzy search mode |
+| `Ctrl+F` | Fuzzy search mode - intelligent search with typo tolerance |
 | `Tab` (in search) | Switch between regular and fuzzy search |
-| `Ctrl+J` | Quick Jump - fuzzy search all notes |
-| `Ctrl+O` | Show recent files |
-| `u` | Undo last delete |
-| `Ctrl+L` | Follow link at cursor |
-| `?` | Show help message |
+| `Ctrl+J` | Quick Jump - instant fuzzy search across all notes |
+| `Ctrl+O` | Recent files - quick access to recently opened notes |
+| `Ctrl+L` | Follow [[wiki-style]] link at cursor |
+| `u` | Undo last delete operation (restore from trash) |
+| `?` | Show comprehensive help with all shortcuts |
 
 ### Live Preview
 | Key | Action |
