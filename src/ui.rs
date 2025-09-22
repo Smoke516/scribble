@@ -1,6 +1,7 @@
 use crate::app::{App, AppMode, FocusedPane, TreeItemType};
 use crate::syntax::simple_markdown_highlight;
 use crate::theme::{TokyoNightTheme, Icons};
+use crate::{VERSION, PKG_NAME};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -433,6 +434,12 @@ fn draw_welcome_screen(f: &mut Frame, app: &App, area: Rect, block: Block) {
                 .fg(TokyoNightTheme::FG_DARK)
                 .add_modifier(Modifier::ITALIC)),
         ]),
+        Line::from(vec![
+            Span::raw(" ".repeat(left_padding as usize)),
+            Span::styled(format!("Version {}", VERSION), Style::default()
+                .fg(TokyoNightTheme::COMMENT)
+                .add_modifier(Modifier::ITALIC)),
+        ]),
         
         Line::from(""),
         Line::from(""),
@@ -493,30 +500,67 @@ fn draw_welcome_screen(f: &mut Frame, app: &App, area: Rect, block: Block) {
         ]),
         Line::from(""),
         
-        // Professional key shortcuts layout
+        // Clean organized shortcuts with consistent spacing
         Line::from(vec![
             Span::raw(" ".repeat(left_padding as usize + 2)),
-            Span::styled("n", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled("     Create new note", TokyoNightTheme::help_text()),
-            Span::raw("        "),
-            Span::styled("f", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled("     Create folder", TokyoNightTheme::help_text()),
+            Span::styled("📝 Creating Content", Style::default().fg(TokyoNightTheme::GREEN).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
-            Span::raw(" ".repeat(left_padding as usize + 2)),
-            Span::styled("/", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled("     Search notes", TokyoNightTheme::help_text()),
-            Span::raw("         "),
-            Span::styled("?", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled("     Show help", TokyoNightTheme::help_text()),
+            Span::raw(" ".repeat(left_padding as usize + 4)),
+            Span::styled("n      ", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled("Create new note", TokyoNightTheme::help_text()),
         ]),
         Line::from(vec![
+            Span::raw(" ".repeat(left_padding as usize + 4)),
+            Span::styled("f      ", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled("Create folder", TokyoNightTheme::help_text()),
+        ]),
+        Line::from(vec![
+            Span::raw(" ".repeat(left_padding as usize + 4)),
+            Span::styled("i      ", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled("Start editing (insert mode)", TokyoNightTheme::help_text()),
+        ]),
+        Line::from(""),
+        
+        Line::from(vec![
             Span::raw(" ".repeat(left_padding as usize + 2)),
-            Span::styled("Tab", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled("   Switch panes", TokyoNightTheme::help_text()),
-            Span::raw("       "),
-            Span::styled("Ctrl+P", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled(" Live preview", TokyoNightTheme::help_text()),
+            Span::styled("🧭 Navigation", Style::default().fg(TokyoNightTheme::PURPLE).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::raw(" ".repeat(left_padding as usize + 4)),
+            Span::styled("Tab    ", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled("Switch between panes", TokyoNightTheme::help_text()),
+        ]),
+        Line::from(vec![
+            Span::raw(" ".repeat(left_padding as usize + 4)),
+            Span::styled("j/k    ", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled("Move up/down", TokyoNightTheme::help_text()),
+        ]),
+        Line::from(vec![
+            Span::raw(" ".repeat(left_padding as usize + 4)),
+            Span::styled("Enter  ", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled("Open note/folder", TokyoNightTheme::help_text()),
+        ]),
+        Line::from(""),
+        
+        Line::from(vec![
+            Span::raw(" ".repeat(left_padding as usize + 2)),
+            Span::styled("🔍 Essential Tools", Style::default().fg(TokyoNightTheme::ORANGE).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::raw(" ".repeat(left_padding as usize + 4)),
+            Span::styled("/      ", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled("Search notes", TokyoNightTheme::help_text()),
+        ]),
+        Line::from(vec![
+            Span::raw(" ".repeat(left_padding as usize + 4)),
+            Span::styled("Ctrl+P ", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled("Toggle live preview", TokyoNightTheme::help_text()),
+        ]),
+        Line::from(vec![
+            Span::raw(" ".repeat(left_padding as usize + 4)),
+            Span::styled("?      ", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled("Show complete help", TokyoNightTheme::help_text()),
         ]),
         
         Line::from(""),
@@ -870,7 +914,7 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title("❓ Help - Scribble")
+        .title(format!("❓ Help - {} v{}", PKG_NAME, VERSION))
         .borders(Borders::ALL)
         .border_style(TokyoNightTheme::border_focused())
         .style(TokyoNightTheme::popup());
@@ -1091,6 +1135,10 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         // System Info
         Line::from(Span::styled("─".repeat(70), Style::default().fg(TokyoNightTheme::FG_GUTTER))),
         Line::from(""),
+        Line::from(vec![
+            Span::styled("🏷️ Version: ", Style::default().fg(TokyoNightTheme::COMMENT)),
+            Span::styled(format!("{} v{}", PKG_NAME, VERSION), Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+        ]),
         Line::from(vec![
             Span::styled("🔧 System: ", Style::default().fg(TokyoNightTheme::COMMENT)),
             Span::styled(&editor_info, Style::default().fg(TokyoNightTheme::FG_DARK)),
