@@ -495,7 +495,11 @@ fn execute_command(app: &mut App, command: &str) {
         }
         "export" => {
             match app.export_all_notes() {
-                Ok(_) => app.set_operation_success("All notes exported successfully".to_string(), Some("📦".to_string())),
+                Ok(_) => {
+                    let storage = crate::storage::Storage::new().unwrap();
+                    let export_path = storage.get_notes_dir();
+                    app.set_operation_success(format!("All notes exported to {:?}", export_path), Some("📦".to_string()));
+                },
                 Err(e) => app.set_operation_error(format!("Export failed: {}", e), Some("🚨".to_string())),
             }
         },
@@ -504,6 +508,29 @@ fn execute_command(app: &mut App, command: &str) {
                 Ok(_) => app.set_operation_success("Backup created successfully".to_string(), Some("💾".to_string())),
                 Err(e) => app.set_operation_error(format!("Backup failed: {}", e), Some("🚨".to_string())),
             }
+        },
+        "list-backups" | "backups" => {
+            match app.list_backups() {
+                Ok(backups) => {
+                    if backups.is_empty() {
+                        app.set_message("No backups found".to_string());
+                    } else {
+                        app.set_message(format!("Found {} backup(s)", backups.len()));
+                        for (i, backup) in backups.iter().enumerate().take(5) {
+                            app.message_history.push_back(format!("{}: {}", i + 1, backup.display()));
+                        }
+                        if backups.len() > 5 {
+                            app.message_history.push_back(format!("... and {} more", backups.len() - 5));
+                        }
+                    }
+                },
+                Err(e) => app.set_operation_error(format!("Failed to list backups: {}", e), Some("🚨".to_string())),
+            }
+        },
+        "help" | "h" => {
+            // Switch to help mode to show the comprehensive help dialog
+            app.mode = AppMode::Help;
+            app.set_message("Showing comprehensive help - press Esc, q, or ? to close".to_string());
         },
         _ => {
             if command.starts_with("export ") {
@@ -515,7 +542,28 @@ fn execute_command(app: &mut App, command: &str) {
             } else if command.starts_with("import ") {
                 let path = command.strip_prefix("import ").unwrap_or("").trim();
                 match app.import_notes_from_directory(path) {
-                    Ok(_) => app.set_operation_success(format!("Notes imported from '{}'", path), Some("📦".to_string())),
+                    Ok(result) => {
+                        let summary = result.format_summary();
+                        if result.has_issues() {
+                            // Show warning for partial success
+                            app.set_operation_error(summary, Some("⚠️".to_string()));
+                            
+                            // Add details to message history
+                            for failure in &result.failed_imports {
+                                app.message_history.push_back(format!("Failed to import {}: {}", failure.file_path, failure.error));
+                            }
+                            for skip in &result.skipped_duplicates {
+                                app.message_history.push_back(format!("Skipped duplicate: {}", skip));
+                            }
+                        } else {
+                            app.set_operation_success(summary, Some("📦".to_string()));
+                        }
+                        
+                        // Show renamed files in message history
+                        for (old_name, new_name) in &result.renamed_duplicates {
+                            app.message_history.push_back(format!("Renamed '{}' to '{}' (duplicate)", old_name, new_name));
+                        }
+                    },
                     Err(e) => app.set_operation_error(format!("Import failed: {}", e), Some("🚨".to_string())),
                 }
             } else {

@@ -58,6 +58,66 @@ pub enum OperationResult {
     Info { message: String, icon: String },
 }
 
+#[derive(Debug, Clone)]
+pub struct ImportFailure {
+    pub file_path: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportResult {
+    pub successful_imports: usize,
+    pub failed_imports: Vec<ImportFailure>,
+    pub skipped_duplicates: Vec<String>,
+    pub renamed_duplicates: Vec<(String, String)>, // (original_name, new_name)
+}
+
+impl ImportResult {
+    pub fn new() -> Self {
+        Self {
+            successful_imports: 0,
+            failed_imports: Vec::new(),
+            skipped_duplicates: Vec::new(),
+            renamed_duplicates: Vec::new(),
+        }
+    }
+    
+    pub fn total_processed(&self) -> usize {
+        self.successful_imports + self.failed_imports.len() + self.skipped_duplicates.len()
+    }
+    
+    pub fn has_issues(&self) -> bool {
+        !self.failed_imports.is_empty() || !self.skipped_duplicates.is_empty()
+    }
+    
+    pub fn format_summary(&self) -> String {
+        let mut summary = format!("Import completed: {} successful", self.successful_imports);
+        
+        if !self.failed_imports.is_empty() {
+            summary.push_str(&format!(", {} failed", self.failed_imports.len()));
+        }
+        
+        if !self.skipped_duplicates.is_empty() {
+            summary.push_str(&format!(", {} skipped (duplicates)", self.skipped_duplicates.len()));
+        }
+        
+        if !self.renamed_duplicates.is_empty() {
+            summary.push_str(&format!(", {} renamed", self.renamed_duplicates.len()));
+        }
+        
+        summary
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ParsedNote {
+    title: String,
+    content: String,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    modified_at: Option<chrono::DateTime<chrono::Utc>>,
+    tags: Vec<String>,
+}
+
 pub struct App {
     pub should_quit: bool,
     pub mode: AppMode,
@@ -1077,15 +1137,29 @@ impl App {
         let storage = crate::storage::Storage::new()
             .map_err(|e| format!("Failed to initialize storage: {}", e))?;
         
+        let export_dir = storage.get_notes_dir();
+        std::fs::create_dir_all(&export_dir)
+            .map_err(|e| format!("Failed to create export directory: {}", e))?;
+        
         let mut _exported_count = 0;
         for note in self.notebook.notes.values() {
-            match storage.export_note_to_file(&note.id.to_string(), &note.content) {
-                Ok(_) => _exported_count += 1,
-                Err(e) => return Err(format!("Failed to export note '{}': {}", note.title, e)),
-            }
+            let filename = sanitize_filename(&note.title);
+            let file_path = export_dir.join(format!("{}.md", filename));
+            
+            let content = format!("# {}\n\nCreated: {}\nModified: {}\nTags: {}\n\n---\n\n{}", 
+                note.title,
+                note.created_at.format("%Y-%m-%d %H:%M:%S"),
+                note.modified_at.format("%Y-%m-%d %H:%M:%S"),
+                note.tags.join(", "),
+                note.content
+            );
+            
+            std::fs::write(&file_path, content)
+                .map_err(|e| format!("Failed to export note '{}': {}", note.title, e))?;
+            
+            _exported_count += 1;
         }
         
-        // Set message with export count (this will be handled by the caller)
         Ok(())
     }
     
@@ -1120,7 +1194,7 @@ impl App {
         Ok(())
     }
     
-    pub fn import_notes_from_directory(&mut self, directory: &str) -> Result<(), String> {
+    pub fn import_notes_from_directory(&mut self, directory: &str) -> Result<ImportResult, String> {
         use std::fs;
         use std::path::Path;
         
@@ -1129,7 +1203,13 @@ impl App {
             return Err("Import directory does not exist".to_string());
         }
         
-        let mut imported_count = 0;
+        // Create backup before importing
+        if let Err(e) = self.create_backup() {
+            return Err(format!("Failed to create backup before import: {}", e));
+        }
+        
+        let mut result = ImportResult::new();
+        
         for entry in fs::read_dir(import_dir)
             .map_err(|e| format!("Failed to read import directory: {}", e))?
         {
@@ -1137,21 +1217,26 @@ impl App {
             let path = entry.path();
             
             if path.is_file() && path.extension().map_or(false, |ext| ext == "md") {
-                match self.import_note_from_file(&path) {
-                    Ok(_) => imported_count += 1,
-                    Err(e) => eprintln!("Warning: Failed to import {}: {}", path.display(), e),
+                match self.import_note_from_file(&path, &mut result) {
+                    Ok(_) => result.successful_imports += 1,
+                    Err(e) => {
+                        result.failed_imports.push(ImportFailure {
+                            file_path: path.display().to_string(),
+                            error: e,
+                        });
+                    }
                 }
             }
         }
         
-        if imported_count > 0 {
+        if result.successful_imports > 0 {
             self.refresh_tree_view();
         }
         
-        Ok(())
+        Ok(result)
     }
     
-    fn import_note_from_file(&mut self, file_path: &std::path::Path) -> Result<(), String> {
+    fn import_note_from_file(&mut self, file_path: &std::path::Path, result: &mut ImportResult) -> Result<(), String> {
         use std::fs;
         
         let content = fs::read_to_string(file_path)
@@ -1162,29 +1247,120 @@ impl App {
             .unwrap_or("Imported Note")
             .to_string();
         
-        // Try to extract title from first line if it's a header
-        let (title, note_content) = if content.starts_with("# ") {
-            let lines: Vec<&str> = content.lines().collect();
-            let title = lines[0].strip_prefix("# ").unwrap_or(&filename).to_string();
-            let content = lines.iter().skip(1).cloned().collect::<Vec<_>>().join("\n");
-            (title, content)
-        } else {
-            (filename, content)
-        };
+        // Parse the imported note content
+        let parsed_note = self.parse_imported_note_content(&content, &filename)?;
         
-        // Check if note already exists
-        let existing_note = self.notebook.notes.values()
-            .find(|note| note.title == title);
+        // Handle potential conflicts
+        let final_title = self.resolve_title_conflict(&parsed_note.title, result);
         
-        if existing_note.is_some() {
-            return Err(format!("Note with title '{}' already exists", title));
+        let mut note = Note::new(final_title.clone(), None);
+        note.content = parsed_note.content;
+        
+        // Set metadata if available
+        if let Some(created_at) = parsed_note.created_at {
+            note.created_at = created_at;
+        }
+        if let Some(modified_at) = parsed_note.modified_at {
+            note.modified_at = modified_at;
+        }
+        if !parsed_note.tags.is_empty() {
+            note.tags = parsed_note.tags;
         }
         
-        let mut note = Note::new(title, None);
-        note.content = note_content;
         self.notebook.add_note(note);
         
+        // Track if the title was changed due to conflict
+        if final_title != parsed_note.title {
+            result.renamed_duplicates.push((parsed_note.title, final_title));
+        }
+        
         Ok(())
+    }
+    
+    fn parse_imported_note_content(&self, content: &str, fallback_title: &str) -> Result<ParsedNote, String> {
+        
+        let lines: Vec<&str> = content.lines().collect();
+        let mut title = fallback_title.to_string();
+        let mut created_at = None;
+        let mut modified_at = None;
+        let mut tags = Vec::new();
+        let mut content_start_index = 0;
+        
+        // Check if first line is a title (# Title)
+        if !lines.is_empty() && lines[0].starts_with("# ") {
+            title = lines[0].strip_prefix("# ").unwrap_or(fallback_title).to_string();
+            content_start_index = 1;
+            
+            // Look for metadata after the title
+            let mut i = content_start_index;
+            while i < lines.len() {
+                let line = lines[i].trim();
+                
+                if line.is_empty() {
+                    i += 1;
+                    continue;
+                }
+                
+                if line.starts_with("Created: ") {
+                    if let Some(date_str) = line.strip_prefix("Created: ") {
+                        created_at = parse_datetime(date_str);
+                    }
+                    i += 1;
+                    content_start_index = i + 1;
+                } else if line.starts_with("Modified: ") {
+                    if let Some(date_str) = line.strip_prefix("Modified: ") {
+                        modified_at = parse_datetime(date_str);
+                    }
+                    i += 1;
+                    content_start_index = i + 1;
+                } else if line.starts_with("Tags: ") {
+                    if let Some(tags_str) = line.strip_prefix("Tags: ") {
+                        tags = tags_str.split(", ")
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    }
+                    i += 1;
+                    content_start_index = i + 1;
+                } else if line == "---" {
+                    // Skip the separator line
+                    i += 1;
+                    content_start_index = i + 1;
+                    break;
+                } else {
+                    // No more metadata, content starts here
+                    break;
+                }
+            }
+        }
+        
+        // Extract the actual content
+        let note_content = if content_start_index < lines.len() {
+            lines[content_start_index..].join("\n")
+        } else {
+            String::new()
+        };
+        
+        Ok(ParsedNote {
+            title,
+            content: note_content,
+            created_at,
+            modified_at,
+            tags,
+        })
+    }
+    
+    fn resolve_title_conflict(&self, original_title: &str, _result: &mut ImportResult) -> String {
+        let mut title = original_title.to_string();
+        let mut counter = 1;
+        
+        // Check for conflicts and rename if necessary
+        while self.notebook.notes.values().any(|note| note.title == title) {
+            title = format!("{} ({})", original_title, counter);
+            counter += 1;
+        }
+        
+        title
     }
     
     pub fn create_backup(&self) -> Result<(), String> {
@@ -1197,6 +1373,14 @@ impl App {
             }
             Err(e) => Err(format!("Backup failed: {}", e))
         }
+    }
+    
+    pub fn list_backups(&self) -> Result<Vec<std::path::PathBuf>, String> {
+        let storage = crate::storage::Storage::new()
+            .map_err(|e| format!("Failed to initialize storage: {}", e))?;
+        
+        storage.list_backups()
+            .map_err(|e| format!("Failed to list backups: {}", e))
     }
     
     pub fn start_move_item(&mut self) {
@@ -1502,6 +1686,37 @@ fn sanitize_filename(filename: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+fn parse_datetime(date_str: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{DateTime, Utc, NaiveDateTime};
+    
+    // Try parsing the format used by our export: "YYYY-MM-DD HH:MM:SS"
+    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(date_str, "%Y-%m-%d %H:%M:%S") {
+        return Some(DateTime::from_naive_utc_and_offset(naive_dt, Utc));
+    }
+    
+    // Try parsing ISO 8601 format
+    if let Ok(dt) = DateTime::parse_from_rfc3339(date_str) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    
+    // Try parsing other common formats
+    let formats = [
+        "%Y-%m-%d %H:%M:%S UTC",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%m/%d/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M:%S",
+    ];
+    
+    for format in &formats {
+        if let Ok(naive_dt) = NaiveDateTime::parse_from_str(date_str, format) {
+            return Some(DateTime::from_naive_utc_and_offset(naive_dt, Utc));
+        }
+    }
+    
+    None
 }
 
 fn run_external_editor(editor: &str, file_path: &std::path::PathBuf) -> Result<(), String> {

@@ -735,16 +735,22 @@ fn draw_search_dialog(f: &mut Frame, app: &App) {
         .style(TokyoNightTheme::popup());
 
     let help_text = "Enter search terms | Esc: Cancel | Enter: Search";
-    let input_text = if app.input_buffer.is_empty() {
-        Span::styled("Search notes and content...", TokyoNightTheme::placeholder())
+    
+    // Create input line with cursor
+    let mut input_content = vec![];
+    if app.input_buffer.is_empty() {
+        input_content.push(Span::styled("Search notes and content...", TokyoNightTheme::placeholder()));
     } else {
-        Span::styled(app.input_buffer.as_str(), Style::default().fg(TokyoNightTheme::FG))
-    };
+        input_content.push(Span::styled(&app.input_buffer, Style::default().fg(TokyoNightTheme::FG)));
+    }
+    
+    // Add cursor
+    input_content.push(Span::styled("█", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::SLOW_BLINK)));
 
     let content = vec![
         Line::from(Span::styled(help_text, TokyoNightTheme::help_text())),
         Line::from(""),
-        Line::from(input_text),
+        Line::from(input_content),
         Line::from(""),
         Line::from(Span::styled("Tip: Use Ctrl+F for advanced search with regex support", 
             Style::default().fg(TokyoNightTheme::COMMENT).add_modifier(Modifier::ITALIC))),
@@ -758,23 +764,41 @@ fn draw_search_dialog(f: &mut Frame, app: &App) {
 }
 
 fn draw_command_dialog(f: &mut Frame, app: &App) {
-    let area = centered_rect(60, 20, f.area());
+    let area = centered_rect(70, 25, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title("Command")
+        .title("💻 Command Mode")
         .borders(Borders::ALL)
         .border_style(TokyoNightTheme::border_focused())
         .style(TokyoNightTheme::popup());
 
-    let input_text = if app.command_buffer.is_empty() {
-        Span::styled("Commands: :w :q :wq :export :backup :import <dir>...", TokyoNightTheme::placeholder())
-    } else {
-        Span::styled(app.command_buffer.as_str(), Style::default().fg(TokyoNightTheme::FG))
-    };
+    let help_text = "Available: :w :q :wq :export :import <dir> :backup :backups :help";
+    
+    // Create the input line with cursor
+    let mut input_content = vec![
+        Span::styled(":", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+    ];
+    
+    if !app.command_buffer.is_empty() {
+        input_content.push(Span::styled(&app.command_buffer, Style::default().fg(TokyoNightTheme::FG)));
+    }
+    
+    // Add cursor (blinking effect)
+    input_content.push(Span::styled("█", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::SLOW_BLINK)));
+    
+    let content = vec![
+        Line::from(Span::styled(help_text, TokyoNightTheme::help_text())),
+        Line::from(""),
+        Line::from(input_content),
+        Line::from(""),
+        Line::from(Span::styled("Press Enter to execute, Esc to cancel", 
+            Style::default().fg(TokyoNightTheme::COMMENT).add_modifier(Modifier::ITALIC))),
+    ];
 
-    let input = Paragraph::new(input_text)
-        .block(block);
+    let input = Paragraph::new(content)
+        .block(block)
+        .alignment(Alignment::Left);
 
     f.render_widget(input, area);
 }
@@ -910,7 +934,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 fn draw_help_dialog(f: &mut Frame, app: &App) {
-    let area = centered_rect(85, 90, f.area());
+    let area = centered_rect(80, 60, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -922,239 +946,118 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
     let editor_info = if let Some(ref editor) = app.external_editor {
         format!("External editor: {}", editor)
     } else {
-        "No external editor found (set $EDITOR or install helix/nvim/vim)".to_string()
+        "No external editor found (set $EDITOR)".to_string()
     };
 
     let help_text = Text::from(vec![
         // Header
         Line::from(vec![
             Span::styled("🚀 ", Style::default().fg(TokyoNightTheme::YELLOW)),
+            Span::styled("Scribble - Comprehensive Help", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+        
+        // Quick Actions
+        Line::from(vec![
+            Span::styled("✨ ", Style::default().fg(TokyoNightTheme::YELLOW)),
             Span::styled("Quick Actions", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  📝 ", Style::default().fg(TokyoNightTheme::GREEN)),
-            Span::styled("Press ", TokyoNightTheme::help_text()),
-            Span::styled("'n'", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled(" to create a new note", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("  📂 ", Style::default().fg(TokyoNightTheme::BLUE)),
-            Span::styled("Press ", TokyoNightTheme::help_text()),
-            Span::styled("'f'", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled(" to create a folder, ", TokyoNightTheme::help_text()),
-            Span::styled("'F'", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled(" for subfolder", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("  🔍 ", Style::default().fg(TokyoNightTheme::PURPLE)),
-            Span::styled("Press ", TokyoNightTheme::help_text()),
-            Span::styled("'/'", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled(" to search through your notes", TokyoNightTheme::help_text()),
-        ]),
+        Line::from("  n  - Create new note              f  - Create new folder"),
+        Line::from("  i  - Edit current note            e  - Open in external editor"),
+        Line::from("  d  - Delete item                 m  - Move item"),
+        Line::from("  /  - Search notes                ?  - Show this help"),
         Line::from(""),
         
         // Navigation
         Line::from(vec![
             Span::styled("⌨️  ", Style::default().fg(TokyoNightTheme::YELLOW)),
-            Span::styled("Navigation & Selection", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled("Navigation", Style::default().fg(TokyoNightTheme::GREEN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("j/k ↑/↓", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Move up/down in lists", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("g      ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Jump to top", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("G      ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Jump to bottom", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("Tab    ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Switch between panes (folders ↔ editor)", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("Enter  ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Open note or toggle folder", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(""),
-        
-        // Editing
-        Line::from(vec![
-            Span::styled("✏️  ", Style::default().fg(TokyoNightTheme::YELLOW)),
-            Span::styled("Editing & Writing", Style::default().fg(TokyoNightTheme::PURPLE).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("i      ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Enter insert mode (start editing)", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("e      ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Open in external editor", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("Esc    ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Exit insert mode (auto-saves)", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("Ctrl+S ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Manual save (in any mode)", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("Ctrl+P/F2", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("  Toggle live markdown preview", TokyoNightTheme::help_text()),
-        ]),
+        Line::from("  j/k or ↑/↓        - Move up/down"),
+        Line::from("  g/G              - Jump to top/bottom"),
+        Line::from("  Tab              - Switch between panes"),
+        Line::from("  Enter            - Open note or expand folder"),
         Line::from(""),
         
         // Productivity Features
         Line::from(vec![
             Span::styled("🚀 ", Style::default().fg(TokyoNightTheme::YELLOW)),
-            Span::styled("Productivity Features", Style::default().fg(TokyoNightTheme::MAGENTA).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled("Productivity", Style::default().fg(TokyoNightTheme::PURPLE).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("Ctrl+J ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Quick Jump - Fuzzy search & navigate to any note", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("Ctrl+O ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Show recent files list", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("Ctrl+L ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Follow [[wiki-style]] link at cursor", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("u      ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Undo last delete operation (restore from trash)", TokyoNightTheme::help_text()),
-        ]),
+        Line::from("  Ctrl+J           - Quick Jump (fuzzy search)"),
+        Line::from("  Ctrl+O           - Recent files"),
+        Line::from("  Ctrl+F           - Fuzzy search mode"),
+        Line::from("  Ctrl+L           - Follow [[wiki]] links"),
+        Line::from("  Ctrl+P/F2        - Toggle live preview"),
+        Line::from("  u                - Undo last delete"),
         Line::from(""),
         
-        // File Operations
+        // Commands (Import/Export)
         Line::from(vec![
-            Span::styled("🗂️  ", Style::default().fg(TokyoNightTheme::YELLOW)),
-            Span::styled("File Operations", Style::default().fg(TokyoNightTheme::GREEN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled("💾 ", Style::default().fg(TokyoNightTheme::YELLOW)),
+            Span::styled("Commands (Press : to enter command mode)", Style::default().fg(TokyoNightTheme::ORANGE).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("d      ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Delete selected note or folder (with confirmation)", TokyoNightTheme::help_text()),
+            Span::styled("  File Operations:", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
         ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("m      ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Move note/folder to different location", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(""),
-        
-        // Search
-        Line::from(vec![
-            Span::styled("🔍 ", Style::default().fg(TokyoNightTheme::YELLOW)),
-            Span::styled("Search & Replace", Style::default().fg(TokyoNightTheme::ORANGE).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
-        ]),
+        Line::from("    :w, :write       - Save current note"),
+        Line::from("    :q, :quit        - Quit application"),
+        Line::from("    :wq              - Save and quit"),
         Line::from(""),
         Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("/      ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Basic search in notes", TokyoNightTheme::help_text()),
+            Span::styled("  Import/Export:", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
         ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("Ctrl+F ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Fuzzy search mode (smart matching)", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("Tab    ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   (in search) Switch between regular/fuzzy search", TokyoNightTheme::help_text()),
-        ]),
+        Line::from("    :export          - Export all notes to default location"),
+        Line::from("    :export <path>   - Export notes to specified directory"),
+        Line::from("    :import <path>   - Import notes from directory"),
+        Line::from("    :backup          - Create timestamped backup"),
+        Line::from("    :backups         - List available backups"),
         Line::from(""),
         Line::from(vec![
-            Span::styled("🔄 ", Style::default().fg(TokyoNightTheme::ORANGE)),
-            Span::styled("Advanced Features:", Style::default().fg(TokyoNightTheme::ORANGE).add_modifier(Modifier::BOLD)),
+            Span::styled("  Other:", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
         ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("[[links]]", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("  Wiki-style note linking - auto-detected", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled("Auto-save", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("  Notes are automatically saved when editing", TokyoNightTheme::help_text()),
-        ]),
+        Line::from("    :help, :h        - Show this help dialog"),
         Line::from(""),
         
-        // Commands
+        // Features
         Line::from(vec![
-            Span::styled("💻 ", Style::default().fg(TokyoNightTheme::YELLOW)),
-            Span::styled("Commands", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled("✨ ", Style::default().fg(TokyoNightTheme::YELLOW)),
+            Span::styled("Features", Style::default().fg(TokyoNightTheme::MAGENTA).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled(":w     ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Save current note", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled(":export", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Export all notes to files", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled(":backup", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Create backup of all data", TokyoNightTheme::help_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled(":q     ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled("   Quit application", TokyoNightTheme::help_text()),
-        ]),
+        Line::from("  • Auto-save when editing           • Markdown syntax highlighting"),
+        Line::from("  • [[Wiki-style]] note linking     • Advanced import/export with metadata"),
+        Line::from("  • Smart conflict resolution       • Automatic backups before import"),
+        Line::from("  • External editor integration     • Fuzzy search with typo tolerance"),
         Line::from(""),
         
-        // System Info
-        Line::from(Span::styled("─".repeat(70), Style::default().fg(TokyoNightTheme::FG_GUTTER))),
+        // System Info & Footer
+        Line::from(Span::styled("─".repeat(60), Style::default().fg(TokyoNightTheme::FG_GUTTER))),
         Line::from(""),
         Line::from(vec![
             Span::styled("🏷️ Version: ", Style::default().fg(TokyoNightTheme::COMMENT)),
             Span::styled(format!("{} v{}", PKG_NAME, VERSION), Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
-            Span::styled("🔧 System: ", Style::default().fg(TokyoNightTheme::COMMENT)),
+            Span::styled("🔧 Editor: ", Style::default().fg(TokyoNightTheme::COMMENT)),
             Span::styled(&editor_info, Style::default().fg(TokyoNightTheme::FG_DARK)),
         ]),
         Line::from(""),
         
-        // Footer
+        // Exit instructions
         Line::from(vec![
             Span::styled("💡 ", Style::default().fg(TokyoNightTheme::YELLOW)),
-            Span::styled("Press ", TokyoNightTheme::help_text()),
+            Span::styled("Press ", Style::default().fg(TokyoNightTheme::FG_DARK)),
             Span::styled("Esc", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled(", ", TokyoNightTheme::help_text()),
-            Span::styled("'q'", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled(", or ", TokyoNightTheme::help_text()),
-            Span::styled("'?'", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled(" to close this help dialog", TokyoNightTheme::help_text()),
+            Span::styled(", ", Style::default().fg(TokyoNightTheme::FG_DARK)),
+            Span::styled("q", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(", or ", Style::default().fg(TokyoNightTheme::FG_DARK)),
+            Span::styled("?", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(" to close this help", Style::default().fg(TokyoNightTheme::FG_DARK)),
         ]),
     ]);
 
