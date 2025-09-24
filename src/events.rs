@@ -341,6 +341,12 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                     'd' => {
                         app.scroll_half_page_down();
                     }
+                    'l' => {
+                        // Follow link at cursor (also works in insert mode)
+                        if let Err(e) = app.follow_link_at_cursor() {
+                            app.set_message(e);
+                        }
+                    }
                     _ => {}
                 }
             } else {
