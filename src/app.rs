@@ -664,8 +664,8 @@ impl App {
 
     pub fn follow_link_at_cursor(&mut self) -> Result<(), String> {
         if let Some(ref _note) = self.current_note {
-            // Simple implementation: find [[...]] pattern around cursor
-            let cursor_pos = (self.editor_cursor.0 as usize) * self.editor_content.lines().count().max(1) + self.editor_cursor.1 as usize;
+            // Calculate the actual byte position of the cursor
+            let cursor_pos = self.calculate_cursor_byte_position();
             
             if let Some(link_title) = self.extract_link_at_position(cursor_pos) {
                 if let Some(target_id) = self.notebook.find_note_by_title(&link_title) {
@@ -678,30 +678,63 @@ impl App {
                 } else {
                     // Offer to create the note
                     self.set_operation_error(
-                        format!("Note '{}' not found. Press Ctrl+N to create it.", link_title),
+                        format!("Note '{}' not found. Press n to create a new note with this title.", link_title),
                         Some("🔍".to_string())
                     );
                     Err(format!("Note '{}' not found", link_title))
                 }
             } else {
-                Err("No link found at cursor position".to_string())
+                Err("No [[wiki link]] found at cursor position".to_string())
             }
         } else {
             Err("No note currently open".to_string())
         }
     }
 
+    fn calculate_cursor_byte_position(&self) -> usize {
+        let lines: Vec<&str> = self.editor_content.lines().collect();
+        let mut byte_position = 0;
+        
+        // Add bytes from all lines before the cursor line
+        for i in 0..(self.editor_cursor.0 as usize) {
+            if let Some(line) = lines.get(i) {
+                byte_position += line.len() + 1; // +1 for newline character
+            }
+        }
+        
+        // Add bytes from the cursor column position within the current line
+        byte_position += self.editor_cursor.1 as usize;
+        
+        // Make sure we don't exceed content length
+        byte_position.min(self.editor_content.len())
+    }
+    
     fn extract_link_at_position(&self, pos: usize) -> Option<String> {
         use regex::Regex;
         
         let link_regex = Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
         
-        for mat in link_regex.find_iter(&self.editor_content) {
-            if pos >= mat.start() && pos <= mat.end() {
-                if let Some(cap) = link_regex.captures(&self.editor_content[mat.start()..mat.end()]) {
-                    if let Some(title) = cap.get(1) {
-                        return Some(title.as_str().to_string());
+        // First, try to find a link that contains the cursor position
+        for captures in link_regex.captures_iter(&self.editor_content) {
+            if let Some(full_match) = captures.get(0) {
+                // Check if cursor is within the link
+                if pos >= full_match.start() && pos <= full_match.end() {
+                    if let Some(title) = captures.get(1) {
+                        return Some(title.as_str().trim().to_string());
                     }
+                }
+            }
+        }
+        
+        // If no direct match, try to find the closest link within the current line
+        let lines: Vec<&str> = self.editor_content.lines().collect();
+        let current_line_index = self.editor_cursor.0 as usize;
+        
+        if let Some(current_line) = lines.get(current_line_index) {
+            // Look for links in the current line
+            for captures in link_regex.captures_iter(current_line) {
+                if let Some(title) = captures.get(1) {
+                    return Some(title.as_str().trim().to_string());
                 }
             }
         }
