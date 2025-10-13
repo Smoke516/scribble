@@ -1,8 +1,8 @@
-# Scribble ✏️ v1.0.0
+# Scribble ✏️ v2.0.0
 
-A powerful terminal-based note-taking app with folder organization, markdown support, and syntax highlighting.
+A powerful terminal-based note-taking app with advanced tag management, Obsidian vault integration, real-time file watching, folder organization, markdown support, and syntax highlighting.
 
-![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)
+![Version](https://img.shields.io/badge/version-2.0.0-brightgreen)
 ![Terminal Interface](https://img.shields.io/badge/interface-terminal-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)
@@ -11,6 +11,9 @@ A powerful terminal-based note-taking app with folder organization, markdown sup
 ## Features
 
 ### Core Features
+- **🏷️ Advanced Tag System** - Comprehensive tag management with YAML frontmatter and inline hashtag support (`Ctrl+T`)
+- **📁 Obsidian Vault Integration** - Native compatibility with Obsidian vaults and seamless vault switching (`Ctrl+V`)
+- **🔄 Real-time File Watching** - Live sync with external changes and file system monitoring
 - **📁 Folder organization** - Hierarchical folder structure to organize your notes
 - **📝 Markdown support** - Write notes in markdown with live syntax highlighting
 - **🎨 Syntax highlighting** - Beautiful markdown highlighting for better readability
@@ -20,6 +23,9 @@ A powerful terminal-based note-taking app with folder organization, markdown sup
 - **⌨️ Vim-like navigation** - Familiar keyboard shortcuts for efficient navigation
 
 ### 🚀 Productivity Features
+- **🏷️ Tag Filtering** - Filter notes by tags with interactive browser and analytics (`Ctrl+T`)
+- **📁 Vault Management** - Switch between multiple Obsidian vaults instantly (`Ctrl+V`)
+- **🔔 Change Notifications** - Real-time alerts for external file modifications
 - **🔍 Fuzzy Search** - Intelligent search that finds matches even with typos (`Ctrl+F`)
 - **⚡ Quick Jump** - Instant note navigation with `Ctrl+J` - like VS Code's quick open
 - **📋 Recent Files** - Quick access to recently opened notes (`Ctrl+O`)
@@ -75,14 +81,31 @@ This creates an `asciinema` recording perfect for sharing!
 ### Prerequisites
 - **Rust** (1.70+) - Install from [rustup.rs](https://rustup.rs/)
 
-### Build from Source
+### Quick Install (Recommended)
 
 ```bash
 # Clone the repository
 git clone https://github.com/Smoke516/scribble.git
 cd scribble
 
-# Build and install
+# Run the automated install script
+./install.sh
+```
+
+The install script will:
+- Build the release binary
+- Install to your system PATH
+- Create desktop application entry
+- Set up configuration directories
+
+### Manual Build from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/Smoke516/scribble.git
+cd scribble
+
+# Build and install manually
 cargo build --release
 cargo install --path .
 ```
@@ -91,7 +114,7 @@ cargo install --path .
 ```bash
 # Check version
 scribble --version
-# Output: scribble 1.0.0
+# Output: scribble 2.0.0
 
 # View help
 scribble --help
@@ -116,7 +139,7 @@ scribble -h           # Show help (short form)
 
 ### Command Line Help Output
 ```
-scribble v1.0.0
+scribble v2.0.0
 
 A powerful terminal-based note-taking app with folder organization,
 markdown support, and syntax highlighting.
@@ -146,7 +169,7 @@ Once started, press '?' for in-app help.
    ```
 
 2. **First time setup:**
-   - The app starts with an enhanced welcome screen showing version 1.0.0
+   - The app starts with an enhanced welcome screen showing version 2.0.0
    - The welcome screen provides organized quick-start categories:
      - 📝 **Creating Content**: `n` (new note), `f` (folder), `i` (edit)
      - 🧭 **Navigation**: `Tab` (switch panes), `j/k` (move), `Enter` (open)
@@ -170,6 +193,28 @@ Once started, press '?' for in-app help.
    - Supports Helix (`hx`), Neovim, Vim, and more
    - Changes are automatically saved back to Scribble
 
+## 🆕 What's New in v2.0.0
+
+### 🏷️ Advanced Tag Management
+- **Access:** Press `Ctrl+T` to open the tag browser
+- **Dual Support:** Use YAML frontmatter (`tags: [work, project]`) or inline hashtags (`#work #project`)
+- **Smart Filtering:** Filter notes by single or multiple tags
+- **Analytics:** View tag frequency and usage statistics
+- **Quick Selection:** Use number keys (1-9) for instant tag selection
+
+### 📁 Obsidian Vault Integration
+- **Access:** Press `Ctrl+V` to switch between vaults
+- **Auto-detection:** Automatically finds Obsidian vaults in current/parent directories
+- **Full Compatibility:** Seamlessly work with existing Obsidian vaults
+- **YAML Support:** Preserves all metadata and frontmatter
+- **Wiki Links:** Complete `[[note linking]]` support
+
+### 🔄 Real-time File Watching
+- **Live Sync:** External file changes appear instantly
+- **Smart Notifications:** Visual alerts for file modifications
+- **Status Indicators:** File watcher status shown in status bar
+- **Multi-format Support:** Handles create, modify, delete, and rename events
+
 ## Usage
 
 ### Basic Operations
@@ -189,6 +234,8 @@ Once started, press '?' for in-app help.
 ### 🚀 Productivity & Navigation
 | Key | Action |
 |-----|--------|
+| `Ctrl+T` | Tag Browser - manage and filter notes by tags |
+| `Ctrl+V` | Vault Switcher - switch between multiple vaults |
 | `/` | Search notes by content or title (regular search) |
 | `Ctrl+F` | Fuzzy search mode - intelligent search with typo tolerance |
 | `Tab` (in search) | Switch between regular and fuzzy search |
@@ -341,11 +388,18 @@ cargo build --release
 - `ratatui` - Terminal UI framework
 - `crossterm` - Cross-platform terminal manipulation
 - `serde/serde_json` - Data serialization
+- `serde_yaml` - YAML frontmatter support
+- `toml` - Configuration file handling
 - `chrono` - Date/time handling
 - `uuid` - Unique identifiers
 - `syntect` - Syntax highlighting
 - `pulldown-cmark` - Markdown parsing
 - `dirs` - Platform directories
+- `notify` - File system watching
+- `walkdir` - Directory traversal
+- `regex` - Pattern matching
+- `fuzzy-matcher` - Fuzzy search capabilities
+- `textwrap` - Text formatting
 
 ## Contributing
 
