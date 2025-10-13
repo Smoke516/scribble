@@ -1,0 +1,310 @@
+use regex::Regex;
+use std::collections::{HashMap, HashSet};
+use uuid::Uuid;
+use crate::models::{Note, NotebookData};
+
+#[derive(Debug, Clone)]
+pub struct TagInfo {
+    pub name: String,
+    pub count: usize,
+    pub notes: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TagManager {
+    pub tag_index: HashMap<String, TagInfo>,
+    pub inline_tag_regex: Regex,
+}
+
+impl TagManager {
+    pub fn new() -> Self {
+        Self {
+            tag_index: HashMap::new(),
+            inline_tag_regex: Regex::new(r"#([a-zA-Z0-9_-]+)").unwrap(),
+        }
+    }
+
+    /// Extract all tags from a note (both YAML frontmatter and inline hashtags)
+    pub fn extract_tags_from_note(&self, note: &Note) -> HashSet<String> {
+        let mut tags = HashSet::new();
+        
+        // Add tags from the note's tags field (usually from YAML frontmatter)
+        for tag in &note.tags {
+            tags.insert(tag.clone());
+        }
+        
+        // Extract inline hashtags from content
+        let inline_tags = self.extract_inline_tags(&note.content);
+        tags.extend(inline_tags);
+        
+        tags
+    }
+
+    /// Extract inline hashtags from markdown content
+    pub fn extract_inline_tags(&self, content: &str) -> Vec<String> {
+        self.inline_tag_regex
+            .captures_iter(content)
+            .map(|cap| cap[1].to_string())
+            .collect()
+    }
+
+    /// Extract tags from YAML frontmatter
+    pub fn extract_yaml_tags(&self, content: &str) -> Vec<String> {
+        let mut tags = Vec::new();
+        
+        if let Some(frontmatter) = self.extract_yaml_frontmatter(content) {
+            // Try to parse as YAML and extract tags
+            if let Ok(yaml_value) = serde_yaml::from_str::<serde_yaml::Value>(&frontmatter) {
+                if let Some(yaml_tags) = yaml_value.get("tags") {
+                    match yaml_tags {
+                        serde_yaml::Value::Sequence(seq) => {
+                            for item in seq {
+                                if let Some(tag_str) = item.as_str() {
+                                    tags.push(tag_str.to_string());
+                                }
+                            }
+                        },
+                        serde_yaml::Value::String(tag_str) => {
+                            // Single tag as string
+                            tags.push(tag_str.clone());
+                        },
+                        _ => {}
+                    }
+                }
+            }
+        }
+        
+        tags
+    }
+
+    /// Extract YAML frontmatter from content
+    fn extract_yaml_frontmatter(&self, content: &str) -> Option<String> {
+        let lines: Vec<&str> = content.lines().collect();
+        
+        if lines.is_empty() || lines[0] != "---" {
+            return None;
+        }
+        
+        let mut frontmatter_lines = Vec::new();
+        let mut in_frontmatter = false;
+        let mut end_found = false;
+        
+        for (i, line) in lines.iter().enumerate() {
+            if i == 0 && *line == "---" {
+                in_frontmatter = true;
+                continue;
+            }
+            
+            if in_frontmatter {
+                if *line == "---" {
+                    end_found = true;
+                    break;
+                }
+                frontmatter_lines.push(*line);
+            }
+        }
+        
+        if end_found {
+            Some(frontmatter_lines.join("\n"))
+        } else {
+            None
+        }
+    }
+
+    /// Build tag index from all notes in the notebook
+    pub fn build_tag_index(&mut self, notebook: &NotebookData) {
+        self.tag_index.clear();
+        
+        for note in notebook.notes.values() {
+            let tags = self.extract_tags_from_note(note);
+            
+            for tag in tags {
+                let tag_info = self.tag_index.entry(tag.clone()).or_insert_with(|| TagInfo {
+                    name: tag.clone(),
+                    count: 0,
+                    notes: Vec::new(),
+                });
+                
+                tag_info.count += 1;
+                if !tag_info.notes.contains(&note.id) {
+                    tag_info.notes.push(note.id);
+                }
+            }
+        }
+    }
+
+    /// Get all tags sorted by frequency (most used first)
+    pub fn get_tags_by_frequency(&self) -> Vec<&TagInfo> {
+        let mut tags: Vec<&TagInfo> = self.tag_index.values().collect();
+        tags.sort_by(|a, b| b.count.cmp(&a.count));
+        tags
+    }
+
+    /// Get all tags sorted alphabetically
+    pub fn get_tags_alphabetical(&self) -> Vec<&TagInfo> {
+        let mut tags: Vec<&TagInfo> = self.tag_index.values().collect();
+        tags.sort_by(|a, b| a.name.cmp(&b.name));
+        tags
+    }
+
+    /// Search for tags matching a pattern
+    pub fn search_tags(&self, pattern: &str) -> Vec<&TagInfo> {
+        let pattern_lower = pattern.to_lowercase();
+        self.tag_index
+            .values()
+            .filter(|tag| tag.name.to_lowercase().contains(&pattern_lower))
+            .collect()
+    }
+
+    /// Get notes that have specific tags
+    pub fn get_notes_with_tags<'a>(&self, notebook: &'a NotebookData, tag_names: &[String]) -> Vec<&'a Note> {
+        let mut matching_notes = Vec::new();
+        
+        for note in notebook.notes.values() {
+            let note_tags = self.extract_tags_from_note(note);
+            let has_all_tags = tag_names.iter().all(|tag| note_tags.contains(tag));
+            
+            if has_all_tags {
+                matching_notes.push(note);
+            }
+        }
+        
+        matching_notes
+    }
+
+    /// Get notes that have any of the specified tags
+    pub fn get_notes_with_any_tags<'a>(&self, notebook: &'a NotebookData, tag_names: &[String]) -> Vec<&'a Note> {
+        let mut matching_notes = Vec::new();
+        
+        for note in notebook.notes.values() {
+            let note_tags = self.extract_tags_from_note(note);
+            let has_any_tag = tag_names.iter().any(|tag| note_tags.contains(tag));
+            
+            if has_any_tag {
+                matching_notes.push(note);
+            }
+        }
+        
+        matching_notes
+    }
+
+    /// Get tag suggestions based on partial input
+    pub fn get_tag_suggestions(&self, partial: &str, limit: usize) -> Vec<String> {
+        let partial_lower = partial.to_lowercase();
+        let mut suggestions: Vec<_> = self.tag_index
+            .keys()
+            .filter(|tag| tag.to_lowercase().starts_with(&partial_lower))
+            .cloned()
+            .collect();
+        
+        // Sort by tag frequency (most used first)
+        suggestions.sort_by(|a, b| {
+            let count_a = self.tag_index.get(a).map(|info| info.count).unwrap_or(0);
+            let count_b = self.tag_index.get(b).map(|info| info.count).unwrap_or(0);
+            count_b.cmp(&count_a)
+        });
+        
+        suggestions.truncate(limit);
+        suggestions
+    }
+
+    /// Add tags to a note (both to the note struct and update the index)
+    pub fn add_tags_to_note(&mut self, note: &mut Note, tags: Vec<String>) {
+        for tag in tags {
+            if !note.tags.contains(&tag) {
+                note.add_tag(tag.clone());
+                
+                // Update index
+                let tag_info = self.tag_index.entry(tag.clone()).or_insert_with(|| TagInfo {
+                    name: tag.clone(),
+                    count: 0,
+                    notes: Vec::new(),
+                });
+                
+                if !tag_info.notes.contains(&note.id) {
+                    tag_info.count += 1;
+                    tag_info.notes.push(note.id);
+                }
+            }
+        }
+    }
+
+    /// Remove tags from a note (both from note struct and update the index)
+    pub fn remove_tags_from_note(&mut self, note: &mut Note, tags: Vec<String>) {
+        for tag in tags {
+            if note.tags.contains(&tag) {
+                note.remove_tag(&tag);
+                
+                // Update index
+                if let Some(tag_info) = self.tag_index.get_mut(&tag) {
+                    tag_info.notes.retain(|&id| id != note.id);
+                    tag_info.count = tag_info.count.saturating_sub(1);
+                    
+                    // Remove tag from index if no notes have it
+                    if tag_info.count == 0 {
+                        self.tag_index.remove(&tag);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get total number of unique tags
+    pub fn get_tag_count(&self) -> usize {
+        self.tag_index.len()
+    }
+
+    /// Get total number of tagged notes
+    pub fn get_tagged_note_count(&self) -> usize {
+        let mut unique_notes: HashSet<Uuid> = HashSet::new();
+        for tag_info in self.tag_index.values() {
+            unique_notes.extend(&tag_info.notes);
+        }
+        unique_notes.len()
+    }
+
+    /// Update a note's tags based on its content and YAML frontmatter
+    pub fn sync_note_tags(&mut self, note: &mut Note) {
+        // Extract all tags from content and frontmatter
+        let yaml_tags = self.extract_yaml_tags(&note.content);
+        let inline_tags = self.extract_inline_tags(&note.content);
+        
+        // Combine all tags
+        let mut all_tags = HashSet::new();
+        all_tags.extend(yaml_tags);
+        all_tags.extend(inline_tags);
+        
+        // Update note tags
+        let new_tags: Vec<String> = all_tags.into_iter().collect();
+        note.tags = new_tags;
+        
+        // Rebuild index for this note
+        // Note: In a real implementation, we'd want to be more efficient
+        // and only update the specific entries, but this is simpler for now
+    }
+
+    /// Format tags for display in UI
+    pub fn format_tag_list(&self, tags: &[String]) -> String {
+        if tags.is_empty() {
+            "No tags".to_string()
+        } else {
+            tags.iter()
+                .map(|tag| format!("#{}", tag))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
+
+    /// Check if a tag name is valid
+    pub fn is_valid_tag_name(name: &str) -> bool {
+        !name.is_empty() && 
+        name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') &&
+        !name.starts_with(|c: char| c.is_numeric())
+    }
+}
+
+impl Default for TagManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}

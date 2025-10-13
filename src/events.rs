@@ -17,6 +17,8 @@ pub fn handle_event(app: &mut App, event: Event) -> Result<(), Box<dyn std::erro
             AppMode::DeleteConfirm => handle_delete_confirm_mode(app, key),
             AppMode::QuickJump => handle_quick_jump_mode(app, key),
             AppMode::RecentFiles => handle_recent_files_mode(app, key),
+            AppMode::VaultSwitcher => handle_vault_switcher_mode(app, key),
+            AppMode::TagBrowser => handle_tag_browser_mode(app, key),
         }
     }
     Ok(())
@@ -252,6 +254,15 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             app.toggle_recent_files();
         }
         
+        // Vault switcher (Ctrl+V)
+        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.show_vault_switcher();
+        }
+        
+        // Tag browser (Ctrl+T)
+        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.show_tag_browser();
+        }
         
         // Help
         KeyCode::Char('?') => {
@@ -537,6 +548,10 @@ fn execute_command(app: &mut App, command: &str) {
             // Switch to help mode to show the comprehensive help dialog
             app.mode = AppMode::Help;
             app.set_message("Showing comprehensive help - press Esc, q, or ? to close".to_string());
+        },
+        "vault" => {
+            // Show vault switcher
+            app.show_vault_switcher();
         },
         _ => {
             if command.starts_with("export ") {
@@ -921,6 +936,103 @@ fn handle_recent_files_mode(app: &mut App, key: KeyEvent) {
             if let Some(digit) = c.to_digit(10) {
                 let index = (digit as usize).saturating_sub(1);
                 app.select_recent_file(index);
+            }
+        }
+        
+        _ => {}
+    }
+}
+
+fn handle_vault_switcher_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.cancel_vault_switcher();
+        }
+        
+        KeyCode::Enter => {
+            // Note: Actual vault switching would need to be implemented
+            // in the main loop since it requires reinitializing storage
+            if let Some(vault) = app.get_selected_vault() {
+                app.set_message(format!("Selected vault: {:?} (restart required)", vault));
+            }
+            app.cancel_vault_switcher();
+        }
+        
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.vault_switcher_navigate_up();
+        }
+        
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.vault_switcher_navigate_down();
+        }
+        
+        // Numbers for quick selection
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            if let Some(digit) = c.to_digit(10) {
+                let index = (digit as usize).saturating_sub(1);
+                if index < app.available_vaults.len() {
+                    app.vault_switcher_selected = index;
+                    if let Some(vault) = app.get_selected_vault() {
+                        app.set_message(format!("Selected vault: {:?} (restart required)", vault));
+                    }
+                    app.cancel_vault_switcher();
+                }
+            }
+        }
+        
+        _ => {}
+    }
+}
+
+fn handle_tag_browser_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.cancel_tag_browser();
+        }
+        
+        KeyCode::Enter => {
+            app.add_tag_filter();
+        }
+        
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.tag_browser_navigate_up();
+        }
+        
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.tag_browser_navigate_down();
+        }
+        
+        // Toggle sort mode (s)
+        KeyCode::Char('s') => {
+            app.toggle_tag_browser_sort();
+        }
+        
+        // Clear all filters (c)
+        KeyCode::Char('c') => {
+            app.clear_tag_filters();
+        }
+        
+        // Numbers for quick selection/filtering
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            if let Some(digit) = c.to_digit(10) {
+                let index = (digit as usize).saturating_sub(1);
+                let tag_count = if app.tag_browser_sort_by_frequency {
+                    app.tag_manager.get_tags_by_frequency().len()
+                } else {
+                    app.tag_manager.get_tags_alphabetical().len()
+                };
+                
+                if index < tag_count {
+                    app.tag_browser_selected = index;
+                    app.add_tag_filter();
+                }
+            }
+        }
+        
+        // Remove active filter (Backspace)
+        KeyCode::Backspace => {
+            if let Some(last_filter) = app.tag_filter_active.last().cloned() {
+                app.remove_tag_filter(&last_filter);
             }
         }
         

@@ -1,16 +1,20 @@
 mod app;
 mod autocomplete;
+mod config;
 mod events;
 mod models;
 mod preview;
 mod search;
 mod storage;
 mod syntax;
+mod tags;
 mod theme;
 mod ui;
+mod watcher;
 
 use app::App;
 use std::env;
+use std::path::PathBuf;
 
 // Version information from Cargo.toml
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -26,11 +30,40 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Auto-detect if current directory is an Obsidian vault
+fn detect_obsidian_vault() -> Option<PathBuf> {
+    let current_dir = std::env::current_dir().ok()?;
+    
+    // Check current directory and up to 3 parent directories
+    let mut check_dir = current_dir.clone();
+    for _ in 0..4 {
+        let obsidian_dir = check_dir.join(".obsidian");
+        if obsidian_dir.exists() && obsidian_dir.is_dir() {
+            return Some(check_dir);
+        }
+        
+        // Move to parent directory
+        if let Some(parent) = check_dir.parent() {
+            check_dir = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+    
+    None
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load configuration
+    let mut config = config::Config::load();
+    
     // Handle command line arguments
     let args: Vec<String> = env::args().collect();
-    for arg in &args[1..] {
-        match arg.as_str() {
+    let mut vault_path: Option<PathBuf> = None;
+    
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
             "--version" | "-v" => {
                 println!("{} {}", PKG_NAME, VERSION);
                 return Ok(());
@@ -39,12 +72,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 print_help();
                 return Ok(());
             }
+            "--vault" => {
+                if i + 1 < args.len() {
+                    vault_path = Some(PathBuf::from(&args[i + 1]));
+                    i += 1; // Skip next argument as it's the vault path
+                } else {
+                    eprintln!("--vault requires a path argument");
+                    std::process::exit(1);
+                }
+            }
             _ => {
-                eprintln!("Unknown argument: {}", arg);
+                eprintln!("Unknown argument: {}", args[i]);
                 eprintln!("Use --help for usage information");
                 std::process::exit(1);
             }
         }
+        i += 1;
     }
     
     // Setup terminal
@@ -56,12 +99,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create app and load data
     let mut app = App::new();
-    let storage = storage::Storage::new()?;
+    
+    // Determine vault path with priority: CLI arg > auto-detect > config default
+    let final_vault_path = vault_path
+        .or_else(|| if config.vaults.auto_detect { detect_obsidian_vault() } else { None })
+        .or_else(|| config.vaults.default.clone());
+    
+    // Initialize storage based on mode
+    let storage: Box<dyn storage::NotebookStorage> = if let Some(vault_path) = final_vault_path.clone() {
+        println!("Using vault: {:?}", vault_path);
+        
+        // Initialize file watcher for vault mode
+        app.initialize_file_watcher(vault_path.clone());
+        
+        // Update recent vaults in config
+        config.add_recent_vault(vault_path.clone());
+        if let Err(e) = config.save() {
+            eprintln!("Warning: Failed to save config: {}", e);
+        }
+        
+        Box::new(storage::VaultStorage::new(vault_path)?)
+    } else {
+        // Regular JSON storage
+        Box::new(storage::Storage::new()?)
+    };
     
     // Load existing notebook data
     match storage.load_notebook() {
         Ok(notebook) => {
             app.notebook = notebook;
+            app.initialize_tag_manager();
             app.refresh_tree_view();
             // Start with no note selected - show welcome page instead
             app.set_welcome_message();
@@ -101,6 +168,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if last_tick.elapsed() >= tick_rate {
             app.update_visual_feedback();
+            // Poll for file changes if file watcher is enabled
+            app.poll_file_changes();
             last_tick = Instant::now();
         }
 
@@ -131,9 +200,10 @@ fn print_help() {
     println!("A powerful terminal-based note-taking app with folder organization,");
     println!("markdown support, and syntax highlighting.\n");
     println!("USAGE:");
-    println!("    {}              Start the application", PKG_NAME);
-    println!("    {} --version     Show version information", PKG_NAME);
-    println!("    {} --help        Show this help message\n", PKG_NAME);
+    println!("    {}                    Start the application", PKG_NAME);
+    println!("    {} --vault <path>      Start with Obsidian vault at <path>", PKG_NAME);
+    println!("    {} --version           Show version information", PKG_NAME);
+    println!("    {} --help              Show this help message\n", PKG_NAME);
     println!("FEATURES:");
     println!("  • 📝 Rich markdown editing with live preview");
     println!("  • 🗂️  Hierarchical folder organization");

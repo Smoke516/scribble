@@ -1,6 +1,8 @@
 use crate::autocomplete::{AutocompleteState, MarkdownAutocomplete};
 use crate::models::{Note, Folder, NotebookData, FolderTreeNode};
 use crate::search::{EnhancedSearch, SearchQuery, SearchResult};
+use crate::tags::TagManager;
+use crate::watcher::{FileWatcher, FileChangeEvent};
 use uuid::Uuid;
 use std::collections::VecDeque;
 
@@ -19,6 +21,8 @@ pub enum AppMode {
     DeleteConfirm,
     QuickJump,
     RecentFiles,
+    VaultSwitcher,
+    TagBrowser,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -183,6 +187,21 @@ pub struct App {
     // Live preview
     pub preview_content: String,
     pub preview_scroll: u16,
+    
+    // Vault switching
+    pub vault_switcher_selected: usize,
+    pub available_vaults: Vec<std::path::PathBuf>,
+    
+    // File watching
+    pub file_watcher: Option<FileWatcher>,
+    pub sync_status: String,
+    pub has_external_changes: bool,
+    
+    // Tag management
+    pub tag_manager: TagManager,
+    pub tag_browser_selected: usize,
+    pub tag_browser_sort_by_frequency: bool,
+    pub tag_filter_active: Vec<String>,
 }
 
 impl App {
@@ -248,6 +267,21 @@ impl App {
             // Live preview
             preview_content: String::new(),
             preview_scroll: 0,
+            
+            // Vault switching
+            vault_switcher_selected: 0,
+            available_vaults: Vec::new(),
+            
+            // File watching
+            file_watcher: None,
+            sync_status: String::new(),
+            has_external_changes: false,
+            
+            // Tag management
+            tag_manager: TagManager::new(),
+            tag_browser_selected: 0,
+            tag_browser_sort_by_frequency: true,
+            tag_filter_active: Vec::new(),
         };
         
         // Create default folder structure
@@ -1645,6 +1679,354 @@ impl App {
         if self.editor_cursor.0 >= self.editor_scroll + visible_height {
             self.editor_scroll = self.editor_cursor.0.saturating_sub(visible_height - 1);
         }
+    }
+    
+    // Vault switching functionality
+    pub fn initialize_available_vaults(&mut self, config: &crate::config::Config) {
+        self.available_vaults.clear();
+        
+        // Add recent vaults from config
+        for vault in &config.vaults.recent {
+            if vault.exists() && vault.join(".obsidian").exists() {
+                self.available_vaults.push(vault.clone());
+            }
+        }
+        
+        // Add default vault if not already in recent
+        if let Some(default_vault) = &config.vaults.default {
+            if default_vault.exists() && default_vault.join(".obsidian").exists() {
+                if !self.available_vaults.contains(default_vault) {
+                    self.available_vaults.push(default_vault.clone());
+                }
+            }
+        }
+        
+        // Scan common locations for additional vaults
+        if let Some(home_dir) = dirs::home_dir() {
+            let common_vault_locations = [
+                home_dir.join("Documents"),
+                home_dir.join("Nextcloud"),
+                home_dir.join("Dropbox"),
+                home_dir.join("OneDrive"),
+                home_dir.join("obsidian-vaults"),
+            ];
+            
+            for location in &common_vault_locations {
+                if location.exists() {
+                    if let Ok(entries) = std::fs::read_dir(location) {
+                        for entry in entries.filter_map(|e| e.ok()) {
+                            let path = entry.path();
+                            if path.is_dir() && path.join(".obsidian").exists() {
+                                if !self.available_vaults.contains(&path) {
+                                    self.available_vaults.push(path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    pub fn show_vault_switcher(&mut self) {
+        self.mode = AppMode::VaultSwitcher;
+        self.vault_switcher_selected = 0;
+    }
+    
+    pub fn vault_switcher_navigate_up(&mut self) {
+        if self.vault_switcher_selected > 0 {
+            self.vault_switcher_selected -= 1;
+        }
+    }
+    
+    pub fn vault_switcher_navigate_down(&mut self) {
+        if self.vault_switcher_selected < self.available_vaults.len().saturating_sub(1) {
+            self.vault_switcher_selected += 1;
+        }
+    }
+    
+    pub fn get_selected_vault(&self) -> Option<&std::path::PathBuf> {
+        self.available_vaults.get(self.vault_switcher_selected)
+    }
+    
+    pub fn get_vault_display_info(&self) -> Vec<(String, String)> {
+        self.available_vaults.iter()
+            .map(|vault| {
+                let name = vault.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let path = vault.display().to_string();
+                (name, path)
+            })
+            .collect()
+    }
+    
+    pub fn cancel_vault_switcher(&mut self) {
+        self.mode = AppMode::Normal;
+    }
+    
+    // File watcher functionality
+    pub fn initialize_file_watcher(&mut self, vault_path: std::path::PathBuf) {
+        match FileWatcher::new(vault_path.clone()) {
+            Ok(watcher) => {
+                self.file_watcher = Some(watcher);
+                self.sync_status = "📁 Watching vault".to_string();
+            },
+            Err(e) => {
+                eprintln!("Failed to initialize file watcher: {}", e);
+                self.sync_status = "⚠️  File watching unavailable".to_string();
+            }
+        }
+    }
+    
+    pub fn poll_file_changes(&mut self) {
+        if let Some(watcher) = &self.file_watcher {
+            let changes = watcher.poll_changes();
+            if !changes.is_empty() {
+                self.has_external_changes = true;
+                self.handle_file_changes(changes);
+            }
+        }
+    }
+    
+    fn handle_file_changes(&mut self, changes: Vec<FileChangeEvent>) {
+        for change in changes {
+            match change {
+                FileChangeEvent::Modified(path) => {
+                    self.handle_file_modified(path);
+                },
+                FileChangeEvent::Created(path) => {
+                    self.handle_file_created(path);
+                },
+                FileChangeEvent::Deleted(path) => {
+                    self.handle_file_deleted(path);
+                },
+                FileChangeEvent::Renamed(from, to) => {
+                    self.handle_file_renamed(from, to);
+                },
+            }
+        }
+        
+        // Refresh the tree view after processing all changes
+        self.refresh_tree_view();
+        
+        // Update sync status
+        self.sync_status = "🔄 External changes detected".to_string();
+        self.set_message("File changes detected from external source".to_string());
+    }
+    
+    fn handle_file_modified(&mut self, path: std::path::PathBuf) {
+        // If the modified file is the currently open note, offer to reload
+        if let Some(current_note) = &self.current_note {
+            if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
+                let note_filename = sanitize_filename(&current_note.title);
+                if file_name == note_filename {
+                    // Note: In a more sophisticated implementation, we might show a dialog
+                    // asking the user if they want to reload the file
+                    self.set_operation_info(
+                        format!("Note '{}' was modified externally", current_note.title),
+                        Some("🔄".to_string())
+                    );
+                }
+            }
+        }
+    }
+    
+    fn handle_file_created(&mut self, path: std::path::PathBuf) {
+        if let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) {
+            self.set_operation_info(
+                format!("New note created: {}", file_stem),
+                Some("➕".to_string())
+            );
+        }
+    }
+    
+    fn handle_file_deleted(&mut self, path: std::path::PathBuf) {
+        if let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) {
+            self.set_operation_info(
+                format!("Note deleted: {}", file_stem),
+                Some("🗑️".to_string())
+            );
+        }
+    }
+    
+    fn handle_file_renamed(&mut self, from: std::path::PathBuf, to: std::path::PathBuf) {
+        let from_name = from.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+        let to_name = to.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+        
+        self.set_operation_info(
+            format!("Note renamed: {} → {}", from_name, to_name),
+            Some("🔄".to_string())
+        );
+    }
+    
+    pub fn clear_external_changes_flag(&mut self) {
+        self.has_external_changes = false;
+        self.sync_status = "📁 Vault in sync".to_string();
+    }
+    
+    // Tag management functionality
+    pub fn initialize_tag_manager(&mut self) {
+        self.tag_manager.build_tag_index(&self.notebook);
+    }
+    
+    pub fn show_tag_browser(&mut self) {
+        self.mode = AppMode::TagBrowser;
+        self.tag_browser_selected = 0;
+    }
+    
+    pub fn tag_browser_navigate_up(&mut self) {
+        if self.tag_browser_selected > 0 {
+            self.tag_browser_selected -= 1;
+        }
+    }
+    
+    pub fn tag_browser_navigate_down(&mut self) {
+        let tag_count = if self.tag_browser_sort_by_frequency {
+            self.tag_manager.get_tags_by_frequency().len()
+        } else {
+            self.tag_manager.get_tags_alphabetical().len()
+        };
+        
+        if self.tag_browser_selected < tag_count.saturating_sub(1) {
+            self.tag_browser_selected += 1;
+        }
+    }
+    
+    pub fn toggle_tag_browser_sort(&mut self) {
+        self.tag_browser_sort_by_frequency = !self.tag_browser_sort_by_frequency;
+        self.tag_browser_selected = 0;
+    }
+    
+    pub fn get_tag_browser_items(&self) -> Vec<(&str, usize)> {
+        let tags = if self.tag_browser_sort_by_frequency {
+            self.tag_manager.get_tags_by_frequency()
+        } else {
+            self.tag_manager.get_tags_alphabetical()
+        };
+        
+        tags.iter().map(|tag| (tag.name.as_str(), tag.count)).collect()
+    }
+    
+    pub fn add_tag_filter(&mut self) {
+        let tags = if self.tag_browser_sort_by_frequency {
+            self.tag_manager.get_tags_by_frequency()
+        } else {
+            self.tag_manager.get_tags_alphabetical()
+        };
+        
+        if let Some(selected_tag) = tags.get(self.tag_browser_selected) {
+            let tag_name = selected_tag.name.clone();
+            if !self.tag_filter_active.contains(&tag_name) {
+                self.tag_filter_active.push(tag_name.clone());
+                self.apply_tag_filter();
+                self.set_operation_info(
+                    format!("Added filter: #{}", tag_name),
+                    Some("🏷️".to_string())
+                );
+            }
+        }
+    }
+    
+    pub fn remove_tag_filter(&mut self, tag_name: &str) {
+        self.tag_filter_active.retain(|t| t != tag_name);
+        self.apply_tag_filter();
+        self.set_operation_info(
+            format!("Removed filter: #{}", tag_name),
+            Some("🗑️".to_string())
+        );
+    }
+    
+    pub fn clear_tag_filters(&mut self) {
+        self.tag_filter_active.clear();
+        self.apply_tag_filter();
+        self.set_message("Cleared all tag filters".to_string());
+    }
+    
+    fn apply_tag_filter(&mut self) {
+        if self.tag_filter_active.is_empty() {
+            // Show all notes when no filters
+            self.refresh_tree_view();
+        } else {
+            // Filter notes by tags
+            let _filtered_notes = self.tag_manager.get_notes_with_any_tags(
+                &self.notebook,
+                &self.tag_filter_active
+            );
+            
+            // Update the folder tree to show only filtered notes
+            // This is a simplified approach - in a more sophisticated version,
+            // we might want to create a special filtered view
+            self.refresh_tree_view();
+        }
+    }
+    
+    pub fn get_tag_suggestions(&self, partial: &str) -> Vec<String> {
+        self.tag_manager.get_tag_suggestions(partial, 10)
+    }
+    
+    pub fn add_tag_to_current_note(&mut self, tag: String) {
+        if let Some(current_note_id) = self.current_note.as_ref().map(|n| n.id) {
+            if let Some(note) = self.notebook.notes.get_mut(&current_note_id) {
+                self.tag_manager.add_tags_to_note(note, vec![tag.clone()]);
+                
+                // Update current note reference
+                if let Some(ref mut current) = self.current_note {
+                    *current = note.clone();
+                }
+                
+                self.set_operation_info(
+                    format!("Added tag: #{}", tag),
+                    Some("➕".to_string())
+                );
+            }
+        }
+    }
+    
+    pub fn remove_tag_from_current_note(&mut self, tag: String) {
+        if let Some(current_note_id) = self.current_note.as_ref().map(|n| n.id) {
+            if let Some(note) = self.notebook.notes.get_mut(&current_note_id) {
+                self.tag_manager.remove_tags_from_note(note, vec![tag.clone()]);
+                
+                // Update current note reference
+                if let Some(ref mut current) = self.current_note {
+                    *current = note.clone();
+                }
+                
+                self.set_operation_info(
+                    format!("Removed tag: #{}", tag),
+                    Some("🗑️".to_string())
+                );
+            }
+        }
+    }
+    
+    pub fn sync_current_note_tags(&mut self) {
+        if let Some(current_note_id) = self.current_note.as_ref().map(|n| n.id) {
+            if let Some(note) = self.notebook.notes.get_mut(&current_note_id) {
+                self.tag_manager.sync_note_tags(note);
+                
+                // Update current note reference
+                if let Some(ref mut current) = self.current_note {
+                    *current = note.clone();
+                }
+                
+                // Rebuild tag index after sync
+                self.tag_manager.build_tag_index(&self.notebook);
+            }
+        }
+    }
+    
+    pub fn cancel_tag_browser(&mut self) {
+        self.mode = AppMode::Normal;
+    }
+    
+    pub fn get_tag_stats(&self) -> (usize, usize) {
+        (
+            self.tag_manager.get_tag_count(),
+            self.tag_manager.get_tagged_note_count()
+        )
     }
 }
 
