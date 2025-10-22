@@ -18,7 +18,9 @@ pub fn handle_event(app: &mut App, event: Event) -> Result<(), Box<dyn std::erro
             AppMode::QuickJump => handle_quick_jump_mode(app, key),
             AppMode::RecentFiles => handle_recent_files_mode(app, key),
             AppMode::VaultSwitcher => handle_vault_switcher_mode(app, key),
-            AppMode::TagBrowser => handle_tag_browser_mode(app, key),
+        AppMode::TagBrowser => handle_tag_browser_mode(app, key),
+        AppMode::ThemeBrowser => handle_theme_browser_mode(app, key),
+        AppMode::Rename => handle_rename_mode(app, key),
         }
     }
     Ok(())
@@ -164,6 +166,11 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             app.start_move_item();
         }
         
+        // Rename (only if not Ctrl+R)
+        KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.start_rename_item();
+        }
+        
         // Search (regular search)
         KeyCode::Char('/') => {
             app.mode = AppMode::Search;
@@ -264,9 +271,15 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             app.show_tag_browser();
         }
         
+        // Theme browser (F3)
+        KeyCode::F(3) => {
+            app.show_theme_browser();
+        }
+        
         // Help
         KeyCode::Char('?') => {
             app.mode = AppMode::Help;
+            app.reset_help_scroll();
         }
         
         _ => {}
@@ -477,8 +490,14 @@ fn handle_command_mode(app: &mut App, key: KeyEvent) {
         }
         
         KeyCode::Enter => {
+            let old_mode = app.mode.clone();
             execute_command(app, &app.command_buffer.clone());
-            app.mode = AppMode::Normal;
+            
+            // Only reset to Normal if the command didn't change the mode to a special state
+            if matches!(old_mode, AppMode::Command) && matches!(app.mode, AppMode::Command) {
+                app.mode = AppMode::Normal;
+            }
+            
             app.command_buffer.clear();
         }
         
@@ -547,6 +566,7 @@ fn execute_command(app: &mut App, command: &str) {
         "help" | "h" => {
             // Switch to help mode to show the comprehensive help dialog
             app.mode = AppMode::Help;
+            app.reset_help_scroll();
             app.set_message("Showing comprehensive help - press Esc, q, or ? to close".to_string());
         },
         "vault" => {
@@ -554,6 +574,31 @@ fn execute_command(app: &mut App, command: &str) {
             app.show_vault_switcher();
         },
         _ => {
+            if command.starts_with("theme ") {
+                let theme_arg = command.strip_prefix("theme ").unwrap_or("").trim();
+                match theme_arg {
+                    "list" => {
+                        app.show_theme_browser();
+                    },
+                    "current" => {
+                        app.set_message(format!("Current theme: {}", app.current_theme_name()));
+                    },
+                    "" => {
+                        app.set_message("Usage: theme <name> | theme list | theme current".to_string());
+                    },
+                    theme_name => {
+                        let available_themes = crate::app::App::get_available_themes();
+                        if available_themes.contains(&theme_name) {
+                            app.change_theme(theme_name);
+                        } else {
+                            app.set_operation_error(
+                                format!("Unknown theme '{}'. Use 'theme list' to see available themes.", theme_name),
+                                Some("🚨".to_string())
+                            );
+                        }
+                    },
+                }
+            } else
             if command.starts_with("export ") {
                 let path = command.strip_prefix("export ").unwrap_or("").trim();
                 match app.export_notes_to_directory(path) {
@@ -850,6 +895,38 @@ fn handle_help_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
             app.mode = AppMode::Normal;
         }
+        
+        // Scrolling in help dialog
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.help_scroll_down();
+        }
+        
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.help_scroll_up();
+        }
+        
+        KeyCode::PageDown => {
+            // Scroll down by multiple lines
+            for _ in 0..5 {
+                app.help_scroll_down();
+            }
+        }
+        
+        KeyCode::PageUp => {
+            // Scroll up by multiple lines
+            for _ in 0..5 {
+                app.help_scroll_up();
+            }
+        }
+        
+        KeyCode::Char('g') => {
+            app.help_scroll = 0;
+        }
+        
+        KeyCode::Char('G') => {
+            app.help_scroll = 30; // Max scroll
+        }
+        
         _ => {}
     }
 }
@@ -953,7 +1030,13 @@ fn handle_vault_switcher_mode(app: &mut App, key: KeyEvent) {
             // Note: Actual vault switching would need to be implemented
             // in the main loop since it requires reinitializing storage
             if let Some(vault) = app.get_selected_vault() {
-                app.set_message(format!("Selected vault: {:?} (restart required)", vault));
+                app.set_operation_info(
+                    format!("Vault selected: {}\nRestart scribble with: scribble --vault {:?}", 
+                        vault.file_name().unwrap_or_default().to_string_lossy(),
+                        vault
+                    ),
+                    Some("📁".to_string())
+                );
             }
             app.cancel_vault_switcher();
         }
@@ -973,7 +1056,13 @@ fn handle_vault_switcher_mode(app: &mut App, key: KeyEvent) {
                 if index < app.available_vaults.len() {
                     app.vault_switcher_selected = index;
                     if let Some(vault) = app.get_selected_vault() {
-                        app.set_message(format!("Selected vault: {:?} (restart required)", vault));
+                        app.set_operation_info(
+                            format!("Vault selected: {}\nRestart scribble with: scribble --vault {:?}", 
+                                vault.file_name().unwrap_or_default().to_string_lossy(),
+                                vault
+                            ),
+                            Some("📁".to_string())
+                        );
                     }
                     app.cancel_vault_switcher();
                 }
@@ -1034,6 +1123,64 @@ fn handle_tag_browser_mode(app: &mut App, key: KeyEvent) {
             if let Some(last_filter) = app.tag_filter_active.last().cloned() {
                 app.remove_tag_filter(&last_filter);
             }
+        }
+        
+        _ => {}
+    }
+}
+
+fn handle_theme_browser_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.cancel_theme_browser();
+        }
+        
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.navigate_theme_browser(-1);
+        }
+        
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.navigate_theme_browser(1);
+        }
+        
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            app.select_theme_from_browser();
+        }
+        
+        // Numbers for quick selection
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            if let Some(digit) = c.to_digit(10) {
+                let index = (digit as usize).saturating_sub(1);
+                let themes = crate::app::App::get_available_themes();
+                if index < themes.len() {
+                    app.theme_browser_selected = index;
+                    app.select_theme_from_browser();
+                }
+            }
+        }
+        
+        _ => {}
+    }
+}
+
+fn handle_rename_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.cancel_rename();
+        }
+        
+        KeyCode::Enter => {
+            if let Err(e) = app.execute_rename() {
+                app.set_message(e);
+            }
+        }
+        
+        KeyCode::Char(c) => {
+            app.input_buffer.push(c);
+        }
+        
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
         }
         
         _ => {}

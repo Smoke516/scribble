@@ -2,7 +2,9 @@ use crate::autocomplete::{AutocompleteState, MarkdownAutocomplete};
 use crate::models::{Note, Folder, NotebookData, FolderTreeNode};
 use crate::search::{EnhancedSearch, SearchQuery, SearchResult};
 use crate::tags::TagManager;
+use crate::theme::ThemeManager;
 use crate::watcher::{FileWatcher, FileChangeEvent};
+use crate::config::Config;
 use uuid::Uuid;
 use std::collections::VecDeque;
 
@@ -23,6 +25,8 @@ pub enum AppMode {
     RecentFiles,
     VaultSwitcher,
     TagBrowser,
+    ThemeBrowser,
+    Rename,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,10 +206,23 @@ pub struct App {
     pub tag_browser_selected: usize,
     pub tag_browser_sort_by_frequency: bool,
     pub tag_filter_active: Vec<String>,
+    
+    // Theme management
+    pub theme_manager: ThemeManager,
+    pub config: Config,
+    pub theme_browser_selected: usize,
+    
+    // Help dialog
+    pub help_scroll: u16,
+    
+    // Rename operation
+    pub rename_item_id: Option<Uuid>,
+    pub rename_item_type: Option<TreeItemType>,
+    pub rename_item_name: String,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(config: &Config) -> Self {
         let mut app = Self {
             should_quit: false,
             mode: AppMode::Normal,
@@ -282,6 +299,19 @@ impl App {
             tag_browser_selected: 0,
             tag_browser_sort_by_frequency: true,
             tag_filter_active: Vec::new(),
+            
+            // Theme management
+            theme_manager: ThemeManager::new(&config.ui.theme),
+            config: config.clone(),
+            theme_browser_selected: 0,
+            
+            // Help dialog
+            help_scroll: 0,
+            
+            // Rename operation
+            rename_item_id: None,
+            rename_item_type: None,
+            rename_item_name: String::new(),
         };
         
         // Create default folder structure
@@ -1583,6 +1613,113 @@ impl App {
         }
     }
     
+    pub fn start_rename_item(&mut self) {
+        if let Some(selected_item) = self.get_selected_item().cloned() {
+            self.rename_item_id = Some(selected_item.id);
+            self.rename_item_type = Some(selected_item.item_type.clone());
+            self.rename_item_name = selected_item.name.clone();
+            self.input_buffer = selected_item.name.clone();
+            self.mode = AppMode::Rename;
+            
+            let item_type_str = match selected_item.item_type {
+                TreeItemType::Note => "note",
+                TreeItemType::Folder => "folder",
+            };
+            self.set_message(format!("Renaming {} '{}'", item_type_str, selected_item.name));
+        } else {
+            self.set_message("Nothing selected to rename".to_string());
+        }
+    }
+    
+    pub fn cancel_rename(&mut self) {
+        self.rename_item_id = None;
+        self.rename_item_type = None;
+        self.rename_item_name.clear();
+        self.input_buffer.clear();
+        self.mode = AppMode::Normal;
+        self.set_message("Rename cancelled".to_string());
+    }
+    
+    pub fn execute_rename(&mut self) -> Result<(), String> {
+        let rename_id = self.rename_item_id.ok_or("No item selected for renaming")?;
+        let rename_type = self.rename_item_type.as_ref().ok_or("No item type selected")?;
+        let new_name = self.input_buffer.trim().to_string();
+        
+        if new_name.is_empty() {
+            return Err("Name cannot be empty".to_string());
+        }
+        
+        if new_name == self.rename_item_name {
+            return Err("Name unchanged".to_string());
+        }
+        
+        match rename_type {
+            TreeItemType::Note => {
+                self.rename_note(rename_id, new_name.clone())?;
+            },
+            TreeItemType::Folder => {
+                self.rename_folder(rename_id, new_name.clone())?;
+            },
+        }
+        
+        // Reset rename state
+        self.rename_item_id = None;
+        self.rename_item_type = None;
+        self.rename_item_name.clear();
+        self.input_buffer.clear();
+        self.mode = AppMode::Normal;
+        self.refresh_tree_view();
+        
+        self.set_operation_success(format!("Renamed to '{}'!", new_name), Some("✏️".to_string()));
+        Ok(())
+    }
+    
+    fn rename_note(&mut self, note_id: Uuid, new_name: String) -> Result<(), String> {
+        // Check if a note with this name already exists
+        if self.notebook.notes.values().any(|n| n.id != note_id && n.title == new_name) {
+            return Err(format!("A note with the name '{}' already exists", new_name));
+        }
+        
+        if let Some(note) = self.notebook.notes.get_mut(&note_id) {
+            note.title = new_name.clone();
+            note.modified_at = chrono::Utc::now();
+            
+            // Update current note if it's the one being renamed
+            if let Some(ref current_note) = self.current_note {
+                if current_note.id == note_id {
+                    self.current_note = Some(note.clone());
+                }
+            }
+            
+            Ok(())
+        } else {
+            Err("Note not found".to_string())
+        }
+    }
+    
+    fn rename_folder(&mut self, folder_id: Uuid, new_name: String) -> Result<(), String> {
+        // Check if a folder with this name already exists at the same level
+        if let Some(folder) = self.notebook.folders.get(&folder_id) {
+            let parent_id = folder.parent_id;
+            
+            // Check for name conflicts at the same level
+            if self.notebook.folders.values().any(|f| 
+                f.id != folder_id && 
+                f.name == new_name && 
+                f.parent_id == parent_id
+            ) {
+                return Err(format!("A folder with the name '{}' already exists at this level", new_name));
+            }
+        }
+        
+        if let Some(folder) = self.notebook.folders.get_mut(&folder_id) {
+            folder.name = new_name;
+            Ok(())
+        } else {
+            Err("Folder not found".to_string())
+        }
+    }
+    
     fn is_folder_ancestor(&self, ancestor_id: Uuid, descendant_id: Uuid) -> bool {
         if ancestor_id == descendant_id {
             return true;
@@ -1681,6 +1818,24 @@ impl App {
         }
     }
     
+    /// Scroll help dialog up
+    pub fn help_scroll_up(&mut self) {
+        self.help_scroll = self.help_scroll.saturating_sub(1);
+    }
+    
+    /// Scroll help dialog down
+    pub fn help_scroll_down(&mut self) {
+        // Help has about 50-60 lines, limit scrolling to reasonable amount
+        if self.help_scroll < 30 {
+            self.help_scroll += 1;
+        }
+    }
+    
+    /// Reset help scroll when opening help
+    pub fn reset_help_scroll(&mut self) {
+        self.help_scroll = 0;
+    }
+    
     // Vault switching functionality
     pub fn initialize_available_vaults(&mut self, config: &crate::config::Config) {
         self.available_vaults.clear();
@@ -1697,6 +1852,15 @@ impl App {
             if default_vault.exists() && default_vault.join(".obsidian").exists() {
                 if !self.available_vaults.contains(default_vault) {
                     self.available_vaults.push(default_vault.clone());
+                }
+            }
+        }
+        
+        // Add current directory if it's a vault
+        if let Ok(current_dir) = std::env::current_dir() {
+            if current_dir.join(".obsidian").exists() {
+                if !self.available_vaults.contains(&current_dir) {
+                    self.available_vaults.push(current_dir);
                 }
             }
         }
@@ -2028,11 +2192,75 @@ impl App {
             self.tag_manager.get_tagged_note_count()
         )
     }
+    
+    // Theme management methods
+    pub fn change_theme(&mut self, theme_name: &str) {
+        self.theme_manager.set_theme(theme_name);
+        
+        // Update and save config
+        self.config.ui.theme = theme_name.to_string();
+        if let Err(e) = self.config.save() {
+            self.set_operation_error(
+                format!("Theme changed but failed to save config: {}", e),
+                Some("⚠️".to_string())
+            );
+        } else {
+            self.set_operation_info(
+                format!("Theme changed to: {}", theme_name),
+                Some("🎨".to_string())
+            );
+        }
+    }
+    
+    pub fn get_available_themes() -> Vec<&'static str> {
+        use crate::theme::ThemeType;
+        ThemeType::available_themes()
+    }
+    
+    pub fn current_theme_name(&self) -> &'static str {
+        self.theme_manager.current_theme().to_string()
+    }
+    
+    pub fn show_theme_browser(&mut self) {
+        self.mode = AppMode::ThemeBrowser;
+        self.theme_browser_selected = 0;
+        // Find current theme in list
+        let current = self.current_theme_name();
+        let themes = Self::get_available_themes();
+        if let Some(pos) = themes.iter().position(|&t| t == current) {
+            self.theme_browser_selected = pos;
+        }
+        self.set_message("Opened theme browser - use arrow keys to navigate, Enter to select".to_string());
+    }
+    
+    pub fn navigate_theme_browser(&mut self, direction: i32) {
+        let themes = Self::get_available_themes();
+        let max_index = themes.len().saturating_sub(1);
+        
+        if direction < 0 && self.theme_browser_selected > 0 {
+            self.theme_browser_selected -= 1;
+        } else if direction > 0 && self.theme_browser_selected < max_index {
+            self.theme_browser_selected += 1;
+        }
+    }
+    
+    pub fn select_theme_from_browser(&mut self) {
+        let themes = Self::get_available_themes();
+        if let Some(&theme_name) = themes.get(self.theme_browser_selected) {
+            self.change_theme(theme_name);
+            self.mode = AppMode::Normal;
+        }
+    }
+    
+    pub fn cancel_theme_browser(&mut self) {
+        self.mode = AppMode::Normal;
+    }
 }
 
 impl Default for App {
     fn default() -> Self {
-        Self::new()
+        let default_config = Config::default();
+        Self::new(&default_config)
     }
 }
 

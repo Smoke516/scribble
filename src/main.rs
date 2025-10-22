@@ -98,7 +98,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app and load data
-    let mut app = App::new();
+    let mut app = App::new(&config);
+    
+    // Initialize available vaults for vault switcher
+    app.initialize_available_vaults(&config);
     
     // Determine vault path with priority: CLI arg > auto-detect > config default
     let final_vault_path = vault_path
