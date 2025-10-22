@@ -1,6 +1,6 @@
 use crate::app::{App, AppMode, FocusedPane, TreeItemType};
 use crate::syntax::simple_markdown_highlight;
-use crate::theme::{TokyoNightTheme, Icons};
+use crate::theme::{Icons, TokyoNightTheme};
 use crate::{VERSION, PKG_NAME};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -59,7 +59,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         AppMode::RecentFiles => draw_recent_files_dialog(f, app),
         AppMode::VaultSwitcher => draw_vault_switcher_dialog(f, app),
         AppMode::TagBrowser => draw_tag_browser_dialog(f, app),
-        _ => {},
+        AppMode::ThemeBrowser => draw_theme_browser_dialog(f, app),
+        AppMode::Rename => draw_rename_dialog(f, app),
+        _ => {}
     }
 }
 
@@ -82,9 +84,7 @@ fn draw_breadcrumb(f: &mut Frame, app: &App, area: Rect) {
     };
     
     let breadcrumb = Paragraph::new(breadcrumb_content)
-        .style(Style::default()
-            .fg(TokyoNightTheme::FG_DARK)
-            .bg(TokyoNightTheme::BG_DARK));
+        .style(app.theme_manager.status_bar());
     
     f.render_widget(breadcrumb, area);
 }
@@ -101,9 +101,9 @@ fn draw_folder_tree(f: &mut Frame, app: &mut App, area: Rect) {
     let is_focused = app.focused_pane == FocusedPane::Folders;
     
     let border_style = if is_focused {
-        TokyoNightTheme::border_focused()
+        app.theme_manager.border_focused()
     } else {
-        TokyoNightTheme::border_inactive()
+        app.theme_manager.border_inactive()
     };
 
     // Count notes and folders for title
@@ -137,12 +137,12 @@ fn draw_folder_tree(f: &mut Frame, app: &mut App, area: Rect) {
             let (icon, icon_style) = match item.item_type {
                 TreeItemType::Folder => {
                     if item.expanded {
-                        (Icons::FOLDER_OPEN, TokyoNightTheme::folder_expanded_icon())
+                        (Icons::FOLDER_OPEN, app.theme_manager.folder_expanded_icon())
                     } else {
-                        (Icons::FOLDER_CLOSED, TokyoNightTheme::folder_icon())
+                        (Icons::FOLDER_CLOSED, app.theme_manager.folder_icon())
                     }
                 }
-                TreeItemType::Note => (Icons::NOTE, TokyoNightTheme::note_icon()),
+                TreeItemType::Note => (Icons::NOTE, app.theme_manager.note_icon()),
             };
             
             let style = if app.mode == AppMode::Move {
@@ -194,7 +194,7 @@ fn draw_folder_tree(f: &mut Frame, app: &mut App, area: Rect) {
 
     let list = List::new(items)
         .block(block)
-        .style(TokyoNightTheme::normal());
+        .style(app.theme_manager.normal());
 
     // Create list state for proper scrolling
     let mut list_state = ListState::default();
@@ -634,6 +634,8 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::RecentFiles => "RECENT",
         AppMode::VaultSwitcher => "VAULT",
         AppMode::TagBrowser => "TAGS",
+        AppMode::ThemeBrowser => "THEMES",
+        AppMode::Rename => "RENAME",
     };
 
     let pane_text = match app.focused_pane {
@@ -643,18 +645,20 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let mode_style = match app.mode {
-        AppMode::Normal => TokyoNightTheme::mode_normal(),
-        AppMode::Insert => TokyoNightTheme::mode_insert(),
-        AppMode::Search | AppMode::SearchAdvanced | AppMode::SearchReplace => TokyoNightTheme::mode_search(),
-        AppMode::Command => TokyoNightTheme::mode_command(),
-        AppMode::InputNote | AppMode::InputFolder => TokyoNightTheme::mode_input(),
-        AppMode::Move => TokyoNightTheme::mode_command(), // Use command style for move mode
-        AppMode::Help => TokyoNightTheme::mode_search(), // Use search style for help mode
-        AppMode::DeleteConfirm => Style::default().fg(TokyoNightTheme::RED).bg(TokyoNightTheme::BG_HIGHLIGHT).add_modifier(Modifier::BOLD),
-        AppMode::QuickJump => TokyoNightTheme::mode_search(), // Use search style for quick jump
-        AppMode::RecentFiles => TokyoNightTheme::mode_command(), // Use command style for recent files
-        AppMode::VaultSwitcher => TokyoNightTheme::mode_command(), // Use command style for vault switcher
-        AppMode::TagBrowser => TokyoNightTheme::mode_command(), // Use command style for tag browser
+        AppMode::Normal => app.theme_manager.mode_normal(),
+        AppMode::Insert => app.theme_manager.mode_insert(),
+        AppMode::Search | AppMode::SearchAdvanced | AppMode::SearchReplace => app.theme_manager.mode_search(),
+        AppMode::Command => app.theme_manager.mode_command(),
+        AppMode::InputNote | AppMode::InputFolder => app.theme_manager.mode_input(),
+        AppMode::Move => app.theme_manager.mode_command(), // Use command style for move mode
+        AppMode::Help => app.theme_manager.mode_search(), // Use search style for help mode
+        AppMode::DeleteConfirm => app.theme_manager.error().add_modifier(Modifier::BOLD),
+        AppMode::QuickJump => app.theme_manager.mode_search(), // Use search style for quick jump
+        AppMode::RecentFiles => app.theme_manager.mode_command(), // Use command style for recent files
+        AppMode::VaultSwitcher => app.theme_manager.mode_command(), // Use command style for vault switcher
+        AppMode::TagBrowser => app.theme_manager.mode_command(), // Use command style for tag browser
+        AppMode::ThemeBrowser => app.theme_manager.mode_command(), // Use command style for theme browser
+        AppMode::Rename => app.theme_manager.mode_input(), // Use input style for rename mode
     };
     
     // Create enhanced message display with operation result feedback
@@ -680,7 +684,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             }
         }
     } else {
-        vec![Span::styled(&app.status_message, Style::default().fg(TokyoNightTheme::FG))]
+        vec![Span::styled(&app.status_message, app.theme_manager.normal())]
     };
     
     let mut left_spans = vec![
@@ -735,12 +739,12 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     let left_paragraph = Paragraph::new(Line::from(left_spans))
-        .block(Block::default().borders(Borders::TOP).border_style(TokyoNightTheme::border_inactive()))
-        .style(TokyoNightTheme::status_bar());
+        .block(Block::default().borders(Borders::TOP).border_style(app.theme_manager.border_inactive()))
+        .style(app.theme_manager.status_bar());
 
-    let right_paragraph = Paragraph::new(Span::styled(right_text, Style::default().fg(TokyoNightTheme::FG_DARK)))
-        .block(Block::default().borders(Borders::TOP).border_style(TokyoNightTheme::border_inactive()))
-        .style(TokyoNightTheme::status_bar())
+    let right_paragraph = Paragraph::new(Span::styled(right_text, app.theme_manager.help_text()))
+        .block(Block::default().borders(Borders::TOP).border_style(app.theme_manager.border_inactive()))
+        .style(app.theme_manager.status_bar())
         .alignment(Alignment::Right);
 
     f.render_widget(left_paragraph, status_chunks[0]);
@@ -796,8 +800,6 @@ fn draw_command_dialog(f: &mut Frame, app: &App) {
         .border_style(TokyoNightTheme::border_focused())
         .style(TokyoNightTheme::popup());
 
-    let help_text = "Available: :w :q :wq :export :import <dir> :backup :backups :help";
-    
     // Create the input line with cursor
     let mut input_content = vec![
         Span::styled(":", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
@@ -811,7 +813,28 @@ fn draw_command_dialog(f: &mut Frame, app: &App) {
     input_content.push(Span::styled("█", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::SLOW_BLINK)));
     
     let content = vec![
-        Line::from(Span::styled(help_text, TokyoNightTheme::help_text())),
+        Line::from(vec![
+            Span::styled("Available Commands:", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("File: ", Style::default().fg(TokyoNightTheme::COMMENT)),
+            Span::styled(":w :q :wq", Style::default().fg(TokyoNightTheme::GREEN)),
+            Span::styled(" • Export: ", Style::default().fg(TokyoNightTheme::COMMENT)),
+            Span::styled(":export :backup :backups", Style::default().fg(TokyoNightTheme::GREEN)),
+        ]),
+        Line::from(vec![
+            Span::styled("Theme: ", Style::default().fg(TokyoNightTheme::COMMENT)),
+            Span::styled(":theme list|<name>|current", Style::default().fg(TokyoNightTheme::GREEN)),
+            Span::styled(" • Vault: ", Style::default().fg(TokyoNightTheme::COMMENT)),
+            Span::styled(":vault", Style::default().fg(TokyoNightTheme::GREEN)),
+        ]),
+        Line::from(vec![
+            Span::styled("Import: ", Style::default().fg(TokyoNightTheme::COMMENT)),
+            Span::styled(":import <dir>", Style::default().fg(TokyoNightTheme::GREEN)),
+            Span::styled(" • Help: ", Style::default().fg(TokyoNightTheme::COMMENT)),
+            Span::styled(":help", Style::default().fg(TokyoNightTheme::GREEN)),
+        ]),
         Line::from(""),
         Line::from(input_content),
         Line::from(""),
@@ -866,6 +889,50 @@ fn draw_input_folder_dialog(f: &mut Frame, app: &App) {
 
     let input = Paragraph::new(input_text)
         .block(block);
+
+    f.render_widget(input, area);
+}
+
+fn draw_rename_dialog(f: &mut Frame, app: &App) {
+    let area = centered_rect(60, 25, f.area());
+    f.render_widget(Clear, area);
+
+    let item_type_str = if let Some(ref item_type) = app.rename_item_type {
+        match item_type {
+            TreeItemType::Note => "Note",
+            TreeItemType::Folder => "Folder",
+        }
+    } else {
+        "Item"
+    };
+
+    let block = Block::default()
+        .title(format!("✏️ Rename {}", item_type_str))
+        .borders(Borders::ALL)
+        .border_style(TokyoNightTheme::border_focused())
+        .style(TokyoNightTheme::popup());
+
+    let old_name = &app.rename_item_name;
+    
+    let content = vec![
+        Line::from(vec![
+            Span::styled("Current name: ", Style::default().fg(TokyoNightTheme::COMMENT)),
+            Span::styled(old_name, Style::default().fg(TokyoNightTheme::FG).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("New name: ", Style::default().fg(TokyoNightTheme::COMMENT)),
+            Span::styled(&app.input_buffer, Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled("█", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::SLOW_BLINK)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("Press Enter to confirm, Esc to cancel", 
+            Style::default().fg(TokyoNightTheme::COMMENT).add_modifier(Modifier::ITALIC))),
+    ];
+
+    let input = Paragraph::new(content)
+        .block(block)
+        .alignment(Alignment::Left);
 
     f.render_widget(input, area);
 }
@@ -989,8 +1056,20 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from("  n        - Create new note          F        - Create subfolder"),
         Line::from("  f        - Create folder at root     i        - Edit current note"),
         Line::from("  e        - Open in external editor   d        - Delete item"),
-        Line::from("  m        - Move item                u        - Undo last delete"),
-        Line::from("  q        - Quit application         ?        - Show this help"),
+        Line::from("  m        - Move item                r        - Rename item"),
+        Line::from("  u        - Undo last delete         q        - Quit application"),
+        Line::from("  ?        - Show this help"),
+        Line::from(""),
+        
+        // Theme & Visual
+        Line::from(vec![
+            Span::styled("🎨 ", Style::default().fg(TokyoNightTheme::YELLOW)),
+            Span::styled("Theme & Visual", Style::default().fg(TokyoNightTheme::ORANGE).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        ]),
+        Line::from(""),
+        Line::from("  F3              - Theme browser         :theme   - Theme commands"),
+        Line::from("  ↑↓ Navigate      - Browse themes          Enter    - Apply theme"),
+        Line::from("  q/Esc           - Close theme dialog    :theme current - Show active"),
         Line::from(""),
         
         // Navigation
@@ -1073,6 +1152,12 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from("    :backup         - Create backup        :backups      - List backups"),
         Line::from(""),
         Line::from(vec![
+            Span::styled("  Themes & Customization:", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from("    :theme list     - Browse themes         :theme <name> - Apply theme"),
+        Line::from("    :theme current  - Show active theme"),
+        Line::from(""),
+        Line::from(vec![
             Span::styled("  Help & Info:", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
         ]),
         Line::from("    :help, :h       - Show this help"),
@@ -1098,6 +1183,7 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from(""),
         Line::from("  • Use Ctrl+T for tag-based note organization"),
         Line::from("  • Try Ctrl+J for instant note access via fuzzy search"),
+        Line::from("  • Press F3 or :theme list for instant theme switching"),
         Line::from("  • External editor integration preserves your workflow"),
         Line::from("  • Vault mode works seamlessly with Obsidian"),
         Line::from("  • All features work in both regular and vault modes"),
@@ -1118,13 +1204,13 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         // Exit instructions
         Line::from(vec![
             Span::styled("💡 ", Style::default().fg(TokyoNightTheme::YELLOW)),
-            Span::styled("Press ", Style::default().fg(TokyoNightTheme::FG_DARK)),
-            Span::styled("Esc", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled(", ", Style::default().fg(TokyoNightTheme::FG_DARK)),
-            Span::styled("q", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled(", or ", Style::default().fg(TokyoNightTheme::FG_DARK)),
-            Span::styled("?", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled(" to close this help", Style::default().fg(TokyoNightTheme::FG_DARK)),
+            Span::styled("Navigation: ", Style::default().fg(TokyoNightTheme::FG_DARK)),
+            Span::styled("j/k, ↑↓", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(" scroll • ", Style::default().fg(TokyoNightTheme::FG_DARK)),
+            Span::styled("g/G", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(" top/bottom • ", Style::default().fg(TokyoNightTheme::FG_DARK)),
+            Span::styled("Esc/q/?", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(" close", Style::default().fg(TokyoNightTheme::FG_DARK)),
         ]),
     ]);
 
@@ -1132,7 +1218,8 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         .block(block)
         .style(TokyoNightTheme::normal())
         .wrap(Wrap { trim: false })
-        .alignment(Alignment::Left);
+        .alignment(Alignment::Left)
+        .scroll((app.help_scroll, 0));
 
     f.render_widget(paragraph, area);
 }
@@ -1680,4 +1767,56 @@ fn draw_tag_browser_dialog(f: &mut Frame, app: &App) {
         .wrap(Wrap { trim: false });
     
     f.render_widget(help_paragraph, chunks[1]);
+}
+
+fn draw_theme_browser_dialog(f: &mut Frame, app: &App) {
+    
+    let area = centered_rect(70, 80, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("🎨 Theme Browser")
+        .border_style(TokyoNightTheme::border_focused())
+        .style(TokyoNightTheme::popup());
+
+    // Get available themes
+    let themes = crate::app::App::get_available_themes();
+    let current_theme = app.current_theme_name();
+    
+    // Create simple list of themes
+    let mut content = vec![
+        Line::from(Span::styled("Available Themes:", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+    ];
+    
+    for (i, &theme_name) in themes.iter().enumerate() {
+        let is_selected = i == app.theme_browser_selected;
+        let is_current = theme_name == current_theme;
+        
+        let prefix = if is_selected { "> " } else { "  " };
+        let current_indicator = if is_current { " (current)" } else { "" };
+        
+        let style = if is_selected {
+            Style::default().fg(TokyoNightTheme::BG).bg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)
+        } else if is_current {
+            Style::default().fg(TokyoNightTheme::GREEN).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(TokyoNightTheme::FG)
+        };
+        
+        content.push(Line::from(Span::styled(
+            format!("{}{}.  {}{}", prefix, i + 1, theme_name, current_indicator), 
+            style
+        )));
+    }
+    
+    content.push(Line::from(""));
+    content.push(Line::from(Span::styled("↑↓: Navigate • Enter: Apply • q: Cancel", Style::default().fg(TokyoNightTheme::COMMENT))));
+    
+    let paragraph = Paragraph::new(content)
+        .block(block)
+        .alignment(Alignment::Left);
+    
+    f.render_widget(paragraph, area);
 }
