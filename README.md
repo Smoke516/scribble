@@ -16,7 +16,8 @@ A powerful terminal-based note-taking app with advanced tag management, Obsidian
 - **🔄 Real-time File Watching** - Live sync with external changes and file system monitoring
 - **📁 Folder organization** - Hierarchical folder structure to organize your notes
 - **📝 Markdown support** - Write notes in markdown with live syntax highlighting
-- **🎨 Syntax highlighting** - Beautiful markdown highlighting for better readability
+- **🎨 Theme System** - Multiple beautiful themes with interactive browser (`F3` or `:theme list`)
+- **✏️ Rename Support** - Easily rename folders and notes with duplicate checking (`r`)
 - **✏️ External editor support** - Edit notes in Helix, Neovim, or your favorite editor
 - **💾 Auto-save** - Notes are automatically saved when you exit edit mode
 - **🔍 Full-text search** - Search through all your notes by title or content
@@ -24,6 +25,8 @@ A powerful terminal-based note-taking app with advanced tag management, Obsidian
 
 ### 🚀 Productivity Features
 - **🏷️ Tag Filtering** - Filter notes by tags with interactive browser and analytics (`Ctrl+T`)
+- **🎨 Theme Browser** - Interactive theme selection with live preview (`F3` or `:theme list`)
+- **✏️ Quick Rename** - Rename folders and notes instantly with `r` key
 - **📁 Vault Management** - Switch between multiple Obsidian vaults instantly (`Ctrl+V`)
 - **🔔 Change Notifications** - Real-time alerts for external file modifications
 - **🔍 Fuzzy Search** - Intelligent search that finds matches even with typos (`Ctrl+F`)
@@ -35,15 +38,17 @@ A powerful terminal-based note-taking app with advanced tag management, Obsidian
 - **💾 Session Persistence** - Remembers your last opened note and editor state
 - **🆔 Version Display** - Always know what version you're running (`--version` or in-app help)
 - **🎯 Smart Autocompletion** - Intelligent markdown completion with context awareness
-- **🏷️ Enhanced Help System** - Comprehensive in-app help with organized shortcuts (`?`)
+- **📖 Scrollable Help** - Navigate help with `j/k`, `g/G`, PageUp/Down (`?`)
 
 ### Interface
-- **Tokyo Night theme** - Beautiful dark theme with carefully chosen colors
+- **Multiple Themes** - 11 beautiful themes including Tokyo Night, Gruvbox, Dracula, and more
+- **Theme Browser** - Interactive theme switcher with live preview (`F3`)
 - **Two-pane layout** - Left pane for folder/note navigation, right pane for editing
 - **Clean, responsive UI** - Works beautifully in any terminal size
 - **Enhanced Welcome Screen** - Professional onboarding with organized quick-start guide
-- **Multiple modes** - Normal, Insert, Search, and Command modes like in Vim
+- **Multiple modes** - Normal, Insert, Search, Command, and Rename modes like in Vim
 - **Real-time updates** - See your changes reflected immediately
+- **Scrollable Help** - Full keyboard navigation in help dialog
 - **Version-aware Interface** - Always shows current version in help and welcome screens
 
 ## 🎬 Demo
@@ -195,6 +200,25 @@ Once started, press '?' for in-app help.
 
 ## 🆕 What's New in v2.0.0
 
+### 🎨 Theme System
+- **Access:** Press `F3` or use `:theme list` to open the theme browser
+- **11 Themes:** Tokyo Night, Gruvbox (Dark/Light), Dracula, Nord, Solarized (Dark/Light), Monokai, One Dark, Catppuccin, and Ayu
+- **Live Preview:** See theme changes instantly as you navigate
+- **Persistent:** Theme selection is saved across sessions
+- **Commands:** `:theme <name>` to switch directly, `:theme current` to see active theme
+- **See:** [THEMES.md](THEMES.md) for complete theme showcase
+
+### ✏️ Quick Rename
+- **Access:** Press `r` on any folder or note
+- **Smart Validation:** Prevents duplicate names at the same level
+- **Live Feedback:** Shows old and new names side-by-side
+- **Safe Updates:** Properly updates all references when renaming
+
+### 📖 Scrollable Help System
+- **Navigation:** Use `j/k`, arrow keys, `g/G`, PageUp/PageDown in help dialog
+- **Organized:** Well-structured sections for easy reference
+- **Complete:** All features and shortcuts documented in-app
+
 ### 🏷️ Advanced Tag Management
 - **Access:** Press `Ctrl+T` to open the tag browser
 - **Dual Support:** Use YAML frontmatter (`tags: [work, project]`) or inline hashtags (`#work #project`)
@@ -226,7 +250,9 @@ Once started, press '?' for in-app help.
 | `Tab` | Switch between folder pane and editor |
 | `n` | Create new note |
 | `f` | Create new folder |
+| `r` | Rename selected folder or note |
 | `d` | Delete selected item |
+| `m` | Move selected item |
 | `i` | Enter insert mode (edit note) |
 | `e` | Open note in external editor |
 | `Esc` | Return to normal mode |
@@ -234,6 +260,7 @@ Once started, press '?' for in-app help.
 ### 🚀 Productivity & Navigation
 | Key | Action |
 |-----|--------|
+| `F3` | Theme Browser - browse and switch themes interactively |
 | `Ctrl+T` | Tag Browser - manage and filter notes by tags |
 | `Ctrl+V` | Vault Switcher - switch between multiple vaults |
 | `/` | Search notes by content or title (regular search) |
@@ -243,19 +270,23 @@ Once started, press '?' for in-app help.
 | `Ctrl+O` | Recent files - quick access to recently opened notes |
 | `Ctrl+L` | Follow [[wiki-style]] link at cursor |
 | `u` | Undo last delete operation (restore from trash) |
-| `?` | Show comprehensive help with all shortcuts |
+| `?` | Show comprehensive scrollable help with all shortcuts |
 
 ### Live Preview
 | Key | Action |
 |-----|--------|
 | `Ctrl+P` / `F2` | Toggle live markdown preview (split-screen) |
 
-### File Operations
+### File Operations & Commands
 | Key | Action |
 |-----|--------|
 | `:w` or `Ctrl+S` | Save current note |
 | `:q` | Quit application |
 | `:wq` | Save and quit |
+| `:theme list` | Open theme browser |
+| `:theme <name>` | Switch to specific theme |
+| `:theme current` | Show current theme name |
+| `:vault` | Open vault switcher |
 
 ### Note Format
 Write notes in standard markdown:
