@@ -5,6 +5,7 @@ mod events;
 mod models;
 mod preview;
 mod search;
+mod spell;
 mod storage;
 mod syntax;
 mod tags;
@@ -110,8 +111,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Initialize storage based on mode
     let storage: Box<dyn storage::NotebookStorage> = if let Some(vault_path) = final_vault_path.clone() {
-        println!("Using vault: {:?}", vault_path);
-        
         // Initialize file watcher for vault mode
         app.initialize_file_watcher(vault_path.clone());
         

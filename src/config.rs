@@ -28,6 +28,7 @@ pub struct UiConfig {
     pub theme: String,
     pub preview_width: u16,
     pub show_line_numbers: bool,
+    pub relative_line_numbers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +37,7 @@ pub struct BehaviorConfig {
     pub follow_links_in_new_pane: bool,
     pub backup_on_import: bool,
     pub file_watching: bool,
+    pub spell_check: bool,
 }
 
 impl Default for Config {
@@ -53,13 +55,15 @@ impl Default for Config {
             ui: UiConfig {
                 theme: "tokyo-night".to_string(),
                 preview_width: 50,
-                show_line_numbers: false,
+                show_line_numbers: true,
+                relative_line_numbers: false,
             },
             behavior: BehaviorConfig {
                 auto_save: true,
                 follow_links_in_new_pane: false,
                 backup_on_import: true,
                 file_watching: true,
+                spell_check: false,
             },
         }
     }

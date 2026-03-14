@@ -1,4 +1,5 @@
 use crate::autocomplete::{AutocompleteState, MarkdownAutocomplete};
+use pulldown_cmark;
 use crate::models::{Note, Folder, NotebookData, FolderTreeNode};
 use crate::search::{EnhancedSearch, SearchQuery, SearchResult};
 use crate::tags::TagManager;
@@ -6,7 +7,7 @@ use crate::theme::ThemeManager;
 use crate::watcher::{FileWatcher, FileChangeEvent};
 use crate::config::Config;
 use uuid::Uuid;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppMode {
@@ -27,6 +28,11 @@ pub enum AppMode {
     TagBrowser,
     ThemeBrowser,
     Rename,
+    NoteSearch,
+    Backlinks,
+    Visual,
+    TemplatePicker,
+    SpellSuggest,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -219,6 +225,64 @@ pub struct App {
     pub rename_item_id: Option<Uuid>,
     pub rename_item_type: Option<TreeItemType>,
     pub rename_item_name: String,
+
+    // Fuzzy search mode flag (replaces fragile status_message check)
+    pub is_fuzzy_search: bool,
+
+    // Text undo stack: (content_snapshot, cursor_position)
+    pub undo_stack: Vec<(String, (u16, u16))>,
+
+    // Auto-save: time of last content modification
+    pub last_keystroke: Option<std::time::Instant>,
+
+    // Search dialog: live results as user types
+    pub search_dialog_note_ids: Vec<Uuid>,
+    pub search_dialog_selected: usize,
+
+    // Tag filter: note IDs that pass the active filter (empty = show all)
+    pub tag_filter_note_ids: HashSet<Uuid>,
+
+    // Vim motions: pending key for double-key sequences (dd, yy)
+    pub pending_key: Option<char>,
+
+    // Yank buffer for y/p operations
+    pub yank_buffer: String,
+
+    // Redo stack (mirror of undo_stack, cleared on new edits)
+    pub redo_stack: Vec<(String, (u16, u16))>,
+
+    // In-note search
+    pub note_search_query: String,
+    pub note_search_matches: Vec<(u16, u16)>,  // (row, col) of each match
+    pub note_search_selected: usize,
+    pub note_search_active: bool,
+
+    // Backlinks panel
+    pub backlinks_selected: usize,
+    pub backlinks_cache: Vec<(Uuid, String)>,  // (note_id, title)
+
+    // Per-note cursor memory: restore position when revisiting a note
+    pub note_cursor_map: HashMap<Uuid, (u16, u16)>,
+
+    // Viewport height hint set by the renderer for scroll clamping
+    pub editor_viewport_height: u16,
+
+    // Visual selection mode
+    pub visual_anchor: (u16, u16),
+
+    // Template picker
+    pub template_picker_selected: usize,
+
+    // Spell check
+    pub spell_check_enabled: bool,
+    pub aspell_available: bool,
+    /// (row, col, word_len) for each misspelled word
+    pub spell_errors: Vec<(usize, usize, usize)>,
+    /// Suggestions for the word under cursor (shown in SpellSuggest popup)
+    pub spell_suggestions: Vec<String>,
+    pub spell_suggestions_selected: usize,
+    /// The word range being corrected: (row, col, len)
+    pub spell_word_range: (usize, usize, usize),
 }
 
 impl App {
@@ -312,6 +376,59 @@ impl App {
             rename_item_id: None,
             rename_item_type: None,
             rename_item_name: String::new(),
+
+            // Fuzzy search
+            is_fuzzy_search: false,
+
+            // Text undo
+            undo_stack: Vec::new(),
+
+            // Auto-save debounce
+            last_keystroke: None,
+
+            // Search dialog live results
+            search_dialog_note_ids: Vec::new(),
+            search_dialog_selected: 0,
+
+            // Tag filter
+            tag_filter_note_ids: HashSet::new(),
+
+            // Vim motions
+            pending_key: None,
+            yank_buffer: String::new(),
+
+            // Redo
+            redo_stack: Vec::new(),
+
+            // In-note search
+            note_search_query: String::new(),
+            note_search_matches: Vec::new(),
+            note_search_selected: 0,
+            note_search_active: false,
+
+            // Backlinks
+            backlinks_selected: 0,
+            backlinks_cache: Vec::new(),
+
+            // Per-note cursor memory
+            note_cursor_map: HashMap::new(),
+
+            // Viewport height
+            editor_viewport_height: 20,
+
+            // Visual selection
+            visual_anchor: (0, 0),
+
+            // Template picker
+            template_picker_selected: 0,
+
+            // Spell check — detect aspell at startup
+            spell_check_enabled: config.behavior.spell_check,
+            aspell_available: crate::spell::check_available(),
+            spell_errors: Vec::new(),
+            spell_suggestions: Vec::new(),
+            spell_suggestions_selected: 0,
+            spell_word_range: (0, 0, 0),
         };
         
         // Create default folder structure
@@ -343,13 +460,15 @@ impl App {
         // Add root level notes first
         let root_notes = self.notebook.get_folder_notes(None);
         for note in root_notes {
-            self.folder_tree_items.push(TreeItem {
-                id: note.id,
-                name: note.title.clone(),
-                item_type: TreeItemType::Note,
-                depth: 0,
-                expanded: false,
-            });
+            if self.tag_filter_note_ids.is_empty() || self.tag_filter_note_ids.contains(&note.id) {
+                self.folder_tree_items.push(TreeItem {
+                    id: note.id,
+                    name: note.title.clone(),
+                    item_type: TreeItemType::Note,
+                    depth: 0,
+                    expanded: false,
+                });
+            }
         }
         
         // Add folder tree
@@ -371,13 +490,15 @@ impl App {
         // Add notes in this folder if expanded
         if node.folder.expanded {
             for note in &node.notes {
-                self.folder_tree_items.push(TreeItem {
-                    id: note.id,
-                    name: note.title.clone(),
-                    item_type: TreeItemType::Note,
-                    depth: node.depth + 1,
-                    expanded: false,
-                });
+                if self.tag_filter_note_ids.is_empty() || self.tag_filter_note_ids.contains(&note.id) {
+                    self.folder_tree_items.push(TreeItem {
+                        id: note.id,
+                        name: note.title.clone(),
+                        item_type: TreeItemType::Note,
+                        depth: node.depth + 1,
+                        expanded: false,
+                    });
+                }
             }
             
             // Add child folders recursively
@@ -392,18 +513,41 @@ impl App {
     }
 
     pub fn select_note(&mut self, note_id: Uuid) {
+        // Save cursor position for the note we're leaving
+        if let Some(ref current) = self.current_note {
+            self.note_cursor_map.insert(current.id, self.editor_cursor);
+        }
         if let Some(note) = self.notebook.notes.get(&note_id).cloned() {
             self.current_note = Some(note.clone());
             self.editor_content = note.content.clone();
-            self.editor_cursor = (0, 0);
+            // Restore saved cursor, clamped to new content bounds
+            if let Some(&saved) = self.note_cursor_map.get(&note_id) {
+                let line_count = self.editor_content.lines().count() as u16;
+                let row = saved.0.min(line_count.saturating_sub(1));
+                let col = self.editor_content.lines().nth(row as usize)
+                    .map(|l| saved.1.min(l.len() as u16)).unwrap_or(0);
+                self.editor_cursor = (row, col);
+            } else {
+                self.editor_cursor = (0, 0);
+            }
             self.editor_scroll = 0;
+            self.adjust_scroll_to_cursor();
             self.focused_pane = FocusedPane::Editor;
+            self.undo_stack.clear();
+            self.redo_stack.clear();
+            self.pending_key = None;
+            self.clear_note_search();
             
             // Track recent file access
             self.notebook.add_recent_file(note_id);
             
             // Update preview if enabled
             self.update_preview_content();
+
+            // Run spell check if enabled
+            if self.spell_check_enabled && self.aspell_available {
+                self.spell_errors = crate::spell::check_content(&self.editor_content);
+            }
         }
     }
     
@@ -1059,6 +1203,7 @@ impl App {
     
     pub fn mark_modified(&mut self) {
         self.save_status = SaveStatus::Modified;
+        self.last_keystroke = Some(std::time::Instant::now());
     }
     
     pub fn mark_saved(&mut self) {
@@ -1077,11 +1222,29 @@ impl App {
                 self.operation_result_time = None;
             }
         }
+
+        // Auto-save debounce: save 2 seconds after last keystroke if modified
+        if let Some(last_key) = self.last_keystroke {
+            if last_key.elapsed().as_secs() >= 2 && self.save_status == SaveStatus::Modified {
+                let _ = self.save_current_note();
+                self.last_keystroke = None;
+            }
+        }
     }
     
     /// Check if autocompletion should be triggered and update state
     pub fn update_autocompletion(&mut self) {
-        if let Some(completions) = self.markdown_autocomplete.check_for_completions(
+        // Wiki-link completion takes priority over markdown snippets
+        let note_titles: Vec<String> = self.notebook.notes.values()
+            .map(|n| n.title.clone()).collect();
+        if let Some(completions) = crate::autocomplete::MarkdownAutocomplete::check_for_wiki_completions(
+            &self.editor_content,
+            self.editor_cursor.0 as usize,
+            self.editor_cursor.1 as usize,
+            &note_titles,
+        ) {
+            self.autocomplete_state.activate(completions.0, completions.1);
+        } else if let Some(completions) = self.markdown_autocomplete.check_for_completions(
             &self.editor_content,
             self.editor_cursor.0 as usize,
             self.editor_cursor.1 as usize,
@@ -1230,7 +1393,7 @@ impl App {
         }
     }
 
-    pub fn export_all_notes(&self) -> Result<(), String> {
+    pub fn export_all_notes(&self) -> Result<usize, String> {
         let storage = crate::storage::Storage::new()
             .map_err(|e| format!("Failed to initialize storage: {}", e))?;
         
@@ -1238,7 +1401,7 @@ impl App {
         std::fs::create_dir_all(&export_dir)
             .map_err(|e| format!("Failed to create export directory: {}", e))?;
         
-        let mut _exported_count = 0;
+        let mut exported_count = 0;
         for note in self.notebook.notes.values() {
             let filename = sanitize_filename(&note.title);
             let file_path = export_dir.join(format!("{}.md", filename));
@@ -1254,13 +1417,13 @@ impl App {
             std::fs::write(&file_path, content)
                 .map_err(|e| format!("Failed to export note '{}': {}", note.title, e))?;
             
-            _exported_count += 1;
+            exported_count += 1;
         }
         
-        Ok(())
+        Ok(exported_count)
     }
     
-    pub fn export_notes_to_directory(&self, directory: &str) -> Result<(), String> {
+    pub fn export_notes_to_directory(&self, directory: &str) -> Result<usize, String> {
         use std::fs;
         use std::path::Path;
         
@@ -1268,7 +1431,7 @@ impl App {
         fs::create_dir_all(export_dir)
             .map_err(|e| format!("Failed to create export directory: {}", e))?;
         
-        let mut _exported_count = 0;
+        let mut exported_count = 0;
         for note in self.notebook.notes.values() {
             let filename = sanitize_filename(&note.title);
             let file_path = export_dir.join(format!("{}.md", filename));
@@ -1284,11 +1447,10 @@ impl App {
             fs::write(&file_path, content)
                 .map_err(|e| format!("Failed to write note '{}': {}", note.title, e))?;
             
-            _exported_count += 1;
+            exported_count += 1;
         }
         
-        // Could return exported_count in future for user feedback
-        Ok(())
+        Ok(exported_count)
     }
     
     pub fn import_notes_from_directory(&mut self, directory: &str) -> Result<ImportResult, String> {
@@ -1825,8 +1987,7 @@ impl App {
     
     /// Scroll help dialog down
     pub fn help_scroll_down(&mut self) {
-        // Help has about 50-60 lines, limit scrolling to reasonable amount
-        if self.help_scroll < 30 {
+        if self.help_scroll < 200 {
             self.help_scroll += 1;
         }
     }
@@ -2110,20 +2271,15 @@ impl App {
     
     fn apply_tag_filter(&mut self) {
         if self.tag_filter_active.is_empty() {
-            // Show all notes when no filters
-            self.refresh_tree_view();
+            self.tag_filter_note_ids.clear();
         } else {
-            // Filter notes by tags
-            let _filtered_notes = self.tag_manager.get_notes_with_any_tags(
-                &self.notebook,
-                &self.tag_filter_active
-            );
-            
-            // Update the folder tree to show only filtered notes
-            // This is a simplified approach - in a more sophisticated version,
-            // we might want to create a special filtered view
-            self.refresh_tree_view();
+            self.tag_filter_note_ids = self.tag_manager
+                .get_notes_with_any_tags(&self.notebook, &self.tag_filter_active)
+                .iter()
+                .map(|n| n.id)
+                .collect();
         }
+        self.refresh_tree_view();
     }
     
     pub fn get_tag_suggestions(&self, partial: &str) -> Vec<String> {
@@ -2254,6 +2410,668 @@ impl App {
     
     pub fn cancel_theme_browser(&mut self) {
         self.mode = AppMode::Normal;
+    }
+
+    // -------------------------------------------------------------------------
+    // Text undo
+    // -------------------------------------------------------------------------
+
+    /// Save a snapshot of the current editor content to the undo stack.
+    /// Clears the redo stack because a new edit invalidates redo history.
+    pub fn push_undo_snapshot(&mut self) {
+        if let Some((last_content, _)) = self.undo_stack.last() {
+            if last_content == &self.editor_content {
+                return; // nothing changed
+            }
+        }
+        if self.undo_stack.len() >= 50 {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push((self.editor_content.clone(), self.editor_cursor));
+        self.redo_stack.clear();
+    }
+
+    /// Restore the previous editor snapshot. Pushes current state to redo stack.
+    pub fn undo_text(&mut self) -> bool {
+        if let Some((content, cursor)) = self.undo_stack.pop() {
+            // Save current state to redo stack before replacing it
+            if self.redo_stack.len() >= 50 {
+                self.redo_stack.remove(0);
+            }
+            self.redo_stack.push((self.editor_content.clone(), self.editor_cursor));
+            self.editor_content = content;
+            self.editor_cursor = cursor;
+            self.mark_modified();
+            self.update_preview_content();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Re-apply the last undone change. Returns true if a redo snapshot was available.
+    pub fn redo_text(&mut self) -> bool {
+        if let Some((content, cursor)) = self.redo_stack.pop() {
+            // Save current state to undo stack
+            if self.undo_stack.len() >= 50 {
+                self.undo_stack.remove(0);
+            }
+            self.undo_stack.push((self.editor_content.clone(), self.editor_cursor));
+            self.editor_content = content;
+            self.editor_cursor = cursor;
+            self.mark_modified();
+            self.update_preview_content();
+            true
+        } else {
+            false
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Vim-style cursor movement (Normal mode, editor focused)
+    // -------------------------------------------------------------------------
+
+    /// Move cursor down one line, adjusting scroll so it stays visible.
+    pub fn cursor_down_normal(&mut self) {
+        let line_count = self.editor_content.lines().count() as u16;
+        if self.editor_cursor.0 < line_count.saturating_sub(1) {
+            self.editor_cursor.0 += 1;
+            let lines: Vec<&str> = self.editor_content.lines().collect();
+            if let Some(line) = lines.get(self.editor_cursor.0 as usize) {
+                self.editor_cursor.1 = self.editor_cursor.1.min(line.len() as u16);
+            }
+            self.adjust_scroll_to_cursor();
+        }
+    }
+
+    /// Move cursor up one line, adjusting scroll so it stays visible.
+    pub fn cursor_up_normal(&mut self) {
+        if self.editor_cursor.0 > 0 {
+            self.editor_cursor.0 -= 1;
+            let lines: Vec<&str> = self.editor_content.lines().collect();
+            if let Some(line) = lines.get(self.editor_cursor.0 as usize) {
+                self.editor_cursor.1 = self.editor_cursor.1.min(line.len() as u16);
+            }
+            self.adjust_scroll_to_cursor();
+        }
+    }
+
+    /// Move cursor to the start of the current line (0).
+    pub fn cursor_to_line_start(&mut self) {
+        self.editor_cursor.1 = 0;
+    }
+
+    /// Move cursor to the end of the current line ($).
+    pub fn cursor_to_line_end(&mut self) {
+        let lines: Vec<&str> = self.editor_content.lines().collect();
+        if let Some(line) = lines.get(self.editor_cursor.0 as usize) {
+            self.editor_cursor.1 = line.len() as u16;
+        }
+    }
+
+    /// Move cursor forward one word (w).
+    pub fn cursor_word_forward(&mut self) {
+        let lines: Vec<&str> = self.editor_content.lines().collect();
+        if let Some(line) = lines.get(self.editor_cursor.0 as usize) {
+            let chars: Vec<char> = line.chars().collect();
+            let mut col = self.editor_cursor.1 as usize;
+            // Skip current non-whitespace
+            while col < chars.len() && !chars[col].is_whitespace() { col += 1; }
+            // Skip whitespace
+            while col < chars.len() && chars[col].is_whitespace() { col += 1; }
+            self.editor_cursor.1 = col as u16;
+        }
+    }
+
+    /// Move cursor backward one word (b).
+    pub fn cursor_word_backward(&mut self) {
+        let lines: Vec<&str> = self.editor_content.lines().collect();
+        if let Some(line) = lines.get(self.editor_cursor.0 as usize) {
+            let chars: Vec<char> = line.chars().collect();
+            let mut col = self.editor_cursor.1 as usize;
+            // Skip whitespace backward
+            while col > 0 && chars[col - 1].is_whitespace() { col -= 1; }
+            // Skip word chars backward
+            while col > 0 && !chars[col - 1].is_whitespace() { col -= 1; }
+            self.editor_cursor.1 = col as u16;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Vim-style editing operations (Normal mode)
+    // -------------------------------------------------------------------------
+
+    /// Delete the character under the cursor (x).
+    pub fn delete_char_at_cursor(&mut self) {
+        let row = self.editor_cursor.0 as usize;
+        let col = self.editor_cursor.1 as usize;
+        // Collect what we need and drop the borrow before mutating
+        let char_exists = self.editor_content.lines()
+            .nth(row)
+            .map(|l| col < l.len())
+            .unwrap_or(false);
+        if char_exists {
+            let abs_pos = self.get_line_start_position(row) + col;
+            self.editor_content.remove(abs_pos);
+            // Clamp cursor to new line length
+            let new_len = self.editor_content
+                .lines()
+                .nth(row)
+                .map(|l| l.len())
+                .unwrap_or(0);
+            if self.editor_cursor.1 as usize > new_len && new_len > 0 {
+                self.editor_cursor.1 = new_len as u16;
+            }
+            self.mark_modified();
+            self.update_preview_content();
+        }
+    }
+
+    /// Delete the current line and store it in the yank buffer (dd).
+    pub fn delete_current_line(&mut self) {
+        let row = self.editor_cursor.0 as usize;
+        // Collect owned data before any mutable operations
+        let line_info: Option<(usize, String, usize)> = {
+            let lines: Vec<&str> = self.editor_content.lines().collect();
+            lines.get(row).map(|l| (lines.len(), l.to_string(), l.len()))
+        };
+        let (line_count, line_content, line_len) = match line_info {
+            Some(v) => v,
+            None => return,
+        };
+
+        self.push_undo_snapshot();
+        self.yank_buffer = line_content;
+
+        let start = self.get_line_start_position(row);
+        if row + 1 < line_count {
+            // Remove line including its trailing newline
+            let end = start + line_len + 1;
+            self.editor_content.drain(start..end);
+        } else if start > 0 {
+            // Last line: also remove the preceding newline
+            self.editor_content.truncate(start.saturating_sub(1));
+            self.editor_cursor.0 = self.editor_cursor.0.saturating_sub(1);
+        } else {
+            self.editor_content.clear();
+            self.editor_cursor = (0, 0);
+            self.mark_modified();
+            self.update_preview_content();
+            return;
+        }
+
+        let new_line_count = self.editor_content.lines().count() as u16;
+        if self.editor_cursor.0 >= new_line_count && new_line_count > 0 {
+            self.editor_cursor.0 = new_line_count - 1;
+        }
+        self.editor_cursor.1 = 0;
+        self.mark_modified();
+        self.update_preview_content();
+    }
+
+    /// Copy the current line into the yank buffer (yy).
+    pub fn yank_current_line(&mut self) {
+        let row = self.editor_cursor.0 as usize;
+        // Collect to owned String before any mutable operations
+        let yanked: Option<String> = self.editor_content.lines().nth(row).map(|l| l.to_string());
+        if let Some(line) = yanked {
+            self.yank_buffer = line;
+            let preview: String = self.yank_buffer.chars().take(40).collect();
+            self.set_operation_info(format!("Yanked: \"{}\"", preview), Some("📋".to_string()));
+        }
+    }
+
+    /// Paste yank buffer on a new line below the cursor (p).
+    pub fn paste_below(&mut self) {
+        if self.yank_buffer.is_empty() {
+            self.set_message("Nothing in yank buffer".to_string());
+            return;
+        }
+        self.push_undo_snapshot();
+        // Compute insert position and drop borrow before mutating
+        let insert_pos = {
+            let lines: Vec<&str> = self.editor_content.lines().collect();
+            let row = self.editor_cursor.0 as usize;
+            if row < lines.len() {
+                self.get_line_start_position(row) + lines[row].len()
+            } else {
+                self.editor_content.len()
+            }
+        };
+        let to_insert = format!("\n{}", self.yank_buffer);
+        self.editor_content.insert_str(insert_pos, &to_insert);
+        self.editor_cursor.0 += 1;
+        self.editor_cursor.1 = 0;
+        self.adjust_scroll_to_cursor();
+        self.mark_modified();
+        self.update_preview_content();
+    }
+
+    /// Open a new blank line below the cursor and prepare for insert (o).
+    pub fn open_line_below(&mut self) {
+        self.push_undo_snapshot();
+        // Compute insert position and drop borrow before mutating
+        let insert_pos = {
+            let lines: Vec<&str> = self.editor_content.lines().collect();
+            let row = self.editor_cursor.0 as usize;
+            if row < lines.len() {
+                self.get_line_start_position(row) + lines[row].len()
+            } else {
+                self.editor_content.len()
+            }
+        };
+        self.editor_content.insert(insert_pos, '\n');
+        self.editor_cursor.0 += 1;
+        self.editor_cursor.1 = 0;
+        self.adjust_scroll_to_cursor();
+        self.mark_modified();
+    }
+
+    // -------------------------------------------------------------------------
+    // In-note search
+    // -------------------------------------------------------------------------
+
+    /// Scan editor_content for all occurrences of note_search_query and store
+    /// their (row, col) positions in note_search_matches.
+    pub fn find_note_search_matches(&mut self) {
+        self.note_search_matches.clear();
+        self.note_search_selected = 0;
+        if self.note_search_query.is_empty() {
+            return;
+        }
+        let query_lower = self.note_search_query.to_lowercase();
+        for (row, line) in self.editor_content.lines().enumerate() {
+            let line_lower = line.to_lowercase();
+            let mut start = 0;
+            while let Some(col) = line_lower[start..].find(&query_lower) {
+                self.note_search_matches.push((row as u16, (start + col) as u16));
+                start += col + query_lower.len().max(1);
+            }
+        }
+    }
+
+    /// Jump to the next in-note search match (wraps around).
+    pub fn note_search_next(&mut self) {
+        if self.note_search_matches.is_empty() { return; }
+        self.note_search_selected = (self.note_search_selected + 1)
+            % self.note_search_matches.len();
+        self.jump_to_selected_match_pub();
+    }
+
+    /// Jump to the previous in-note search match (wraps around).
+    pub fn note_search_prev(&mut self) {
+        if self.note_search_matches.is_empty() { return; }
+        if self.note_search_selected == 0 {
+            self.note_search_selected = self.note_search_matches.len() - 1;
+        } else {
+            self.note_search_selected -= 1;
+        }
+        self.jump_to_selected_match_pub();
+    }
+
+    pub fn jump_to_selected_match_pub(&mut self) {
+        if let Some(&(row, col)) = self.note_search_matches.get(self.note_search_selected) {
+            self.editor_cursor = (row, col);
+            self.adjust_scroll_to_cursor();
+        }
+    }
+
+    /// Clear all in-note search state.
+    pub fn clear_note_search(&mut self) {
+        self.note_search_query.clear();
+        self.note_search_matches.clear();
+        self.note_search_selected = 0;
+        self.note_search_active = false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Backlinks panel
+    // -------------------------------------------------------------------------
+
+    /// Populate backlinks_cache for the current note and enter Backlinks mode.
+    pub fn show_backlinks_panel(&mut self) {
+        if self.current_note.is_none() {
+            self.set_message("No note selected".to_string());
+            return;
+        }
+        self.backlinks_cache = self.get_backlinks_for_current_note()
+            .into_iter()
+            .filter_map(|title| {
+                self.notebook.find_note_by_title(&title)
+                    .map(|id| (id, title))
+            })
+            .collect();
+        if self.backlinks_cache.is_empty() {
+            self.set_message("No notes link to this note".to_string());
+        } else {
+            self.backlinks_selected = 0;
+            self.mode = AppMode::Backlinks;
+        }
+    }
+
+    pub fn cancel_backlinks(&mut self) {
+        self.mode = AppMode::Normal;
+    }
+
+    pub fn backlinks_navigate_up(&mut self) {
+        if self.backlinks_selected > 0 {
+            self.backlinks_selected -= 1;
+        }
+    }
+
+    pub fn backlinks_navigate_down(&mut self) {
+        if self.backlinks_selected < self.backlinks_cache.len().saturating_sub(1) {
+            self.backlinks_selected += 1;
+        }
+    }
+
+    /// Open the note selected in the backlinks panel.
+    pub fn open_selected_backlink(&mut self) {
+        if let Some(note_id) = self.backlinks_cache.get(self.backlinks_selected).map(|(id, _)| *id) {
+            self.mode = AppMode::Normal;
+            self.open_note_by_id(note_id);
+        }
+    }
+
+    /// Open a new blank line above the cursor and prepare for insert (O).
+    pub fn open_line_above(&mut self) {
+        self.push_undo_snapshot();
+        let row = self.editor_cursor.0 as usize;
+        let insert_pos = self.get_line_start_position(row);
+        self.editor_content.insert(insert_pos, '\n');
+        // cursor stays on the new (now current) line
+        self.editor_cursor.1 = 0;
+        self.adjust_scroll_to_cursor();
+        self.mark_modified();
+    }
+
+    // -------------------------------------------------------------------------
+    // Jump to line (:N command)
+    // -------------------------------------------------------------------------
+
+    pub fn jump_to_line(&mut self, line_num: usize) {
+        if self.current_note.is_none() { return; }
+        let line_count = self.editor_content.lines().count().max(1);
+        let target = (line_num.saturating_sub(1)).min(line_count - 1) as u16;
+        self.editor_cursor.0 = target;
+        let lines: Vec<&str> = self.editor_content.lines().collect();
+        let line_len = lines.get(target as usize).map(|l| l.len() as u16).unwrap_or(0);
+        self.editor_cursor.1 = self.editor_cursor.1.min(line_len);
+        self.adjust_scroll_to_cursor();
+    }
+
+    // -------------------------------------------------------------------------
+    // Visual selection mode
+    // -------------------------------------------------------------------------
+
+    pub fn enter_visual_mode(&mut self) {
+        self.visual_anchor = self.editor_cursor;
+        self.mode = AppMode::Visual;
+    }
+
+    /// Returns the (start, end) of the visual selection, ordered by position.
+    pub fn get_visual_selection(&self) -> ((u16, u16), (u16, u16)) {
+        let a = self.visual_anchor;
+        let c = self.editor_cursor;
+        if a.0 < c.0 || (a.0 == c.0 && a.1 <= c.1) {
+            (a, c)
+        } else {
+            (c, a)
+        }
+    }
+
+    /// Yank the visual selection into the yank buffer and exit Visual mode.
+    pub fn yank_visual_selection(&mut self) {
+        let (start, end) = self.get_visual_selection();
+        let lines: Vec<&str> = self.editor_content.lines().collect();
+        let mut selected = String::new();
+        for row in start.0..=end.0 {
+            if let Some(line) = lines.get(row as usize) {
+                let from = if row == start.0 { (start.1 as usize).min(line.len()) } else { 0 };
+                let to   = if row == end.0   { ((end.1 as usize) + 1).min(line.len()) } else { line.len() };
+                selected.push_str(&line[from..to]);
+                if row < end.0 { selected.push('\n'); }
+            }
+        }
+        self.yank_buffer = selected;
+        let preview: String = self.yank_buffer.chars().take(40).collect();
+        self.set_operation_info(format!("Yanked: \"{}\"", preview), Some("📋".to_string()));
+        self.mode = AppMode::Normal;
+    }
+
+    /// Delete the visual selection and exit Visual mode.
+    pub fn delete_visual_selection(&mut self) {
+        let (start, end) = self.get_visual_selection();
+        // First yank it
+        {
+            let lines: Vec<&str> = self.editor_content.lines().collect();
+            let mut selected = String::new();
+            for row in start.0..=end.0 {
+                if let Some(line) = lines.get(row as usize) {
+                    let from = if row == start.0 { (start.1 as usize).min(line.len()) } else { 0 };
+                    let to   = if row == end.0   { ((end.1 as usize) + 1).min(line.len()) } else { line.len() };
+                    selected.push_str(&line[from..to]);
+                    if row < end.0 { selected.push('\n'); }
+                }
+            }
+            self.yank_buffer = selected;
+        }
+        // Now delete
+        self.push_undo_snapshot();
+        let mut new_lines: Vec<String> = self.editor_content.lines().map(|l| l.to_string()).collect();
+        if start.0 == end.0 {
+            if let Some(line) = new_lines.get_mut(start.0 as usize) {
+                let from = (start.1 as usize).min(line.len());
+                let to   = ((end.1 as usize) + 1).min(line.len());
+                line.drain(from..to);
+            }
+        } else {
+            let prefix = new_lines.get(start.0 as usize)
+                .map(|l| l[..(start.1 as usize).min(l.len())].to_string())
+                .unwrap_or_default();
+            let suffix = new_lines.get(end.0 as usize)
+                .map(|l| l[((end.1 as usize) + 1).min(l.len())..].to_string())
+                .unwrap_or_default();
+            let s = start.0 as usize;
+            let e = (end.0 as usize).min(new_lines.len().saturating_sub(1));
+            new_lines.drain(s..=e);
+            new_lines.insert(s, format!("{}{}", prefix, suffix));
+        }
+        // Preserve trailing newline
+        let had_trailing = self.editor_content.ends_with('\n');
+        self.editor_content = new_lines.join("\n");
+        if had_trailing && !self.editor_content.ends_with('\n') {
+            self.editor_content.push('\n');
+        }
+        self.editor_cursor = start;
+        self.mark_modified();
+        self.update_preview_content();
+        self.mode = AppMode::Normal;
+    }
+
+    // -------------------------------------------------------------------------
+    // Templates
+    // -------------------------------------------------------------------------
+
+    pub fn get_templates() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("Blank",       "# Untitled\n\n"),
+            ("Daily Note",  "# {date}\n\n## Tasks\n\n- [ ] \n\n## Notes\n\n"),
+            ("Meeting",     "# Meeting: {date}\n\n## Attendees\n\n- \n\n## Agenda\n\n1. \n\n## Notes\n\n## Action Items\n\n- [ ] \n"),
+            ("Project",     "# Project: Untitled\n\n## Overview\n\n## Goals\n\n- \n\n## Progress\n\n## Notes\n\n"),
+        ]
+    }
+
+    pub fn show_template_picker(&mut self) {
+        if self.current_note.is_none() {
+            self.set_message("Create or select a note first".to_string());
+            return;
+        }
+        self.mode = AppMode::TemplatePicker;
+        self.template_picker_selected = 0;
+    }
+
+    pub fn apply_template(&mut self, index: usize) {
+        let templates = Self::get_templates();
+        if let Some((_, content)) = templates.get(index) {
+            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            let filled = content.replace("{date}", &today);
+            self.push_undo_snapshot();
+            self.editor_content = filled;
+            if let Some(ref mut note) = self.current_note {
+                note.content = self.editor_content.clone();
+            }
+            self.editor_cursor = (0, 0);
+            self.editor_scroll = 0;
+            self.mark_modified();
+            self.update_preview_content();
+        }
+        self.mode = AppMode::Insert;
+    }
+
+    // -------------------------------------------------------------------------
+    // HTML export
+    // -------------------------------------------------------------------------
+
+    // -------------------------------------------------------------------------
+    // Spell check
+    // -------------------------------------------------------------------------
+
+    /// Re-run aspell on the current note content and update `spell_errors`.
+    pub fn run_spell_check(&mut self) {
+        if !self.spell_check_enabled || !self.aspell_available {
+            return;
+        }
+        self.spell_errors = crate::spell::check_content(&self.editor_content);
+    }
+
+    /// Toggle spell checking on/off.
+    pub fn toggle_spell_check(&mut self) {
+        if !self.aspell_available {
+            self.set_message("aspell not found — install it with: sudo apt install aspell".to_string());
+            return;
+        }
+        self.spell_check_enabled = !self.spell_check_enabled;
+        if self.spell_check_enabled {
+            self.run_spell_check();
+            self.set_message(format!("Spell check ON — {} error(s) found", self.spell_errors.len()));
+        } else {
+            self.spell_errors.clear();
+            self.set_message("Spell check OFF".to_string());
+        }
+    }
+
+    /// Return the word under the editor cursor: `(row, col, len, word)`.
+    ///
+    /// Also checks `col - 1` so this works when the cursor sits just past the
+    /// end of a word (the natural position after exiting Insert mode).
+    pub fn get_word_at_cursor(&self) -> Option<(usize, usize, usize, String)> {
+        let row = self.editor_cursor.0 as usize;
+        let col = self.editor_cursor.1 as usize;
+        let line = self.editor_content.lines().nth(row)?;
+        let bytes = line.as_bytes();
+        let len = line.len();
+
+        // Prefer the char at col; fall back to col-1 for the common case where
+        // the cursor is one position past the end of a word.
+        let search_col = if col < len && bytes[col].is_ascii_alphabetic() {
+            col
+        } else if col > 0 && bytes[col - 1].is_ascii_alphabetic() {
+            col - 1
+        } else {
+            return None;
+        };
+
+        let mut start = search_col;
+        while start > 0 && bytes[start - 1].is_ascii_alphabetic() {
+            start -= 1;
+        }
+        let mut end = search_col;
+        while end < len && bytes[end].is_ascii_alphabetic() {
+            end += 1;
+        }
+        let word = line[start..end].to_string();
+        if word.is_empty() {
+            return None;
+        }
+        Some((row, start, end - start, word))
+    }
+
+    /// Enter `SpellSuggest` mode for the word at the cursor.
+    pub fn show_spell_suggestions(&mut self) {
+        if !self.aspell_available {
+            self.set_message("aspell not found".to_string());
+            return;
+        }
+        if let Some((row, col, len, word)) = self.get_word_at_cursor() {
+            self.spell_word_range = (row, col, len);
+            self.spell_suggestions = crate::spell::get_suggestions(&word);
+            self.spell_suggestions_selected = 0;
+            self.mode = AppMode::SpellSuggest;
+        } else {
+            self.set_message("No word at cursor".to_string());
+        }
+    }
+
+    /// Replace the word at `spell_word_range` with the currently selected suggestion.
+    pub fn apply_spell_suggestion(&mut self) {
+        let (row, col, wlen) = self.spell_word_range;
+        if let Some(suggestion) = self.spell_suggestions.get(self.spell_suggestions_selected).cloned() {
+            let lines: Vec<&str> = self.editor_content.lines().collect();
+            if row < lines.len() {
+                let line = lines[row];
+                let before = &line[..col.min(line.len())];
+                let after_start = (col + wlen).min(line.len());
+                let after = &line[after_start..];
+                let new_line = format!("{}{}{}", before, suggestion, after);
+                // Rebuild content replacing only that line
+                let new_content: String = self.editor_content.lines().enumerate()
+                    .map(|(i, l)| if i == row { new_line.as_str() } else { l })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.editor_content = new_content;
+                self.mark_modified();
+            }
+        }
+        self.mode = AppMode::Normal;
+        self.run_spell_check();
+    }
+
+    pub fn export_notes_to_html(&self, path: Option<&str>) -> Result<usize, String> {
+        use std::fs;
+        use std::path::PathBuf;
+        let base_path = if let Some(p) = path {
+            PathBuf::from(p)
+        } else {
+            dirs::document_dir()
+                .or_else(dirs::home_dir)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("scribble_export")
+        };
+        fs::create_dir_all(&base_path).map_err(|e| e.to_string())?;
+        let mut count = 0;
+        for note in self.notebook.notes.values() {
+            let parser = pulldown_cmark::Parser::new(&note.content);
+            let mut html_body = String::new();
+            pulldown_cmark::html::push_html(&mut html_body, parser);
+            let full_html = format!(
+                "<!DOCTYPE html>\n<html>\n<head><meta charset=\"utf-8\"><title>{title}</title>\
+                 <style>body{{font-family:sans-serif;max-width:800px;margin:auto;padding:2em;line-height:1.6}}\
+                 pre{{background:#1e1e2e;color:#cdd6f4;padding:1em;border-radius:6px;overflow:auto}}\
+                 code{{background:#313244;padding:0.2em 0.4em;border-radius:3px}}\
+                 blockquote{{border-left:4px solid #89b4fa;margin-left:0;padding-left:1em;color:#6c7086}}</style>\
+                 </head>\n<body>\n<h1>{title}</h1>\n{body}</body>\n</html>",
+                title = note.title,
+                body  = html_body,
+            );
+            let safe = note.title.chars()
+                .map(|c| if "/\\:*?\"<>|".contains(c) { '_' } else { c })
+                .collect::<String>();
+            let file_path = base_path.join(format!("{}.html", safe));
+            fs::write(&file_path, full_html).map_err(|e| e.to_string())?;
+            count += 1;
+        }
+        Ok(count)
     }
 }
 
