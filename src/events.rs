@@ -21,43 +21,75 @@ pub fn handle_event(app: &mut App, event: Event) -> Result<(), Box<dyn std::erro
         AppMode::TagBrowser => handle_tag_browser_mode(app, key),
         AppMode::ThemeBrowser => handle_theme_browser_mode(app, key),
         AppMode::Rename => handle_rename_mode(app, key),
+        AppMode::NoteSearch => handle_note_search_mode(app, key),
+        AppMode::Backlinks => handle_backlinks_mode(app, key),
+        AppMode::Visual => handle_visual_mode(app, key),
+        AppMode::TemplatePicker => handle_template_picker_mode(app, key),
+        AppMode::SpellSuggest => handle_spell_suggest_mode(app, key),
         }
     }
     Ok(())
 }
 
 fn handle_normal_mode(app: &mut App, key: KeyEvent) {
-    
+    // Clear pending vim key if current key doesn't continue the sequence
+    let continues_sequence = matches!(
+        (app.pending_key, &key.code),
+        (Some('d'), KeyCode::Char('d')) | (Some('y'), KeyCode::Char('y')) | (Some('z'), KeyCode::Char('='))
+    );
+    if app.pending_key.is_some() && !continues_sequence {
+        app.pending_key = None;
+    }
+
+    let editor_focused = app.focused_pane == FocusedPane::Editor && app.current_note.is_some();
+
     match key.code {
+        // Esc: clear in-note search highlights if active
+        KeyCode::Esc if app.note_search_active => {
+            app.clear_note_search();
+        }
         // Quick jump (Ctrl+J) - check this BEFORE basic j navigation
         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.start_quick_jump();
         }
-        
-        // Navigation
+
+        // Navigation / cursor movement
         KeyCode::Char('j') | KeyCode::Down => {
-            if (app.focused_pane == FocusedPane::Editor || app.focused_pane == FocusedPane::Preview) && app.current_note.is_some() {
+            if editor_focused {
+                app.cursor_down_normal();
+            } else if app.focused_pane == FocusedPane::Preview {
                 app.scroll_down();
             } else {
                 app.navigate_down();
             }
         },
         KeyCode::Char('k') | KeyCode::Up => {
-            if (app.focused_pane == FocusedPane::Editor || app.focused_pane == FocusedPane::Preview) && app.current_note.is_some() {
+            if editor_focused {
+                app.cursor_up_normal();
+            } else if app.focused_pane == FocusedPane::Preview {
                 app.scroll_up();
             } else {
                 app.navigate_up();
             }
         },
         KeyCode::Char('g') => {
-            if (app.focused_pane == FocusedPane::Editor || app.focused_pane == FocusedPane::Preview) && app.current_note.is_some() {
+            if editor_focused {
+                app.editor_cursor = (0, 0);
+                app.scroll_to_top();
+            } else if app.focused_pane == FocusedPane::Preview {
                 app.scroll_to_top();
             } else {
                 app.navigate_to_top();
             }
         },
         KeyCode::Char('G') => {
-            if (app.focused_pane == FocusedPane::Editor || app.focused_pane == FocusedPane::Preview) && app.current_note.is_some() {
+            if editor_focused {
+                let line_count = app.editor_content.lines().count() as u16;
+                app.editor_cursor.0 = line_count.saturating_sub(1);
+                app.editor_cursor.1 = app.editor_content.lines()
+                    .last().map(|l| l.len() as u16).unwrap_or(0);
+                app.scroll_to_bottom();
+            } else if app.focused_pane == FocusedPane::Preview {
                 app.scroll_to_bottom();
             } else {
                 app.navigate_to_bottom();
@@ -95,18 +127,23 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             }
         }
         
-        // Create new items
+        // Create new items / in-note search next
         KeyCode::Char('n') => {
-            let folder_id = if let Some(item) = app.get_selected_item() {
-                match item.item_type {
-                    TreeItemType::Folder => Some(item.id),
-                    TreeItemType::Note => None, // Create in root
-                }
+            if editor_focused && app.note_search_active {
+                app.note_search_next();
             } else {
-                None
-            };
-            
-            app.start_new_note_input(folder_id);
+                let folder_id = if let Some(item) = app.get_selected_item() {
+                    match item.item_type {
+                        TreeItemType::Folder => Some(item.id),
+                        TreeItemType::Note => app.notebook.notes
+                            .get(&item.id)
+                            .and_then(|n| n.folder_id),
+                    }
+                } else {
+                    None
+                };
+                app.start_new_note_input(folder_id);
+            }
         }
         
         KeyCode::Char('f') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -137,9 +174,49 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             app.start_new_folder_input(parent_id);
         }
         
+        // Vim motions (only when editor focused)
+        KeyCode::Char('A') if editor_focused => {
+            app.push_undo_snapshot();
+            app.cursor_to_line_end();
+            app.mode = AppMode::Insert;
+        }
+        KeyCode::Char('o') if editor_focused => {
+            app.push_undo_snapshot();
+            app.open_line_below();
+            app.mode = AppMode::Insert;
+        }
+        KeyCode::Char('O') if editor_focused => {
+            app.push_undo_snapshot();
+            app.open_line_above();
+            app.mode = AppMode::Insert;
+        }
+        KeyCode::Char('0') if editor_focused => {
+            app.cursor_to_line_start();
+        }
+        KeyCode::Char('$') if editor_focused => {
+            app.cursor_to_line_end();
+        }
+        KeyCode::Char('w') if editor_focused => {
+            app.cursor_word_forward();
+        }
+        KeyCode::Char('b') if editor_focused => {
+            app.cursor_word_backward();
+        }
+        KeyCode::Char('x') if editor_focused => {
+            app.push_undo_snapshot();
+            app.delete_char_at_cursor();
+            app.mark_modified();
+        }
+        KeyCode::Char('p') if editor_focused => {
+            app.push_undo_snapshot();
+            app.paste_below();
+            app.mark_modified();
+        }
+
         // Edit mode
         KeyCode::Char('i') => {
             if app.current_note.is_some() {
+                app.push_undo_snapshot();
                 app.mode = AppMode::Insert;
                 app.focused_pane = FocusedPane::Editor;
             } else {
@@ -154,11 +231,90 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             }
         }
         
-        // Delete (only if not Ctrl+D)
+        // Delete: 'dd' to delete line when editor focused, else start delete confirmation
         KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Err(e) = app.start_delete_confirmation() {
-                app.set_message(e);
+            if editor_focused {
+                if app.pending_key == Some('d') {
+                    app.pending_key = None;
+                    app.push_undo_snapshot();
+                    app.delete_current_line();
+                    app.mark_modified();
+                } else {
+                    app.pending_key = Some('d');
+                }
+            } else {
+                if let Err(e) = app.start_delete_confirmation() {
+                    app.set_message(e);
+                }
             }
+        }
+
+        // Yank line: 'yy' when editor focused
+        KeyCode::Char('y') if editor_focused => {
+            if app.pending_key == Some('y') {
+                app.pending_key = None;
+                app.yank_current_line();
+                app.set_message("Line yanked".to_string());
+            } else {
+                app.pending_key = Some('y');
+            }
+        }
+
+        // Ctrl+Z undo (editor focused)
+        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) && editor_focused => {
+            if app.undo_text() {
+                app.set_operation_info("Undo".to_string(), Some("↩".to_string()));
+            } else {
+                app.set_message("Nothing to undo".to_string());
+            }
+        }
+
+        // Ctrl+Y redo (editor focused)
+        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) && editor_focused => {
+            if app.redo_text() {
+                app.set_operation_info("Redo".to_string(), Some("↪".to_string()));
+            } else {
+                app.set_message("Nothing to redo".to_string());
+            }
+        }
+
+        // N: in-note search prev (editor) or template picker (tree)
+        KeyCode::Char('N') => {
+            if editor_focused && app.note_search_active {
+                app.note_search_prev();
+            } else if !editor_focused {
+                app.show_template_picker();
+            }
+        }
+
+        // z= spell suggestions  /  z (sets pending key)
+        KeyCode::Char('=') if editor_focused && app.pending_key == Some('z') => {
+            app.pending_key = None;
+            app.show_spell_suggestions();
+        }
+        KeyCode::Char('z') if editor_focused && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.pending_key = Some('z');
+        }
+
+        // v: enter visual selection mode (editor focused)
+        KeyCode::Char('v') if editor_focused && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.enter_visual_mode();
+        }
+
+        // h/l: horizontal cursor movement in Normal mode (editor focused)
+        KeyCode::Char('h') | KeyCode::Left if editor_focused => {
+            if app.editor_cursor.1 > 0 { app.editor_cursor.1 -= 1; }
+        }
+        KeyCode::Char('l') | KeyCode::Right if editor_focused => {
+            let line_len = app.editor_content.lines()
+                .nth(app.editor_cursor.0 as usize)
+                .map(|l| l.len() as u16).unwrap_or(0);
+            if app.editor_cursor.1 < line_len { app.editor_cursor.1 += 1; }
+        }
+
+        // Backlinks panel (Ctrl+B)
+        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.show_backlinks_panel();
         }
         
         // Move (only if not Ctrl+M)
@@ -171,17 +327,29 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             app.start_rename_item();
         }
         
-        // Search (regular search)
+        // In-note search when editor focused; global note search otherwise
         KeyCode::Char('/') => {
-            app.mode = AppMode::Search;
-            app.input_buffer.clear();
+            if editor_focused {
+                app.note_search_query.clear();
+                app.note_search_matches.clear();
+                app.note_search_active = true;
+                app.mode = AppMode::NoteSearch;
+            } else {
+                app.mode = AppMode::Search;
+                app.is_fuzzy_search = false;
+                app.input_buffer.clear();
+                app.search_dialog_note_ids.clear();
+                app.search_dialog_selected = 0;
+            }
         }
-        
-        // Fuzzy search (Ctrl+F - replaces advanced search)
+
+        // Fuzzy search (Ctrl+F)
         KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.mode = AppMode::Search; // Use same search mode but will trigger fuzzy search
+            app.mode = AppMode::Search;
+            app.is_fuzzy_search = true;
             app.input_buffer.clear();
-            app.set_message("Fuzzy search mode - type to search".to_string());
+            app.search_dialog_note_ids.clear();
+            app.search_dialog_selected = 0;
         }
         
         // Search and replace (Ctrl+R)
@@ -242,7 +410,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         // Quit
         KeyCode::Char('q') => app.quit(),
         
-        // Undo last delete
+        // Undo last delete (u) / redo text (Ctrl+Y already handled above)
         KeyCode::Char('u') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Err(e) = app.undo_last_delete() {
                 app.set_message(e);
@@ -292,6 +460,10 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
             if app.autocomplete_state.active {
                 app.cancel_autocomplete();
             } else {
+                // Vim behaviour: cursor moves back one column when leaving Insert mode
+                if app.editor_cursor.1 > 0 {
+                    app.editor_cursor.1 -= 1;
+                }
                 app.mode = AppMode::Normal;
                 // Auto-save on exit insert mode
                 if let Err(e) = app.save_current_note() {
@@ -299,6 +471,8 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                 }
                 // Parse links when exiting insert mode
                 app.parse_current_note_links();
+                // Refresh spell errors after editing
+                app.run_spell_check();
             }
         }
         
@@ -371,20 +545,41 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                             app.set_message(e);
                         }
                     }
+                    'z' => {
+                        // Ctrl+Z undo in insert mode
+                        if app.undo_text() {
+                            app.set_operation_info("Undo".to_string(), Some("↩".to_string()));
+                        } else {
+                            app.set_message("Nothing to undo".to_string());
+                        }
+                    }
+                    'y' => {
+                        // Ctrl+Y redo in insert mode
+                        if app.redo_text() {
+                            app.set_operation_info("Redo".to_string(), Some("↪".to_string()));
+                        } else {
+                            app.set_message("Nothing to redo".to_string());
+                        }
+                    }
                     _ => {}
                 }
             } else {
+                // Push snapshot at word boundaries for granular undo
+                if c == ' ' {
+                    app.push_undo_snapshot();
+                }
                 insert_char_at_cursor(app, c);
                 app.mark_modified();
                 app.update_autocompletion();
                 app.update_preview_content(); // Update preview as we type
             }
         }
-        
+
         KeyCode::Enter => {
             if app.autocomplete_state.active {
                 app.apply_autocomplete();
             } else {
+                app.push_undo_snapshot(); // word boundary
                 insert_char_at_cursor(app, '\n');
                 app.mark_modified();
                 app.editor_cursor.0 += 1;
@@ -442,12 +637,17 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Esc => {
             app.mode = AppMode::Normal;
             app.input_buffer.clear();
+            app.search_dialog_note_ids.clear();
+            app.search_dialog_selected = 0;
+            app.is_fuzzy_search = false;
         }
-        
+
         KeyCode::Enter => {
-            if !app.input_buffer.is_empty() {
-                // Check if we're in fuzzy search mode (triggered by Ctrl+F)
-                if app.status_message.contains("Fuzzy search mode") {
+            // Open the currently selected live result, or fall back to full search
+            if let Some(&note_id) = app.search_dialog_note_ids.get(app.search_dialog_selected) {
+                app.open_note_by_id(note_id);
+            } else if !app.input_buffer.is_empty() {
+                if app.is_fuzzy_search {
                     app.fuzzy_search_notes(app.input_buffer.clone());
                 } else {
                     app.search_notes(app.input_buffer.clone());
@@ -455,30 +655,66 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) {
             }
             app.mode = AppMode::Normal;
             app.input_buffer.clear();
+            app.search_dialog_note_ids.clear();
+            app.search_dialog_selected = 0;
+            app.is_fuzzy_search = false;
         }
-        
-        KeyCode::Tab => {
-            // Tab switches between regular and fuzzy search
-            if !app.input_buffer.is_empty() {
-                if app.status_message.contains("Fuzzy search mode") {
-                    app.search_notes(app.input_buffer.clone());
-                    app.set_message("Regular search mode - type to search".to_string());
-                } else {
-                    app.fuzzy_search_notes(app.input_buffer.clone());
-                    app.set_message("Fuzzy search mode - type to search".to_string());
-                }
+
+        // Navigate through live results
+        KeyCode::Up => {
+            if app.search_dialog_selected > 0 {
+                app.search_dialog_selected -= 1;
             }
         }
-        
+        KeyCode::Down => {
+            if !app.search_dialog_note_ids.is_empty() {
+                app.search_dialog_selected = (app.search_dialog_selected + 1)
+                    .min(app.search_dialog_note_ids.len().saturating_sub(1));
+            }
+        }
+
+        // Tab toggles fuzzy / regular and re-runs current query
+        KeyCode::Tab => {
+            app.is_fuzzy_search = !app.is_fuzzy_search;
+            run_live_search(app);
+        }
+
         KeyCode::Char(c) => {
             app.input_buffer.push(c);
+            run_live_search(app);
         }
-        
+
         KeyCode::Backspace => {
             app.input_buffer.pop();
+            run_live_search(app);
         }
-        
+
         _ => {}
+    }
+}
+
+/// Run a live search against the notebook and store results in search_dialog_note_ids.
+fn run_live_search(app: &mut App) {
+    let query = app.input_buffer.clone();
+    if query.is_empty() {
+        app.search_dialog_note_ids.clear();
+        app.search_dialog_selected = 0;
+        return;
+    }
+    app.search_dialog_selected = 0;
+    if app.is_fuzzy_search {
+        let results = app.notebook.fuzzy_search_notes(&query);
+        app.search_dialog_note_ids = results.iter().map(|(n, _)| n.id).collect();
+    } else {
+        let search_query = crate::search::SearchQuery::new(query);
+        match app.enhanced_search.search(&app.notebook, search_query) {
+            Ok(results) => {
+                app.enhanced_search_results = results;
+                app.search_dialog_note_ids = app.enhanced_search_results
+                    .iter().map(|r| r.note.id).collect();
+            }
+            Err(_) => app.search_dialog_note_ids.clear(),
+        }
     }
 }
 
@@ -531,10 +767,10 @@ fn execute_command(app: &mut App, command: &str) {
         }
         "export" => {
             match app.export_all_notes() {
-                Ok(_) => {
+                Ok(count) => {
                     let storage = crate::storage::Storage::new().unwrap();
                     let export_path = storage.get_notes_dir();
-                    app.set_operation_success(format!("All notes exported to {:?}", export_path), Some("📦".to_string()));
+                    app.set_operation_success(format!("Exported {} notes to {:?}", count, export_path), Some("📦".to_string()));
                 },
                 Err(e) => app.set_operation_error(format!("Export failed: {}", e), Some("🚨".to_string())),
             }
@@ -602,7 +838,7 @@ fn execute_command(app: &mut App, command: &str) {
             if command.starts_with("export ") {
                 let path = command.strip_prefix("export ").unwrap_or("").trim();
                 match app.export_notes_to_directory(path) {
-                    Ok(_) => app.set_operation_success(format!("Notes exported to '{}'", path), Some("📦".to_string())),
+                    Ok(count) => app.set_operation_success(format!("Exported {} notes to '{}'", count, path), Some("📦".to_string())),
                     Err(e) => app.set_operation_error(format!("Export failed: {}", e), Some("🚨".to_string())),
                 }
             } else if command.starts_with("import ") {
@@ -632,6 +868,36 @@ fn execute_command(app: &mut App, command: &str) {
                     },
                     Err(e) => app.set_operation_error(format!("Import failed: {}", e), Some("🚨".to_string())),
                 }
+            } else if command.starts_with("export html") {
+                let path_arg = command.strip_prefix("export html").unwrap_or("").trim();
+                let path = if path_arg.is_empty() { None } else { Some(path_arg) };
+                match app.export_notes_to_html(path) {
+                    Ok(count) => {
+                        let dest = path.unwrap_or("~/Documents/scribble_export");
+                        app.set_operation_success(
+                            format!("Exported {} notes as HTML to '{}'", count, dest),
+                            Some("🌐".to_string()),
+                        );
+                    }
+                    Err(e) => app.set_operation_error(format!("HTML export failed: {}", e), Some("🚨".to_string())),
+                }
+        } else if command == "spell" || command == "spellon" {
+            if !app.aspell_available {
+                app.set_message("aspell not found — install it: sudo apt install aspell".to_string());
+            } else {
+                app.spell_check_enabled = true;
+                app.run_spell_check();
+                app.set_message(format!("Spell check ON — {} error(s)", app.spell_errors.len()));
+            }
+        } else if command == "nospell" || command == "spelloff" {
+            app.spell_check_enabled = false;
+            app.spell_errors.clear();
+            app.set_message("Spell check OFF".to_string());
+        } else if let Ok(line_num) = command.parse::<usize>() {
+                // :N — jump to line number
+                app.jump_to_line(line_num);
+                app.set_message(format!("Jumped to line {}", line_num));
+                app.focused_pane = crate::app::FocusedPane::Editor;
             } else {
                 app.set_message(format!("Unknown command: {}", command));
             }
@@ -905,16 +1171,14 @@ fn handle_help_mode(app: &mut App, key: KeyEvent) {
             app.help_scroll_up();
         }
         
-        KeyCode::PageDown => {
-            // Scroll down by multiple lines
-            for _ in 0..5 {
+        KeyCode::PageDown | KeyCode::Char('d') => {
+            for _ in 0..10 {
                 app.help_scroll_down();
             }
         }
         
-        KeyCode::PageUp => {
-            // Scroll up by multiple lines
-            for _ in 0..5 {
+        KeyCode::PageUp | KeyCode::Char('u') => {
+            for _ in 0..10 {
                 app.help_scroll_up();
             }
         }
@@ -924,7 +1188,7 @@ fn handle_help_mode(app: &mut App, key: KeyEvent) {
         }
         
         KeyCode::Char('G') => {
-            app.help_scroll = 30; // Max scroll
+            app.help_scroll = 200;
         }
         
         _ => {}
@@ -1159,6 +1423,179 @@ fn handle_theme_browser_mode(app: &mut App, key: KeyEvent) {
             }
         }
         
+        _ => {}
+    }
+}
+
+fn handle_note_search_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        // Esc: exit search mode, keep highlights for n/N navigation
+        KeyCode::Esc => {
+            app.mode = AppMode::Normal;
+            // Leave note_search_active true so n/N still work
+        }
+
+        // Enter: jump to current match and exit input mode
+        KeyCode::Enter => {
+            if !app.note_search_matches.is_empty() {
+                app.jump_to_selected_match_pub();
+            }
+            app.mode = AppMode::Normal;
+        }
+
+        // Up/Down navigate matches while still typing
+        KeyCode::Up => {
+            app.note_search_prev();
+        }
+        KeyCode::Down => {
+            app.note_search_next();
+        }
+
+        KeyCode::Char(c) => {
+            app.note_search_query.push(c);
+            app.find_note_search_matches();
+            // Auto-jump to first match
+            if !app.note_search_matches.is_empty() {
+                app.jump_to_selected_match_pub();
+            }
+        }
+
+        KeyCode::Backspace => {
+            app.note_search_query.pop();
+            app.find_note_search_matches();
+            if !app.note_search_matches.is_empty() {
+                app.jump_to_selected_match_pub();
+            }
+        }
+
+        _ => {}
+    }
+}
+
+fn handle_backlinks_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.cancel_backlinks();
+        }
+
+        KeyCode::Enter => {
+            app.open_selected_backlink();
+        }
+
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.backlinks_navigate_up();
+        }
+
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.backlinks_navigate_down();
+        }
+
+        _ => {}
+    }
+}
+
+fn handle_visual_mode(app: &mut App, key: KeyEvent) {
+    let editor_focused = app.focused_pane == crate::app::FocusedPane::Editor;
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('v') => {
+            app.mode = AppMode::Normal;
+        }
+        // Movement (reuses normal-mode motion methods)
+        KeyCode::Char('j') | KeyCode::Down => { app.cursor_down_normal(); }
+        KeyCode::Char('k') | KeyCode::Up   => { app.cursor_up_normal(); }
+        KeyCode::Char('h') | KeyCode::Left => {
+            if app.editor_cursor.1 > 0 { app.editor_cursor.1 -= 1; }
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            let len = app.editor_content.lines()
+                .nth(app.editor_cursor.0 as usize).map(|l| l.len() as u16).unwrap_or(0);
+            if app.editor_cursor.1 < len { app.editor_cursor.1 += 1; }
+        }
+        KeyCode::Char('0') => { app.cursor_to_line_start(); }
+        KeyCode::Char('$') => { app.cursor_to_line_end(); }
+        KeyCode::Char('w') => { app.cursor_word_forward(); }
+        KeyCode::Char('b') => { app.cursor_word_backward(); }
+        KeyCode::Char('g') => { app.editor_cursor = (0, 0); app.scroll_to_top(); }
+        KeyCode::Char('G') => {
+            let last = app.editor_content.lines().count().saturating_sub(1) as u16;
+            app.editor_cursor.0 = last;
+            app.scroll_to_bottom();
+        }
+        // Yank selection
+        KeyCode::Char('y') => {
+            app.yank_visual_selection();
+        }
+        // Delete selection
+        KeyCode::Char('d') => {
+            app.delete_visual_selection();
+        }
+        // Replace selection with typed text (enter insert mode after deleting)
+        KeyCode::Char('c') => {
+            app.delete_visual_selection();
+            app.mode = AppMode::Insert;
+        }
+        _ => {}
+    }
+    let _ = editor_focused; // suppress unused warning
+}
+
+fn handle_template_picker_mode(app: &mut App, key: KeyEvent) {
+    let count = crate::app::App::get_templates().len();
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.mode = AppMode::Normal;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.template_picker_selected > 0 { app.template_picker_selected -= 1; }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if app.template_picker_selected + 1 < count { app.template_picker_selected += 1; }
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let idx = app.template_picker_selected;
+            app.apply_template(idx);
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            if let Some(d) = c.to_digit(10) {
+                let idx = (d as usize).saturating_sub(1);
+                if idx < count {
+                    app.apply_template(idx);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_spell_suggest_mode(app: &mut App, key: KeyEvent) {
+    let count = app.spell_suggestions.len();
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.mode = AppMode::Normal;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.spell_suggestions_selected > 0 {
+                app.spell_suggestions_selected -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if app.spell_suggestions_selected + 1 < count {
+                app.spell_suggestions_selected += 1;
+            }
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            app.apply_spell_suggestion();
+        }
+        // Quick pick by digit
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            if let Some(d) = c.to_digit(10) {
+                let idx = (d as usize).saturating_sub(1);
+                if idx < count {
+                    app.spell_suggestions_selected = idx;
+                    app.apply_spell_suggestion();
+                }
+            }
+        }
         _ => {}
     }
 }

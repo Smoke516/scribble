@@ -1,85 +1,9 @@
 use crate::theme::TokyoNightTheme;
 use ratatui::{
-    style::{Color, Style, Modifier},
+    style::{Style, Modifier},
     text::{Line, Span, Text},
 };
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{ThemeSet, FontStyle};
-use syntect::parsing::SyntaxSet;
-use syntect::util::LinesWithEndings;
 
-pub struct SyntaxHighlighter {
-    #[allow(dead_code)]
-    syntax_set: SyntaxSet,
-    #[allow(dead_code)]
-    theme_set: ThemeSet,
-}
-
-impl SyntaxHighlighter {
-    pub fn new() -> Self {
-        let syntax_set = SyntaxSet::load_defaults_newlines();
-        let theme_set = ThemeSet::load_defaults();
-        
-        Self {
-            syntax_set,
-            theme_set,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn highlight_markdown<'a>(&self, content: &'a str) -> Text<'a> {
-        let mut lines = Vec::new();
-        
-        // Try to find markdown syntax
-        let syntax = self.syntax_set
-            .find_syntax_by_extension("md")
-            .or_else(|| self.syntax_set.find_syntax_by_name("Markdown"))
-            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
-
-        // Use a dark theme that works well in terminals
-        let theme = &self.theme_set.themes["base16-ocean.dark"];
-        let mut highlighter = HighlightLines::new(syntax, theme);
-
-        for line in LinesWithEndings::from(content) {
-            let highlighted = highlighter.highlight_line(line, &self.syntax_set).unwrap_or_default();
-            
-            let mut spans = Vec::new();
-            for (style, text) in highlighted {
-                let fg_color = convert_color(style.foreground);
-                let mut ratatui_style = Style::default().fg(fg_color);
-                
-                if style.font_style.contains(FontStyle::BOLD) {
-                    ratatui_style = ratatui_style.add_modifier(Modifier::BOLD);
-                }
-                if style.font_style.contains(FontStyle::ITALIC) {
-                    ratatui_style = ratatui_style.add_modifier(Modifier::ITALIC);
-                }
-                if style.font_style.contains(FontStyle::UNDERLINE) {
-                    ratatui_style = ratatui_style.add_modifier(Modifier::UNDERLINED);
-                }
-                
-                spans.push(Span::styled(text, ratatui_style));
-            }
-            
-            lines.push(Line::from(spans));
-        }
-        
-        Text::from(lines)
-    }
-}
-
-#[allow(dead_code)]
-fn convert_color(syntect_color: syntect::highlighting::Color) -> Color {
-    Color::Rgb(syntect_color.r, syntect_color.g, syntect_color.b)
-}
-
-impl Default for SyntaxHighlighter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// Fallback simple markdown highlighting for cases where syntect fails
 pub fn simple_markdown_highlight(content: &str) -> Text<'_> {
     let mut lines = Vec::new();
     
