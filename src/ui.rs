@@ -530,9 +530,9 @@ fn draw_preview_pane(f: &mut Frame, app: &App, area: Rect) {
     if app.current_note.is_some() {
         // Render the markdown preview
         let preview_content = if app.editor_content.is_empty() {
-            crate::preview::generate_preview_sample()
+            crate::preview::generate_preview_sample(&app.theme_manager)
         } else {
-            crate::preview::render_markdown_preview(&app.editor_content)
+            crate::preview::render_markdown_preview(&app.editor_content, &app.theme_manager)
         };
         
         let paragraph = Paragraph::new(preview_content)
