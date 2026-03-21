@@ -2621,6 +2621,81 @@ impl App {
         }
     }
 
+    /// Read text from the system clipboard.
+    pub fn read_system_clipboard(&self) -> Option<String> {
+        // Try wl-paste (Wayland), then xclip, then xsel (X11)
+        let commands: &[(&str, &[&str])] = &[
+            ("wl-paste", &["--no-newline"]),
+            ("xclip", &["-selection", "clipboard", "-o"]),
+            ("xsel", &["--clipboard", "--output"]),
+        ];
+        for (cmd, args) in commands {
+            if let Ok(output) = std::process::Command::new(cmd)
+                .args(*args)
+                .output()
+            {
+                if output.status.success() {
+                    return String::from_utf8(output.stdout).ok();
+                }
+            }
+        }
+        None
+    }
+
+    /// Paste system clipboard on a new line below the cursor (P).
+    pub fn paste_clipboard_below(&mut self) {
+        let text = match self.read_system_clipboard() {
+            Some(t) if !t.is_empty() => t,
+            _ => {
+                self.set_message("System clipboard is empty (requires xclip, xsel, or wl-paste)".to_string());
+                return;
+            }
+        };
+        self.push_undo_snapshot();
+        let insert_pos = {
+            let lines: Vec<&str> = self.editor_content.lines().collect();
+            let row = self.editor_cursor.0 as usize;
+            if row < lines.len() {
+                self.get_line_start_position(row) + lines[row].len()
+            } else {
+                self.editor_content.len()
+            }
+        };
+        let to_insert = format!("\n{}", text);
+        self.editor_content.insert_str(insert_pos, &to_insert);
+        self.editor_cursor.0 += 1;
+        self.editor_cursor.1 = 0;
+        self.adjust_scroll_to_cursor();
+        self.mark_modified();
+        self.update_preview_content();
+        let preview: String = text.chars().take(40).collect();
+        self.set_operation_info(format!("Pasted: \"{}\"", preview), Some("📋".to_string()));
+    }
+
+    /// Paste system clipboard at the cursor position (for Insert mode).
+    pub fn paste_clipboard_at_cursor(&mut self, cursor_byte_index: usize) {
+        let text = match self.read_system_clipboard() {
+            Some(t) if !t.is_empty() => t,
+            _ => {
+                self.set_message("System clipboard is empty (requires xclip, xsel, or wl-paste)".to_string());
+                return;
+            }
+        };
+        self.push_undo_snapshot();
+        self.editor_content.insert_str(cursor_byte_index, &text);
+        let newline_count = text.chars().filter(|&c| c == '\n').count();
+        if newline_count > 0 {
+            self.editor_cursor.0 += newline_count as u16;
+            let last_line_len = text.rsplit('\n').next().map(|l| l.len()).unwrap_or(0);
+            self.editor_cursor.1 = last_line_len as u16;
+        } else {
+            self.editor_cursor.1 += text.len() as u16;
+        }
+        self.adjust_scroll_to_cursor();
+        self.mark_modified();
+        self.update_preview_content();
+    }
+
     /// Paste yank buffer on a new line below the cursor (p).
     pub fn paste_below(&mut self) {
         if self.yank_buffer.is_empty() {

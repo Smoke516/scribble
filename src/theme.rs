@@ -521,6 +521,42 @@ impl Theme for GruvboxTheme {
     fn border_highlight() -> Color { Color::Rgb(131, 165, 152) } // #83a598
 }
 
+/// Raw color palette for the active theme
+#[derive(Clone, Copy)]
+pub struct ThemeColors {
+    pub fg: Color,
+    pub fg_dark: Color,
+    pub bg_dark: Color,
+    pub bg_highlight: Color,
+    pub blue: Color,
+    pub cyan: Color,
+    pub green: Color,
+    pub yellow: Color,
+    pub orange: Color,
+    pub red: Color,
+    pub purple: Color,
+    pub comment: Color,
+}
+
+macro_rules! theme_colors {
+    ($theme:ty) => {
+        ThemeColors {
+            fg:           <$theme>::fg(),
+            fg_dark:      <$theme>::fg_dark(),
+            bg_dark:      <$theme>::bg_dark(),
+            bg_highlight: <$theme>::bg_highlight(),
+            blue:         <$theme>::blue(),
+            cyan:         <$theme>::cyan(),
+            green:        <$theme>::green(),
+            yellow:       <$theme>::yellow(),
+            orange:       <$theme>::orange(),
+            red:          <$theme>::red(),
+            purple:       <$theme>::purple(),
+            comment:      <$theme>::comment(),
+        }
+    };
+}
+
 /// Main theme manager
 pub struct ThemeManager {
     current_theme: ThemeType,
@@ -540,8 +576,23 @@ impl ThemeManager {
     pub fn current_theme(&self) -> &ThemeType {
         &self.current_theme
     }
-    
-    
+
+    /// Get the raw color palette for the active theme
+    pub fn colors(&self) -> ThemeColors {
+        match self.current_theme {
+            ThemeType::TokyoNight          => theme_colors!(TokyoNightTheme),
+            ThemeType::GitHubDark          => theme_colors!(GitHubDarkTheme),
+            ThemeType::CatppuccinMocha     => theme_colors!(CatppuccinMochaTheme),
+            ThemeType::CatppuccinLatte     => theme_colors!(CatppuccinLatteTheme),
+            ThemeType::CatppuccinFrappe    => theme_colors!(CatppuccinFrappeTheme),
+            ThemeType::CatppuccinMacchiato => theme_colors!(CatppuccinMacchiatoTheme),
+            ThemeType::Dracula             => theme_colors!(DraculaTheme),
+            ThemeType::Nord                => theme_colors!(NordTheme),
+            ThemeType::OneDark             => theme_colors!(OneDarkTheme),
+            ThemeType::Gruvbox             => theme_colors!(GruvboxTheme),
+        }
+    }
+
     pub fn normal(&self) -> Style {
         match self.current_theme {
             ThemeType::TokyoNight => Style::default().fg(TokyoNightTheme::fg()),

@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct Config {
     pub editor: EditorConfig,
     pub vaults: VaultConfig,
@@ -11,12 +12,14 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EditorConfig {
     pub default: Option<String>,
     pub helix_integration: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct VaultConfig {
     pub default: Option<PathBuf>,
     pub recent: Vec<PathBuf>,
@@ -24,6 +27,7 @@ pub struct VaultConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UiConfig {
     pub theme: String,
     pub preview_width: u16,
@@ -32,6 +36,7 @@ pub struct UiConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BehaviorConfig {
     pub auto_save: bool,
     pub follow_links_in_new_pane: bool,
@@ -40,31 +45,44 @@ pub struct BehaviorConfig {
     pub spell_check: bool,
 }
 
-impl Default for Config {
+impl Default for EditorConfig {
     fn default() -> Self {
         Self {
-            editor: EditorConfig {
-                default: None,
-                helix_integration: true,
-            },
-            vaults: VaultConfig {
-                default: None,
-                recent: Vec::new(),
-                auto_detect: true,
-            },
-            ui: UiConfig {
-                theme: "tokyo-night".to_string(),
-                preview_width: 50,
-                show_line_numbers: true,
-                relative_line_numbers: false,
-            },
-            behavior: BehaviorConfig {
-                auto_save: true,
-                follow_links_in_new_pane: false,
-                backup_on_import: true,
-                file_watching: true,
-                spell_check: false,
-            },
+            default: None,
+            helix_integration: true,
+        }
+    }
+}
+
+impl Default for VaultConfig {
+    fn default() -> Self {
+        Self {
+            default: None,
+            recent: Vec::new(),
+            auto_detect: true,
+        }
+    }
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            theme: "tokyo-night".to_string(),
+            preview_width: 50,
+            show_line_numbers: true,
+            relative_line_numbers: false,
+        }
+    }
+}
+
+impl Default for BehaviorConfig {
+    fn default() -> Self {
+        Self {
+            auto_save: true,
+            follow_links_in_new_pane: false,
+            backup_on_import: true,
+            file_watching: true,
+            spell_check: false,
         }
     }
 }

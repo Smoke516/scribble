@@ -31,6 +31,44 @@ pub fn handle_event(app: &mut App, event: Event) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+/// Handle bracketed paste events (text pasted from system clipboard).
+pub fn handle_paste(app: &mut App, text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    match app.mode {
+        AppMode::Insert => {
+            // Insert pasted text at cursor position
+            app.push_undo_snapshot();
+            let newline_count = text.chars().filter(|&c| c == '\n').count();
+            let cursor_index = get_cursor_byte_index(app);
+            app.editor_content.insert_str(cursor_index, text);
+
+            // Move cursor to end of pasted text
+            if newline_count > 0 {
+                app.editor_cursor.0 += newline_count as u16;
+                // Set column to length of last line of pasted text
+                let last_line_len = text.rsplit('\n').next().map(|l| l.len()).unwrap_or(0);
+                app.editor_cursor.1 = last_line_len as u16;
+            } else {
+                app.editor_cursor.1 += text.len() as u16;
+            }
+
+            app.adjust_scroll_to_cursor();
+            app.mark_modified();
+            app.update_preview_content();
+        }
+        AppMode::Search | AppMode::SearchAdvanced | AppMode::SearchReplace
+        | AppMode::Command | AppMode::InputNote | AppMode::InputFolder
+        | AppMode::Rename | AppMode::NoteSearch | AppMode::QuickJump => {
+            // Paste into the input buffer for text-input modes
+            app.input_buffer.push_str(text);
+        }
+        _ => {
+            // In Normal mode and others, show a hint
+            app.set_message("Press 'i' to enter Insert mode before pasting".to_string());
+        }
+    }
+    Ok(())
+}
+
 fn handle_normal_mode(app: &mut App, key: KeyEvent) {
     // Clear pending vim key if current key doesn't continue the sequence
     let continues_sequence = matches!(
@@ -211,6 +249,9 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             app.push_undo_snapshot();
             app.paste_below();
             app.mark_modified();
+        }
+        KeyCode::Char('P') if editor_focused => {
+            app.paste_clipboard_below();
         }
 
         // Edit mode
@@ -544,6 +585,11 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                         if let Err(e) = app.follow_link_at_cursor() {
                             app.set_message(e);
                         }
+                    }
+                    'v' => {
+                        // Ctrl+V paste from system clipboard in insert mode
+                        let idx = get_cursor_byte_index(app);
+                        app.paste_clipboard_at_cursor(idx);
                     }
                     'z' => {
                         // Ctrl+Z undo in insert mode
