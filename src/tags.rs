@@ -1,3 +1,4 @@
+#![allow(dead_code)] // palette/API surface; some helpers kept for completeness
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;

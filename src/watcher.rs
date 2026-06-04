@@ -1,14 +1,13 @@
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub enum FileChangeEvent {
     Created(PathBuf),
     Modified(PathBuf),
     Deleted(PathBuf),
+    #[allow(dead_code)]  // TODO: rename detection not implemented
     Renamed(PathBuf, PathBuf), // (from, to)
 }
 
@@ -95,57 +94,4 @@ impl FileWatcher {
         changes
     }
     
-    pub fn has_changes(&self) -> bool {
-        match self.receiver.try_recv() {
-            Ok(change) => {
-                // Put the change back (we just wanted to check if there were any)
-                // Note: This is a simplified approach. In a real implementation,
-                // you might want to use a more sophisticated buffering system.
-                true
-            },
-            Err(_) => false,
-        }
-    }
-}
-
-// Helper function to debounce file changes (common in file watchers)
-pub struct ChangeDebouncer {
-    pending_changes: std::collections::HashMap<PathBuf, (FileChangeEvent, std::time::Instant)>,
-    debounce_duration: Duration,
-}
-
-impl ChangeDebouncer {
-    pub fn new(debounce_ms: u64) -> Self {
-        Self {
-            pending_changes: std::collections::HashMap::new(),
-            debounce_duration: Duration::from_millis(debounce_ms),
-        }
-    }
-    
-    pub fn add_change(&mut self, event: FileChangeEvent) {
-        let path = match &event {
-            FileChangeEvent::Created(p) => p,
-            FileChangeEvent::Modified(p) => p,
-            FileChangeEvent::Deleted(p) => p,
-            FileChangeEvent::Renamed(_, to) => to,
-        };
-        
-        self.pending_changes.insert(path.clone(), (event, std::time::Instant::now()));
-    }
-    
-    pub fn get_debounced_changes(&mut self) -> Vec<FileChangeEvent> {
-        let now = std::time::Instant::now();
-        let mut ready_changes = Vec::new();
-        
-        self.pending_changes.retain(|_path, (event, timestamp)| {
-            if now.duration_since(*timestamp) >= self.debounce_duration {
-                ready_changes.push(event.clone());
-                false // remove from pending
-            } else {
-                true // keep in pending
-            }
-        });
-        
-        ready_changes
-    }
 }

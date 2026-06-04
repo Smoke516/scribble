@@ -1,3 +1,4 @@
+#![allow(dead_code)] // palette/API surface; some helpers kept for completeness
 use crate::models::{Note, NotebookData};
 use regex::Regex;
 use std::collections::VecDeque;

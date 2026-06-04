@@ -1,3 +1,4 @@
+#![allow(dead_code)] // palette/API surface; some helpers kept for completeness
 use ratatui::style::{Color, Style, Modifier};
 
 /// Theme trait for consistent styling across all themes
