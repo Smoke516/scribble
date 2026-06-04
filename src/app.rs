@@ -14,6 +14,7 @@ pub enum AppMode {
     Normal,
     Insert,
     Search,
+    #[allow(dead_code)]  // TODO: advanced-search mode (unfinished)
     SearchAdvanced,
     SearchReplace,
     Command,
@@ -62,6 +63,7 @@ pub enum SaveStatus {
     Saved,
     Modified,
     Saving,
+    #[allow(dead_code)]  // TODO: SaveStatus::Error not yet set on save failures
     Error,
 }
 
@@ -96,6 +98,7 @@ impl ImportResult {
         }
     }
     
+    #[allow(dead_code)]
     pub fn total_processed(&self) -> usize {
         self.successful_imports + self.failed_imports.len() + self.skipped_duplicates.len()
     }
@@ -183,6 +186,7 @@ pub struct App {
     
     // Visual feedback
     pub save_status: SaveStatus,
+    #[allow(dead_code)]
     pub last_operation: Option<String>,
     pub operation_result: Option<OperationResult>,
     pub operation_result_time: Option<std::time::Instant>,
@@ -196,6 +200,7 @@ pub struct App {
     
     // Live preview
     pub preview_content: String,
+    #[allow(dead_code)]
     pub preview_scroll: u16,
     
     // Vault switching
@@ -812,6 +817,7 @@ impl App {
         self.enhanced_search.get_search_history()
     }
     
+    #[allow(dead_code)]  // TODO: clear-search-history not key-bound
     pub fn clear_search_history(&mut self) {
         self.enhanced_search.clear_history();
         self.set_message("Search history cleared".to_string());
@@ -964,6 +970,7 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]  // TODO: outgoing wiki-links not surfaced
     pub fn get_outgoing_links_for_current_note(&self) -> Vec<String> {
         if let Some(ref note) = self.current_note {
             self.notebook.get_outgoing_links(note.id)
@@ -1114,10 +1121,12 @@ impl App {
             .join("\n")
     }
 
+    #[allow(dead_code)]
     pub fn preview_scroll_up(&mut self) {
         self.preview_scroll = self.preview_scroll.saturating_sub(1);
     }
 
+    #[allow(dead_code)]
     pub fn preview_scroll_down(&mut self) {
         self.preview_scroll = self.preview_scroll.saturating_add(1);
     }
@@ -2186,6 +2195,7 @@ impl App {
         );
     }
     
+    #[allow(dead_code)]
     pub fn clear_external_changes_flag(&mut self) {
         self.has_external_changes = false;
         self.sync_status = "📁 Vault in sync".to_string();
@@ -2282,10 +2292,12 @@ impl App {
         self.refresh_tree_view();
     }
     
+    #[allow(dead_code)]
     pub fn get_tag_suggestions(&self, partial: &str) -> Vec<String> {
         self.tag_manager.get_tag_suggestions(partial, 10)
     }
     
+    #[allow(dead_code)]
     pub fn add_tag_to_current_note(&mut self, tag: String) {
         if let Some(current_note_id) = self.current_note.as_ref().map(|n| n.id) {
             if let Some(note) = self.notebook.notes.get_mut(&current_note_id) {
@@ -2304,6 +2316,7 @@ impl App {
         }
     }
     
+    #[allow(dead_code)]
     pub fn remove_tag_from_current_note(&mut self, tag: String) {
         if let Some(current_note_id) = self.current_note.as_ref().map(|n| n.id) {
             if let Some(note) = self.notebook.notes.get_mut(&current_note_id) {
@@ -2322,6 +2335,7 @@ impl App {
         }
     }
     
+    #[allow(dead_code)]
     pub fn sync_current_note_tags(&mut self) {
         if let Some(current_note_id) = self.current_note.as_ref().map(|n| n.id) {
             if let Some(note) = self.notebook.notes.get_mut(&current_note_id) {
@@ -2342,6 +2356,7 @@ impl App {
         self.mode = AppMode::Normal;
     }
     
+    #[allow(dead_code)]
     pub fn get_tag_stats(&self) -> (usize, usize) {
         (
             self.tag_manager.get_tag_count(),
@@ -3021,6 +3036,7 @@ impl App {
     }
 
     /// Toggle spell checking on/off.
+    #[allow(dead_code)]
     pub fn toggle_spell_check(&mut self) {
         if !self.aspell_available {
             self.set_message("aspell not found — install it with: sudo apt install aspell".to_string());

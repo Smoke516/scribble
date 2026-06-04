@@ -169,6 +169,7 @@ impl TrashBin {
         self.items.pop()
     }
 
+    #[allow(dead_code)]
     pub fn cleanup_old_items(&mut self) {
         let cutoff = Utc::now() - chrono::Duration::days(self.retention_days as i64);
         self.items.retain(|item| item.deleted_at > cutoff);
@@ -393,6 +394,7 @@ impl NotebookData {
             .collect()
     }
 
+    #[allow(dead_code)]  // TODO: backlink graph: outgoing links unused
     pub fn get_outgoing_links(&self, note_id: Uuid) -> Vec<&NoteLink> {
         self.links.iter()
             .filter(|link| link.source_note_id == note_id)

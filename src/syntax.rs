@@ -1,6 +1,6 @@
 use crate::theme::TokyoNightTheme;
 use ratatui::{
-    style::{Style, Modifier},
+    style::Style,
     text::{Line, Span, Text},
 };
 

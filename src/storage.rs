@@ -77,6 +77,7 @@ impl VaultStorage {
         full_path.strip_prefix(&self.vault_path).unwrap_or(full_path).to_path_buf()
     }
     
+    #[allow(dead_code)]
     fn create_folder_structure(&self, notebook: &NotebookData) -> HashMap<String, Uuid> {
         let mut path_to_folder_id = HashMap::new();
         

@@ -1,3 +1,4 @@
+#![allow(dead_code)] // palette/API surface; some helpers kept for completeness
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
