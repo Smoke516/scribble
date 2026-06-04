@@ -3227,7 +3227,7 @@ fn create_temp_file(title: &str, content: &str) -> std::io::Result<std::path::Pa
     Ok(temp_file)
 }
 
-fn sanitize_filename(filename: &str) -> String {
+pub fn sanitize_filename(filename: &str) -> String {
     filename
         .chars()
         .map(|c| match c {

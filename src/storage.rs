@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct NoteFrontmatter {
     scribble_id: Option<String>,
+    /// The note's real title. Persisted so the filename (which is sanitized and
+    /// may carry a disambiguation suffix) never has to round-trip as the title.
+    title: Option<String>,
     created_at: Option<DateTime<Utc>>,
     modified_at: Option<DateTime<Utc>>,
     tags: Option<Vec<String>>,
@@ -60,6 +63,7 @@ impl VaultStorage {
     fn create_markdown_with_frontmatter(&self, note: &Note, content: &str) -> String {
         let frontmatter = NoteFrontmatter {
             scribble_id: Some(note.id.to_string()),
+            title: Some(note.title.clone()),
             created_at: Some(note.created_at),
             modified_at: Some(note.modified_at),
             tags: if note.tags.is_empty() { None } else { Some(note.tags.clone()) },
@@ -166,7 +170,9 @@ impl NotebookStorage for VaultStorage {
                         
                         Note {
                             id: note_id,
-                            title,
+                            // Prefer the real title from frontmatter; fall back to
+                            // the filename for notes created before this field existed.
+                            title: fm.title.unwrap_or(title),
                             content: markdown_content,
                             folder_id,
                             created_at: fm.created_at.unwrap_or_else(Utc::now),
@@ -235,57 +241,73 @@ impl NotebookStorage for VaultStorage {
             fs::create_dir_all(&folder_path)?;
         }
         
-        // Save notes as markdown files
-        for note in notebook.notes.values() {
+        // Save notes as markdown files.
+        //
+        // Two safeguards prevent silent note loss:
+        //  1. Filenames are derived from the SANITIZED title — a raw title like
+        //     "06/2026 plan" would otherwise be written into a subdirectory (or
+        //     fail on Windows for ':' '*' etc.).
+        //  2. A claimed-paths set guarantees two notes never resolve to the same
+        //     file; on collision we disambiguate deterministically with a short
+        //     id suffix. Iterating in id order keeps assignments stable across
+        //     saves (HashMap order is otherwise random), so files don't churn.
+        let mut notes: Vec<&Note> = notebook.notes.values().collect();
+        notes.sort_by_key(|n| n.id);
+        let mut claimed: std::collections::HashSet<PathBuf> =
+            notes.iter().filter_map(|n| n.file_path.clone()).collect();
+
+        for note in notes {
             let file_path = if let Some(existing_path) = &note.file_path {
                 existing_path.clone()
             } else {
-                // Create new file path
-                let mut note_path = self.vault_path.clone();
-                
-                // Add folder path if note belongs to a folder
+                // Build the destination directory (vault + folder chain).
+                let mut dir = self.vault_path.clone();
                 if let Some(folder_id) = note.folder_id {
                     if let Some(folder) = notebook.folders.get(&folder_id) {
-                        // Build folder path
                         let mut path_components = Vec::new();
                         let mut current_folder = folder;
-                        
                         loop {
                             path_components.push(current_folder.name.clone());
-                            if let Some(parent_id) = current_folder.parent_id {
-                                if let Some(parent_folder) = notebook.folders.get(&parent_id) {
-                                    current_folder = parent_folder;
-                                } else {
-                                    break;
-                                }
-                            } else {
-                                break;
+                            match current_folder.parent_id.and_then(|pid| notebook.folders.get(&pid)) {
+                                Some(parent) => current_folder = parent,
+                                None => break,
                             }
                         }
-                        
                         path_components.reverse();
                         for component in path_components {
-                            note_path.push(component);
+                            dir.push(component);
                         }
                     }
                 }
-                
-                note_path.push(format!("{}.md", note.title));
-                note_path
+
+                let mut base = crate::app::sanitize_filename(&note.title);
+                if base.is_empty() {
+                    base = "untitled".to_string();
+                }
+                let mut candidate = dir.join(format!("{}.md", base));
+                if claimed.contains(&candidate) {
+                    let short = &note.id.to_string()[..8];
+                    candidate = dir.join(format!("{}-{}.md", base, short));
+                    let mut n = 2;
+                    while claimed.contains(&candidate) {
+                        candidate = dir.join(format!("{}-{}-{}.md", base, short, n));
+                        n += 1;
+                    }
+                }
+                candidate
             };
-            
+            claimed.insert(file_path.clone());
+
             // Create directory if it doesn't exist
             if let Some(parent) = file_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            
-            // Create content with frontmatter
+
+            // Create content with frontmatter and write the file
             let content_with_frontmatter = self.create_markdown_with_frontmatter(note, &note.content);
-            
-            // Write file
             fs::write(&file_path, content_with_frontmatter)?;
         }
-        
+
         Ok(())
     }
 }
@@ -428,5 +450,62 @@ impl NotebookStorage for Storage {
 impl Default for Storage {
     fn default() -> Self {
         Self::new().expect("Failed to initialize storage")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Note;
+
+    /// Two same-titled notes must produce two distinct files (no overwrite), and
+    /// a title containing '/' must be sanitized rather than nested into a dir.
+    #[test]
+    fn save_sanitizes_and_disambiguates_filenames() {
+        let dir = std::env::temp_dir().join(format!("scribble_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut nb = NotebookData::new();
+        nb.add_note(Note::new("Meeting Notes".to_string(), None));
+        nb.add_note(Note::new("Meeting Notes".to_string(), None)); // duplicate title
+        nb.add_note(Note::new("06/2026 plan".to_string(), None)); // path-illegal title
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        storage.save_notebook(&nb).unwrap();
+
+        let mut files: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |x| x == "md"))
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        files.sort();
+
+        // 3 notes → 3 distinct files (bug #2: no silent overwrite)
+        assert_eq!(files.len(), 3, "expected 3 distinct files, got {:?}", files);
+        // bug #1: the '/' did not create a subdirectory
+        assert!(!dir.join("06").exists(), "'/' in title created a subdir");
+        assert!(
+            files.iter().any(|f| f.starts_with("06_2026 plan")),
+            "sanitized slash title missing in {:?}",
+            files
+        );
+        // the two identical titles disambiguated to two names
+        let meeting = files.iter().filter(|f| f.starts_with("Meeting Notes")).count();
+        assert_eq!(meeting, 2, "duplicate titles collapsed: {:?}", files);
+
+        // Round-trip: titles must survive intact (the sanitized filename and the
+        // disambiguation suffix must NOT leak into the reloaded title).
+        let loaded = storage.load_notebook().unwrap();
+        let mut titles: Vec<String> = loaded.notes.values().map(|n| n.title.clone()).collect();
+        titles.sort();
+        assert_eq!(
+            titles,
+            vec!["06/2026 plan", "Meeting Notes", "Meeting Notes"],
+            "titles did not round-trip cleanly"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
