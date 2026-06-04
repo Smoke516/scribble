@@ -27,6 +27,7 @@ pub enum AppMode {
     RecentFiles,
     VaultSwitcher,
     TagBrowser,
+    TagInput,
     ThemeBrowser,
     Rename,
     NoteSearch,
@@ -200,7 +201,6 @@ pub struct App {
     
     // Live preview
     pub preview_content: String,
-    #[allow(dead_code)]
     pub preview_scroll: u16,
     
     // Vault switching
@@ -536,6 +536,7 @@ impl App {
                 self.editor_cursor = (0, 0);
             }
             self.editor_scroll = 0;
+            self.preview_scroll = 0;
             self.adjust_scroll_to_cursor();
             self.focused_pane = FocusedPane::Editor;
             self.undo_stack.clear();
@@ -1121,14 +1122,25 @@ impl App {
             .join("\n")
     }
 
-    #[allow(dead_code)]
     pub fn preview_scroll_up(&mut self) {
         self.preview_scroll = self.preview_scroll.saturating_sub(1);
     }
 
-    #[allow(dead_code)]
     pub fn preview_scroll_down(&mut self) {
-        self.preview_scroll = self.preview_scroll.saturating_add(1);
+        if self.preview_scroll < self.preview_max_scroll() {
+            self.preview_scroll = self.preview_scroll.saturating_add(1);
+        }
+    }
+
+    pub fn preview_scroll_to_bottom(&mut self) {
+        self.preview_scroll = self.preview_max_scroll();
+    }
+
+    /// Upper bound for the preview scroll offset. Approximated from the editor's
+    /// line count (the rendered preview is close in length); keeps scrolling from
+    /// running off into blank space.
+    fn preview_max_scroll(&self) -> u16 {
+        self.editor_content.lines().count() as u16
     }
 
     // Welcome page functionality
@@ -1153,6 +1165,7 @@ impl App {
         self.editor_content.clear();
         self.editor_cursor = (0, 0);
         self.editor_scroll = 0;
+        self.preview_scroll = 0;
     }
 
     pub fn navigate_up(&mut self) {
@@ -1926,19 +1939,6 @@ impl App {
         }
     }
     
-    /// Scroll editor up by one line
-    pub fn scroll_up(&mut self) {
-        self.editor_scroll = self.editor_scroll.saturating_sub(1);
-    }
-    
-    /// Scroll editor down by one line
-    pub fn scroll_down(&mut self) {
-        let content_lines = self.editor_content.lines().count() as u16;
-        if self.editor_scroll < content_lines.saturating_sub(1) {
-            self.editor_scroll += 1;
-        }
-    }
-    
     /// Scroll editor up by half a page (Ctrl+U)
     pub fn scroll_half_page_up(&mut self) {
         self.editor_scroll = self.editor_scroll.saturating_sub(10);
@@ -1966,6 +1966,7 @@ impl App {
     /// Jump to top of editor
     pub fn scroll_to_top(&mut self) {
         self.editor_scroll = 0;
+        self.preview_scroll = 0;
     }
     
     /// Jump to bottom of editor
@@ -2292,12 +2293,57 @@ impl App {
         self.refresh_tree_view();
     }
     
-    #[allow(dead_code)]
     pub fn get_tag_suggestions(&self, partial: &str) -> Vec<String> {
         self.tag_manager.get_tag_suggestions(partial, 10)
     }
-    
-    #[allow(dead_code)]
+
+    // ── Tag input (edit the current note's tags) ──────────────────────────
+
+    /// Enter tag-input mode for the open note (no-op when no note is open).
+    /// Syncs inline `#tags` from the body first so the list is complete.
+    pub fn start_tag_input(&mut self) {
+        if self.current_note.is_some() {
+            self.sync_current_note_tags();
+            self.mode = AppMode::TagInput;
+            self.input_buffer.clear();
+        }
+    }
+
+    pub fn cancel_tag_input(&mut self) {
+        self.mode = AppMode::Normal;
+        self.input_buffer.clear();
+    }
+
+    /// Add the tag in the input buffer to the open note. Stays in tag-input mode
+    /// so several tags can be added in a row; Esc finishes.
+    pub fn submit_tag_input(&mut self) {
+        let tag = self
+            .input_buffer
+            .trim()
+            .trim_start_matches('#')
+            .trim()
+            .to_string();
+        if !tag.is_empty() {
+            self.add_tag_to_current_note(tag);
+        }
+        self.input_buffer.clear();
+    }
+
+    /// Tags on the currently open note.
+    pub fn current_note_tags(&self) -> Vec<String> {
+        self.current_note
+            .as_ref()
+            .map(|n| n.tags.clone())
+            .unwrap_or_default()
+    }
+
+    /// Remove the most recently added tag (Backspace on an empty input).
+    pub fn remove_last_tag_from_current_note(&mut self) {
+        if let Some(tag) = self.current_note.as_ref().and_then(|n| n.tags.last().cloned()) {
+            self.remove_tag_from_current_note(tag);
+        }
+    }
+
     pub fn add_tag_to_current_note(&mut self, tag: String) {
         if let Some(current_note_id) = self.current_note.as_ref().map(|n| n.id) {
             if let Some(note) = self.notebook.notes.get_mut(&current_note_id) {
@@ -2316,7 +2362,6 @@ impl App {
         }
     }
     
-    #[allow(dead_code)]
     pub fn remove_tag_from_current_note(&mut self, tag: String) {
         if let Some(current_note_id) = self.current_note.as_ref().map(|n| n.id) {
             if let Some(note) = self.notebook.notes.get_mut(&current_note_id) {
@@ -2335,7 +2380,6 @@ impl App {
         }
     }
     
-    #[allow(dead_code)]
     pub fn sync_current_note_tags(&mut self) {
         if let Some(current_note_id) = self.current_note.as_ref().map(|n| n.id) {
             if let Some(note) = self.notebook.notes.get_mut(&current_note_id) {
@@ -2356,7 +2400,6 @@ impl App {
         self.mode = AppMode::Normal;
     }
     
-    #[allow(dead_code)]
     pub fn get_tag_stats(&self) -> (usize, usize) {
         (
             self.tag_manager.get_tag_count(),
@@ -3013,6 +3056,7 @@ impl App {
             }
             self.editor_cursor = (0, 0);
             self.editor_scroll = 0;
+            self.preview_scroll = 0;
             self.mark_modified();
             self.update_preview_content();
         }

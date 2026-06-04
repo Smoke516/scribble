@@ -19,6 +19,7 @@ pub fn handle_event(app: &mut App, event: Event) -> Result<(), Box<dyn std::erro
             AppMode::RecentFiles => handle_recent_files_mode(app, key),
             AppMode::VaultSwitcher => handle_vault_switcher_mode(app, key),
         AppMode::TagBrowser => handle_tag_browser_mode(app, key),
+        AppMode::TagInput => handle_tag_input_mode(app, key),
         AppMode::ThemeBrowser => handle_theme_browser_mode(app, key),
         AppMode::Rename => handle_rename_mode(app, key),
         AppMode::NoteSearch => handle_note_search_mode(app, key),
@@ -96,7 +97,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             if editor_focused {
                 app.cursor_down_normal();
             } else if app.focused_pane == FocusedPane::Preview {
-                app.scroll_down();
+                app.preview_scroll_down();
             } else {
                 app.navigate_down();
             }
@@ -105,7 +106,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             if editor_focused {
                 app.cursor_up_normal();
             } else if app.focused_pane == FocusedPane::Preview {
-                app.scroll_up();
+                app.preview_scroll_up();
             } else {
                 app.navigate_up();
             }
@@ -115,7 +116,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
                 app.editor_cursor = (0, 0);
                 app.scroll_to_top();
             } else if app.focused_pane == FocusedPane::Preview {
-                app.scroll_to_top();
+                app.preview_scroll = 0;
             } else {
                 app.navigate_to_top();
             }
@@ -128,7 +129,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
                     .last().map(|l| l.len() as u16).unwrap_or(0);
                 app.scroll_to_bottom();
             } else if app.focused_pane == FocusedPane::Preview {
-                app.scroll_to_bottom();
+                app.preview_scroll_to_bottom();
             } else {
                 app.navigate_to_bottom();
             }
@@ -479,7 +480,11 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.show_tag_browser();
         }
-        
+        // Edit the current note's tags (plain 't')
+        KeyCode::Char('t') => {
+            app.start_tag_input();
+        }
+
         // Theme browser (F3)
         KeyCode::F(3) => {
             app.show_theme_browser();
@@ -1379,6 +1384,29 @@ fn handle_vault_switcher_mode(app: &mut App, key: KeyEvent) {
             }
         }
         
+        _ => {}
+    }
+}
+
+fn handle_tag_input_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.cancel_tag_input(),
+        KeyCode::Enter => app.submit_tag_input(),
+        KeyCode::Tab => {
+            // Autocomplete with the first matching suggestion.
+            let suggestions = app.get_tag_suggestions(&app.input_buffer);
+            if let Some(first) = suggestions.first() {
+                app.input_buffer = first.clone();
+            }
+        }
+        KeyCode::Backspace => {
+            if app.input_buffer.is_empty() {
+                app.remove_last_tag_from_current_note();
+            } else {
+                app.input_buffer.pop();
+            }
+        }
+        KeyCode::Char(c) => app.input_buffer.push(c),
         _ => {}
     }
 }
