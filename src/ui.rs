@@ -59,6 +59,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         AppMode::RecentFiles => draw_recent_files_dialog(f, app),
         AppMode::VaultSwitcher => draw_vault_switcher_dialog(f, app),
         AppMode::TagBrowser => draw_tag_browser_dialog(f, app),
+        AppMode::TagInput => draw_tag_input_dialog(f, app),
         AppMode::ThemeBrowser => draw_theme_browser_dialog(f, app),
         AppMode::Rename => draw_rename_dialog(f, app),
         AppMode::Backlinks => draw_backlinks_dialog(f, app),
@@ -539,7 +540,7 @@ fn draw_preview_pane(f: &mut Frame, app: &App, area: Rect) {
             .block(block)
             .style(TokyoNightTheme::normal())
             .wrap(Wrap { trim: false })
-            .scroll((app.editor_scroll, 0)); // Sync scroll with editor
+            .scroll((app.preview_scroll, 0)); // Preview scrolls independently of the editor
         
         f.render_widget(paragraph, area);
     } else {
@@ -771,6 +772,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::RecentFiles => "RECENT",
         AppMode::VaultSwitcher => "VAULT",
         AppMode::TagBrowser => "TAGS",
+        AppMode::TagInput => "TAG",
         AppMode::ThemeBrowser => "THEMES",
         AppMode::Rename => "RENAME",
         AppMode::NoteSearch => "NOTE SEARCH",
@@ -799,6 +801,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::RecentFiles => app.theme_manager.mode_command(), // Use command style for recent files
         AppMode::VaultSwitcher => app.theme_manager.mode_command(), // Use command style for vault switcher
         AppMode::TagBrowser => app.theme_manager.mode_command(), // Use command style for tag browser
+        AppMode::TagInput => app.theme_manager.mode_input(),
         AppMode::ThemeBrowser => app.theme_manager.mode_command(), // Use command style for theme browser
         AppMode::Rename => app.theme_manager.mode_input(),
         AppMode::NoteSearch => app.theme_manager.mode_search(),
@@ -1130,6 +1133,75 @@ fn draw_rename_dialog(f: &mut Frame, app: &App) {
 }
 
 
+fn draw_tag_input_dialog(f: &mut Frame, app: &App) {
+    let area = centered_rect(55, 45, f.area());
+    f.render_widget(Clear, area);
+
+    let note_title = app.current_note.as_ref().map(|n| n.title.as_str()).unwrap_or("?");
+    let (vault_tags, _) = app.get_tag_stats();
+    let block = Block::default()
+        .title(format!("🏷️  Tags — {}  ({} in vault)", note_title, vault_tags))
+        .borders(Borders::ALL)
+        .border_style(TokyoNightTheme::border_focused())
+        .style(TokyoNightTheme::popup());
+
+    let mut content: Vec<Line> = Vec::new();
+
+    // Current tags (chips)
+    let tags = app.current_note_tags();
+    content.push(Line::from(Span::styled(
+        "Current tags:",
+        Style::default().fg(TokyoNightTheme::COMMENT),
+    )));
+    if tags.is_empty() {
+        content.push(Line::from(Span::styled(
+            "  (none yet)",
+            Style::default().fg(TokyoNightTheme::FG_DARK).add_modifier(Modifier::ITALIC),
+        )));
+    } else {
+        let mut spans = vec![Span::raw("  ")];
+        for tag in &tags {
+            spans.push(Span::styled(
+                format!(" #{} ", tag),
+                Style::default().fg(TokyoNightTheme::BG).bg(TokyoNightTheme::CYAN),
+            ));
+            spans.push(Span::raw(" "));
+        }
+        content.push(Line::from(spans));
+    }
+    content.push(Line::from(""));
+
+    // Input line
+    content.push(Line::from(vec![
+        Span::styled("Add tag: ", Style::default().fg(TokyoNightTheme::COMMENT)),
+        Span::styled(
+            &app.input_buffer,
+            Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("█", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::SLOW_BLINK)),
+    ]));
+
+    // Live suggestions
+    if !app.input_buffer.is_empty() {
+        let suggestions = app.get_tag_suggestions(&app.input_buffer);
+        if !suggestions.is_empty() {
+            content.push(Line::from(Span::styled(
+                format!("  ↹ {}", suggestions.join("  ")),
+                Style::default().fg(TokyoNightTheme::FG_DARK),
+            )));
+        }
+    }
+
+    content.push(Line::from(""));
+    content.push(Line::from(Span::styled(
+        "Enter: add · Tab: complete · Backspace: del last · Esc: done",
+        Style::default().fg(TokyoNightTheme::COMMENT).add_modifier(Modifier::ITALIC),
+    )));
+
+    let para = Paragraph::new(content).block(block).alignment(Alignment::Left);
+    f.render_widget(para, area);
+}
+
 fn draw_advanced_search_dialog(f: &mut Frame, app: &App) {
     let area = centered_rect(70, 30, f.area());
     f.render_widget(Clear, area);
@@ -1344,9 +1416,10 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
             Span::styled("Tags", Style::default().fg(TokyoNightTheme::ORANGE).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
         ]),
         Line::from(""),
-        Line::from("  Ctrl+T     Open tag browser               s      Toggle sort order"),
-        Line::from("  Enter      Filter notes by tag            c      Clear filters"),
-        Line::from("  1-9        Quick tag select               Backsp  Remove last filter"),
+        Line::from("  t          Edit current note's tags       Ctrl+T  Open tag browser"),
+        Line::from("  Enter      Filter notes by tag            s      Toggle sort order"),
+        Line::from("  1-9        Quick tag select               c      Clear filters"),
+        Line::from("  In tag editor: type+Enter add · Tab complete · Backspace removes last"),
         Line::from("  YAML: tags: [work, ideas]   Inline: #hashtag"),
         Line::from(""),
 
@@ -1356,6 +1429,7 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         ]),
         Line::from(""),
         Line::from("  Ctrl+P / F2  Toggle live Markdown preview  Tab     Cycle panes"),
+        Line::from("  Preview pane: j/k scroll · g/G top/bottom (independent of editor)"),
         Line::from("  Ctrl+U/D     Half-page scroll              PgUp/Dn Page scroll"),
         Line::from("  Line nums: absolute by default; set relative_line_numbers = true in config"),
         Line::from("  Current line highlighted in Normal mode; cursor shown as block"),
