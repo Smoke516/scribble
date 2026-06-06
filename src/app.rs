@@ -191,6 +191,12 @@ pub struct App {
     pub last_operation: Option<String>,
     pub operation_result: Option<OperationResult>,
     pub operation_result_time: Option<std::time::Instant>,
+
+    // Disk persistence: set when in-memory changes need writing through to the
+    // vault; the main loop performs the actual write. last_self_write lets the
+    // file watcher ignore the changes we cause ourselves.
+    pub pending_disk_save: bool,
+    pub last_self_write: Option<std::time::Instant>,
     
     // Quick jump and recent files
     pub quick_jump_query: String,
@@ -339,6 +345,8 @@ impl App {
             
             // Visual feedback
             save_status: SaveStatus::Saved,
+            pending_disk_save: false,
+            last_self_write: None,
             last_operation: None,
             operation_result: None,
             operation_result_time: None,
@@ -602,6 +610,7 @@ impl App {
         self.notebook.add_note(note);
         self.refresh_tree_view();
         self.select_note(note_id);
+        self.request_disk_save();
         self.set_message("New note created".to_string());
     }
 
@@ -609,6 +618,7 @@ impl App {
         let folder = Folder::new(name, parent_id);
         self.notebook.add_folder(folder);
         self.refresh_tree_view();
+        self.request_disk_save();
         self.set_message("New folder created".to_string());
     }
 
@@ -674,7 +684,9 @@ impl App {
             self.update_preview_content();
             
             self.mark_saved();
-            self.set_operation_success("Note saved successfully".to_string(), Some("💾".to_string()));
+            // The actual disk write is performed by the main loop.
+            self.pending_disk_save = true;
+            self.set_operation_success("Note saved".to_string(), Some("💾".to_string()));
             Ok(())
         } else {
             self.set_operation_error("No note to save".to_string(), None);
@@ -718,9 +730,10 @@ impl App {
             self.delete_item_type = None;
             self.delete_item_name.clear();
             self.mode = AppMode::Normal;
-            
+
             self.refresh_tree_view();
-            
+            self.request_disk_save();
+
             // Adjust selection if needed
             if self.selected_folder_index >= self.folder_tree_items.len() {
                 self.selected_folder_index = self.folder_tree_items.len().saturating_sub(1);
@@ -1234,6 +1247,40 @@ impl App {
     
     pub fn mark_saving(&mut self) {
         self.save_status = SaveStatus::Saving;
+    }
+
+    /// Request that the main loop write the notebook to disk. Call after any
+    /// change that must survive a crash (note create/delete/rename, tag edits).
+    pub fn request_disk_save(&mut self) {
+        self.pending_disk_save = true;
+    }
+
+    /// The main loop calls this to learn whether a disk write is due, clearing
+    /// the flag. On a failed write the caller re-requests so it retries later.
+    pub fn take_pending_disk_save(&mut self) -> bool {
+        std::mem::take(&mut self.pending_disk_save)
+    }
+
+    /// Record a successful disk write: marks the buffer clean and timestamps the
+    /// write so the file watcher ignores the events it generated.
+    pub fn mark_disk_saved(&mut self) {
+        self.last_self_write = Some(std::time::Instant::now());
+        self.save_status = SaveStatus::Saved;
+    }
+
+    /// Surface a failed disk write and keep the save pending so it retries.
+    pub fn report_save_failure(&mut self, err: String) {
+        self.save_status = SaveStatus::Error;
+        self.pending_disk_save = true;
+        self.set_operation_error(format!("Save failed: {}", err), Some("⚠️".to_string()));
+    }
+
+    /// Did we write to the vault very recently? Used to suppress the file
+    /// watcher's "external change" notifications for our own saves.
+    fn wrote_recently(&self) -> bool {
+        self.last_self_write
+            .map(|t| t.elapsed().as_millis() < 1500)
+            .unwrap_or(false)
     }
     
     pub fn update_visual_feedback(&mut self) {
@@ -1853,7 +1900,8 @@ impl App {
         self.input_buffer.clear();
         self.mode = AppMode::Normal;
         self.refresh_tree_view();
-        
+        self.request_disk_save();
+
         self.set_operation_success(format!("Renamed to '{}'!", new_name), Some("✏️".to_string()));
         Ok(())
     }
@@ -2118,10 +2166,16 @@ impl App {
     pub fn poll_file_changes(&mut self) {
         if let Some(watcher) = &self.file_watcher {
             let changes = watcher.poll_changes();
-            if !changes.is_empty() {
-                self.has_external_changes = true;
-                self.handle_file_changes(changes);
+            if changes.is_empty() {
+                return;
             }
+            // Ignore (but drain) events caused by our own recent save, so saving
+            // your note never shows a spurious "modified externally" message.
+            if self.wrote_recently() {
+                return;
+            }
+            self.has_external_changes = true;
+            self.handle_file_changes(changes);
         }
     }
     
@@ -2358,6 +2412,7 @@ impl App {
                     format!("Added tag: #{}", tag),
                     Some("➕".to_string())
                 );
+                self.request_disk_save();
             }
         }
     }
@@ -2376,6 +2431,7 @@ impl App {
                     format!("Removed tag: #{}", tag),
                     Some("🗑️".to_string())
                 );
+                self.request_disk_save();
             }
         }
     }
@@ -3359,5 +3415,44 @@ fn run_external_editor(editor: &str, file_path: &std::path::PathBuf) -> Result<(
         Ok(())
     } else {
         Err(format!("{} exited with code {:?}", editor, status.code()))
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    use crate::models::Note;
+
+    #[test]
+    fn saving_syncs_memory_and_requests_disk_write() {
+        let mut app = App::default();
+        let note = Note::new("Test".to_string(), None);
+        let id = note.id;
+        app.notebook.add_note(note.clone());
+        app.current_note = Some(note);
+        app.editor_content = "hello world".to_string();
+        app.pending_disk_save = false;
+
+        app.save_current_note().unwrap();
+
+        // editor content was committed to the in-memory notebook
+        assert_eq!(app.notebook.notes.get(&id).unwrap().content, "hello world");
+        // a disk write is now pending, and the loop can consume it exactly once
+        assert!(app.pending_disk_save);
+        assert!(app.take_pending_disk_save());
+        assert!(!app.pending_disk_save);
+
+        // after a successful write, our own change is suppressed for the watcher
+        app.mark_disk_saved();
+        assert!(app.wrote_recently());
+        assert_eq!(app.save_status, SaveStatus::Saved);
+    }
+
+    #[test]
+    fn failed_save_keeps_request_pending_for_retry() {
+        let mut app = App::default();
+        app.report_save_failure("disk full".to_string());
+        assert!(app.pending_disk_save, "failed save must stay pending to retry");
+        assert_eq!(app.save_status, SaveStatus::Error);
     }
 }
