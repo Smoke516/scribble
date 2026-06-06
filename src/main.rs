@@ -183,6 +183,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             last_tick = Instant::now();
         }
 
+        // Persist pending changes to disk as they happen (autosave, explicit
+        // save, structural edits) so work survives a crash — not only on exit.
+        if app.take_pending_disk_save() {
+            match storage.save_notebook(&app.notebook) {
+                Ok(()) => app.mark_disk_saved(),
+                Err(e) => app.report_save_failure(e.to_string()),
+            }
+        }
+
         if app.should_quit {
             break Ok(());
         }
