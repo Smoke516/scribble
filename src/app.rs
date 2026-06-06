@@ -1787,10 +1787,12 @@ impl App {
             
             match move_type {
                 TreeItemType::Note => {
+                    // move_note relocates the file and flags the save itself.
                     self.move_note(move_id, destination_folder_id)?;
                 },
                 TreeItemType::Folder => {
                     self.move_folder(move_id, destination_folder_id)?;
+                    self.request_full_save();
                 },
             }
             
@@ -1818,27 +1820,32 @@ impl App {
     }
     
     fn move_note(&mut self, note_id: Uuid, destination_folder_id: Option<Uuid>) -> Result<(), String> {
-        if let Some(note) = self.notebook.notes.get_mut(&note_id) {
-            // Check if we're actually moving to a different location
+        // Update the note and take its old on-disk path. Clearing file_path makes
+        // the saver recompute a fresh path inside the destination folder.
+        let old_path = {
+            let note = self.notebook.notes.get_mut(&note_id).ok_or("Note not found")?;
             if note.folder_id == destination_folder_id {
                 return Err("Note is already in this location".to_string());
             }
-            
-            // Update the note's folder_id
             note.folder_id = destination_folder_id;
             note.modified_at = chrono::Utc::now();
-            
-            // Update current note if it's the one being moved
-            if let Some(ref current_note) = self.current_note {
-                if current_note.id == note_id {
-                    self.current_note = Some(note.clone());
-                }
+            note.file_path.take()
+        };
+
+        // Keep the open note in sync (it now has folder_id updated, file_path None).
+        if self.current_note.as_ref().map(|n| n.id) == Some(note_id) {
+            if let Some(updated) = self.notebook.notes.get(&note_id).cloned() {
+                self.current_note = Some(updated);
             }
-            
-            Ok(())
-        } else {
-            Err("Note not found".to_string())
         }
+
+        // Remove the file from the old folder, then write it into the new one so
+        // the file follows the note.
+        if let Some(path) = old_path {
+            self.mark_note_deleted(path);
+        }
+        self.mark_note_dirty(note_id);
+        Ok(())
     }
     
     fn move_folder(&mut self, folder_id: Uuid, destination_folder_id: Option<Uuid>) -> Result<(), String> {
@@ -3487,5 +3494,31 @@ mod persistence_tests {
         app.report_save_failure("disk full".to_string());
         assert!(app.pending_disk_save, "failed save must stay pending to retry");
         assert_eq!(app.save_status, SaveStatus::Error);
+    }
+
+    #[test]
+    fn moving_a_note_relocates_its_file() {
+        use crate::models::Folder;
+        let mut app = App::default();
+
+        let folder = Folder::new("Work".to_string(), None);
+        let fid = folder.id;
+        app.notebook.add_folder(folder);
+
+        let mut note = Note::new("Memo".to_string(), None);
+        let nid = note.id;
+        let old_path = std::path::PathBuf::from("/vault/Memo.md");
+        note.file_path = Some(old_path.clone());
+        app.notebook.add_note(note);
+
+        app.move_note(nid, Some(fid)).unwrap();
+
+        let moved = app.notebook.notes.get(&nid).unwrap();
+        assert_eq!(moved.folder_id, Some(fid));
+        // path cleared so the saver rewrites it inside the destination folder
+        assert!(moved.file_path.is_none());
+        // old file queued for deletion, note queued for (re)write
+        assert!(app.deleted_note_paths.contains(&old_path));
+        assert!(app.dirty_note_ids.contains(&nid));
     }
 }
