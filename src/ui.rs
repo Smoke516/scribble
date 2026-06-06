@@ -1392,10 +1392,11 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         ]),
         Line::from(""),
         Line::from("  / (tree)   Search across all notes        Ctrl+F  Fuzzy note search"),
+        Line::from("  Ctrl+A     Advanced search (regex: case:)  Ctrl+R  Search & replace"),
         Line::from("  / (editor) In-note search (highlighted)   n/N    Next / prev match"),
-        Line::from("  Esc        Clear in-note highlights        Ctrl+R  Search & replace"),
+        Line::from("  Esc        Clear in-note highlights"),
         Line::from("  Ctrl+J     Quick Jump (fuzzy)              Ctrl+O  Recent files"),
-        Line::from("  Ctrl+L     Follow [[wiki link]] at cursor   Ctrl+B  Backlinks panel"),
+        Line::from("  Ctrl+L     Follow [[wiki link]] at cursor   Ctrl+B  Links panel (in + out)"),
         Line::from(""),
 
         // ── Spell Check ───────────────────────────────────────────────────────
@@ -2081,69 +2082,83 @@ fn draw_tag_browser_dialog(f: &mut Frame, app: &App) {
 
 fn draw_backlinks_dialog(f: &mut Frame, app: &App) {
     let note_title = app.current_note.as_ref().map(|n| n.title.as_str()).unwrap_or("?");
-    let area = centered_rect(60, 50, f.area());
+    let area = centered_rect(60, 60, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(format!("🔗 Backlinks — notes linking to '{}'", note_title))
+        .title(format!("🔗 Links — '{}'", note_title))
         .borders(Borders::ALL)
         .border_style(TokyoNightTheme::border_focused())
         .style(TokyoNightTheme::popup());
-
-    if app.backlinks_cache.is_empty() {
-        let content = vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "No notes link to this note.",
-                Style::default().fg(TokyoNightTheme::COMMENT),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Create [[wiki links]] in other notes to see them here.",
-                Style::default().fg(TokyoNightTheme::COMMENT).add_modifier(Modifier::ITALIC),
-            )),
-        ];
-        let para = Paragraph::new(content).block(block).alignment(Alignment::Center);
-        f.render_widget(para, area);
-        return;
-    }
-
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    // Reserve space for the outgoing section only when there is one.
+    let out_h = if app.outgoing_links_cache.is_empty() {
+        0
+    } else {
+        (app.outgoing_links_cache.len() as u16 + 2).min(8)
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([Constraint::Min(3), Constraint::Length(out_h), Constraint::Length(1)])
         .split(inner);
 
-    let items: Vec<ListItem> = app.backlinks_cache
-        .iter()
-        .enumerate()
-        .map(|(i, (_, title))| {
-            let style = if i == app.backlinks_selected {
-                TokyoNightTheme::selected()
-            } else {
-                Style::default().fg(TokyoNightTheme::FG)
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{} ", Icons::NOTE), TokyoNightTheme::note_icon()),
-                Span::styled(title.as_str(), Style::default().fg(TokyoNightTheme::FG)),
-            ])).style(style)
-        })
-        .collect();
+    // ── Incoming (navigable): notes that link to this one ──
+    let in_block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!("Linked from ({})", app.backlinks_cache.len()))
+        .border_style(TokyoNightTheme::border_inactive());
+    if app.backlinks_cache.is_empty() {
+        f.render_widget(
+            Paragraph::new("No notes link here yet.")
+                .block(in_block)
+                .style(Style::default().fg(TokyoNightTheme::COMMENT))
+                .alignment(Alignment::Center),
+            chunks[0],
+        );
+    } else {
+        let items: Vec<ListItem> = app.backlinks_cache
+            .iter()
+            .map(|(_, title)| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{} ", Icons::NOTE), TokyoNightTheme::note_icon()),
+                    Span::styled(title.as_str(), Style::default().fg(TokyoNightTheme::FG)),
+                ]))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(in_block)
+            .highlight_style(TokyoNightTheme::selected())
+            .highlight_symbol("▶ ");
+        let mut list_state = ListState::default();
+        list_state.select(Some(app.backlinks_selected));
+        f.render_stateful_widget(list, chunks[0], &mut list_state);
+    }
 
-    let list = List::new(items)
-        .highlight_style(TokyoNightTheme::selected())
-        .highlight_symbol("▶ ");
-    let mut list_state = ListState::default();
-    list_state.select(Some(app.backlinks_selected));
-    f.render_stateful_widget(list, chunks[0], &mut list_state);
+    // ── Outgoing (read-only): notes this one links to ──
+    if !app.outgoing_links_cache.is_empty() {
+        let out_lines: Vec<Line> = app.outgoing_links_cache
+            .iter()
+            .map(|title| {
+                Line::from(vec![
+                    Span::styled("  → ", Style::default().fg(TokyoNightTheme::COMMENT)),
+                    Span::styled(title.as_str(), Style::default().fg(TokyoNightTheme::FG)),
+                ])
+            })
+            .collect();
+        let out_block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!("Links to ({})", app.outgoing_links_cache.len()))
+            .border_style(TokyoNightTheme::border_inactive());
+        f.render_widget(Paragraph::new(out_lines).block(out_block), chunks[1]);
+    }
 
     f.render_widget(
-        Paragraph::new("↑↓ / j/k: Navigate  Enter: Open  Esc/q: Close")
+        Paragraph::new("↑↓ / j/k: Navigate incoming  Enter: Open  Esc/q: Close")
             .style(Style::default().fg(TokyoNightTheme::COMMENT))
             .alignment(Alignment::Center),
-        chunks[1],
+        chunks[2],
     );
 }
 
