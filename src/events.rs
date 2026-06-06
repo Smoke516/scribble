@@ -890,6 +890,19 @@ fn execute_command(app: &mut App, command: &str) {
                         }
                     },
                 }
+            } else if command.starts_with("export html") {
+                let path_arg = command.strip_prefix("export html").unwrap_or("").trim();
+                let path = if path_arg.is_empty() { None } else { Some(path_arg) };
+                match app.export_notes_to_html(path) {
+                    Ok(count) => {
+                        let dest = path.unwrap_or("~/Documents/scribble_export");
+                        app.set_operation_success(
+                            format!("Exported {} notes as HTML to '{}'", count, dest),
+                            Some("🌐".to_string()),
+                        );
+                    }
+                    Err(e) => app.set_operation_error(format!("HTML export failed: {}", e), Some("🚨".to_string())),
+                }
             } else if command.starts_with("export ") {
                 let path = command.strip_prefix("export ").unwrap_or("").trim();
                 match app.export_notes_to_directory(path) {
@@ -922,19 +935,6 @@ fn execute_command(app: &mut App, command: &str) {
                         }
                     },
                     Err(e) => app.set_operation_error(format!("Import failed: {}", e), Some("🚨".to_string())),
-                }
-            } else if command.starts_with("export html") {
-                let path_arg = command.strip_prefix("export html").unwrap_or("").trim();
-                let path = if path_arg.is_empty() { None } else { Some(path_arg) };
-                match app.export_notes_to_html(path) {
-                    Ok(count) => {
-                        let dest = path.unwrap_or("~/Documents/scribble_export");
-                        app.set_operation_success(
-                            format!("Exported {} notes as HTML to '{}'", count, dest),
-                            Some("🌐".to_string()),
-                        );
-                    }
-                    Err(e) => app.set_operation_error(format!("HTML export failed: {}", e), Some("🚨".to_string())),
                 }
         } else if command == "spell" || command == "spellon" {
             if !app.aspell_available {

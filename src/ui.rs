@@ -1354,7 +1354,7 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from("  o / O      New line below / above"),
         Line::from(""),
         Line::from("  x          Delete char at cursor         dd      Delete line"),
-        Line::from("  yy         Yank (copy) line              p       Paste below"),
+        Line::from("  yy         Yank (copy) line              p / P   Paste yanked line / system clipboard"),
         Line::from("  Ctrl+Z     Undo                          Ctrl+Y  Redo"),
         Line::from(""),
         Line::from("  v          Enter Visual select mode"),
@@ -1383,6 +1383,8 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from("  Tab        Accept autocomplete suggestion  ↑/↓   Navigate suggestions"),
         Line::from("  Ctrl+Z     Undo                           Ctrl+Y  Redo"),
         Line::from("  Ctrl+S     Save                           Ctrl+P  Toggle preview"),
+        Line::from("  Ctrl+V     Paste system clipboard         Ctrl+L  Follow [[wiki link]] at cursor"),
+        Line::from("  Ctrl+U/D   Half-page scroll up / down"),
         Line::from("  Esc        Exit Insert mode (auto-saves + spell check)"),
         Line::from(""),
 
