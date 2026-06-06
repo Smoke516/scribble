@@ -185,9 +185,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Persist pending changes to disk as they happen (autosave, explicit
         // save, structural edits) so work survives a crash — not only on exit.
-        if app.take_pending_disk_save() {
-            match storage.save_notebook(&app.notebook) {
-                Ok(()) => app.mark_disk_saved(),
+        // Writes only the changed notes (and removes deleted files); folder-tree
+        // changes fall back to a full save.
+        if app.pending_disk_save {
+            let result = if app.force_full_save {
+                storage.save_notebook(&app.notebook).map(|_| Vec::new())
+            } else {
+                let dirty: Vec<_> = app.dirty_note_ids.iter().copied().collect();
+                storage.save_incremental(&app.notebook, &dirty, &app.deleted_note_paths)
+            };
+            match result {
+                Ok(assigned) => {
+                    // Store back the path chosen for any newly-written note so it
+                    // writes to the same file next time.
+                    for (id, path) in assigned {
+                        if let Some(n) = app.notebook.notes.get_mut(&id) {
+                            n.file_path = Some(path.clone());
+                        }
+                        if app.current_note.as_ref().map(|n| n.id) == Some(id) {
+                            if let Some(cn) = app.current_note.as_mut() {
+                                cn.file_path = Some(path);
+                            }
+                        }
+                    }
+                    app.dirty_note_ids.clear();
+                    app.deleted_note_paths.clear();
+                    app.force_full_save = false;
+                    app.pending_disk_save = false;
+                    app.mark_disk_saved();
+                }
                 Err(e) => app.report_save_failure(e.to_string()),
             }
         }
