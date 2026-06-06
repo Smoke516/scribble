@@ -1,7 +1,4 @@
 use crate::models::{NotebookData, Note, Folder};
-use dirs;
-use serde_json;
-use serde_yaml;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
@@ -74,10 +71,10 @@ impl VaultStorage {
     }
     
     fn parse_markdown_with_frontmatter(&self, content: &str) -> (Option<NoteFrontmatter>, String) {
-        if content.starts_with("---\n") {
-            if let Some(end_pos) = content[4..].find("\n---\n") {
-                let yaml_content = &content[4..end_pos + 4];
-                let markdown_content = &content[end_pos + 8..];
+        if let Some(rest) = content.strip_prefix("---\n") {
+            if let Some(end_pos) = rest.find("\n---\n") {
+                let yaml_content = &rest[..end_pos];
+                let markdown_content = &rest[end_pos + 4..];
                 
                 if let Ok(frontmatter) = serde_yaml::from_str::<NoteFrontmatter>(yaml_content) {
                     return (Some(frontmatter), markdown_content.to_string());
@@ -104,7 +101,7 @@ impl VaultStorage {
         }
     }
     
-    fn get_relative_path(&self, full_path: &PathBuf) -> PathBuf {
+    fn get_relative_path(&self, full_path: &Path) -> PathBuf {
         full_path.strip_prefix(&self.vault_path).unwrap_or(full_path).to_path_buf()
     }
     
@@ -118,7 +115,7 @@ impl VaultStorage {
             .filter_map(|e| e.ok())
             .filter(|e| e.path().is_dir() && e.path() != self.vault_path)
         {
-            let relative_path = self.get_relative_path(&entry.path().to_path_buf());
+            let relative_path = self.get_relative_path(entry.path());
             let path_str = relative_path.to_string_lossy().to_string();
             
             // Skip .obsidian and other hidden directories
@@ -128,7 +125,7 @@ impl VaultStorage {
             
             // Find or create folder for this path
             if let Some(folder) = notebook.folders.values().find(|f| {
-                f.name == relative_path.file_name().unwrap_or_default().to_string_lossy().to_string()
+                f.name == relative_path.file_name().unwrap_or_default().to_string_lossy()
             }) {
                 path_to_folder_id.insert(path_str, folder.id);
             }
@@ -241,7 +238,7 @@ impl NotebookStorage for VaultStorage {
             
             if path.is_dir() && path != self.vault_path {
                 // Create folder if it doesn't exist
-                let relative_path = self.get_relative_path(&path.to_path_buf());
+                let relative_path = self.get_relative_path(path);
                 let folder_name = path.file_name().unwrap().to_string_lossy().to_string();
                 let parent_path = relative_path.parent();
                 
@@ -256,13 +253,13 @@ impl NotebookStorage for VaultStorage {
                 let folder_id = folder.id;
                 folders_created.insert(relative_path.to_string_lossy().to_string(), folder_id);
                 notebook.add_folder(folder);
-            } else if path.is_file() && path.extension().map_or(false, |ext| ext == "md") {
+            } else if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
                 // Process markdown file
                 if let Ok(content) = fs::read_to_string(path) {
                     let (frontmatter, markdown_content) = self.parse_markdown_with_frontmatter(&content);
                     
                     // Determine folder_id from path
-                    let relative_path = self.get_relative_path(&path.to_path_buf());
+                    let relative_path = self.get_relative_path(path);
                     let parent_path = relative_path.parent();
                     let folder_id = if let Some(parent) = parent_path {
                         let parent_str = parent.to_string_lossy().to_string();

@@ -206,7 +206,7 @@ impl MarkdownAutocomplete {
     fn add_suggestion(&mut self, trigger: &str, suggestion: AutocompleteSuggestion) {
         self.suggestions
             .entry(trigger.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(suggestion);
     }
 

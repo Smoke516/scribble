@@ -164,12 +164,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match event::read()? {
                 Event::Key(key) => {
                     if let Err(e) = events::handle_event(&mut app, Event::Key(key)) {
-                        break Err(e.into());
+                        break Err(e);
                     }
                 }
                 Event::Paste(text) => {
                     if let Err(e) = events::handle_paste(&mut app, &text) {
-                        break Err(e.into());
+                        break Err(e);
                     }
                 }
                 _ => {}

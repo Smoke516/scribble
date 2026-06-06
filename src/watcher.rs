@@ -28,7 +28,7 @@ impl FileWatcher {
                         let relevant_paths: Vec<_> = event.paths.iter()
                             .filter(|path| {
                                 // Only watch .md files
-                                path.extension().map_or(false, |ext| ext == "md") &&
+                                path.extension().is_some_and(|ext| ext == "md") &&
                                 // Ignore .obsidian directory
                                 !path.components().any(|comp| comp.as_os_str() == ".obsidian")
                             })
@@ -41,25 +41,13 @@ impl FileWatcher {
                         
                         let change_event = match event.kind {
                             EventKind::Create(_) => {
-                                if let Some(path) = relevant_paths.first() {
-                                    Some(FileChangeEvent::Created(path.clone()))
-                                } else {
-                                    None
-                                }
+                                relevant_paths.first().map(|path| FileChangeEvent::Created(path.clone()))
                             },
                             EventKind::Modify(_) => {
-                                if let Some(path) = relevant_paths.first() {
-                                    Some(FileChangeEvent::Modified(path.clone()))
-                                } else {
-                                    None
-                                }
+                                relevant_paths.first().map(|path| FileChangeEvent::Modified(path.clone()))
                             },
                             EventKind::Remove(_) => {
-                                if let Some(path) = relevant_paths.first() {
-                                    Some(FileChangeEvent::Deleted(path.clone()))
-                                } else {
-                                    None
-                                }
+                                relevant_paths.first().map(|path| FileChangeEvent::Deleted(path.clone()))
                             },
                             _ => None,
                         };

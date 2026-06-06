@@ -262,7 +262,7 @@ pub fn render_markdown_preview(content: &str, theme: &ThemeManager) -> Text<'sta
                             if blockquote_depth > 0 {
                                 // Prepend blockquote bar if not already present
                                 let mut bq_line = bq_prefix(blockquote_depth, callout_color);
-                                bq_line.extend(current_line.drain(..));
+                                bq_line.append(&mut current_line);
                                 lines.push(Line::from(bq_line));
                             } else {
                                 lines.push(Line::from(current_line.clone()));
@@ -275,7 +275,7 @@ pub fn render_markdown_preview(content: &str, theme: &ThemeManager) -> Text<'sta
                         }
                     }
                     TagEnd::BlockQuote => {
-                        if blockquote_depth > 0 { blockquote_depth -= 1; }
+                        blockquote_depth = blockquote_depth.saturating_sub(1);
                         if blockquote_depth == 0 {
                             callout_color = None;
                         }

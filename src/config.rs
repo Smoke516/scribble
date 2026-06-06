@@ -114,11 +114,7 @@ impl Config {
     pub fn config_file_path() -> Option<PathBuf> {
         if let Some(config_dir) = dirs::config_dir() {
             Some(config_dir.join("scribble").join("config.toml"))
-        } else if let Some(home_dir) = dirs::home_dir() {
-            Some(home_dir.join(".config").join("scribble").join("config.toml"))
-        } else {
-            None
-        }
+        } else { dirs::home_dir().map(|home_dir| home_dir.join(".config").join("scribble").join("config.toml")) }
     }
 
     pub fn add_recent_vault(&mut self, vault_path: PathBuf) {
