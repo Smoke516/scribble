@@ -3,7 +3,7 @@ use dirs;
 use serde_json;
 use serde_yaml;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 use walkdir::WalkDir;
 use uuid::Uuid;
@@ -39,6 +39,19 @@ pub trait NotebookStorage {
         _deleted_paths: &[PathBuf],
     ) -> Result<Vec<(Uuid, PathBuf)>, Box<dyn std::error::Error>> {
         self.save_notebook(notebook)?;
+        Ok(Vec::new())
+    }
+
+    /// Move/rename a folder's directory (and all its files) on disk from one
+    /// vault-relative path to another, returning the updated absolute paths for
+    /// every note that lived under it. Default: no-op (single-file backends have
+    /// no folder directories).
+    fn relocate_folder(
+        &self,
+        _notebook: &NotebookData,
+        _old_rel: &Path,
+        _new_rel: &Path,
+    ) -> Result<Vec<(Uuid, PathBuf)>, Box<dyn std::error::Error>> {
         Ok(Vec::new())
     }
 }
@@ -352,6 +365,45 @@ impl NotebookStorage for VaultStorage {
         }
         Ok(assigned)
     }
+
+    fn relocate_folder(
+        &self,
+        notebook: &NotebookData,
+        old_rel: &Path,
+        new_rel: &Path,
+    ) -> Result<Vec<(Uuid, PathBuf)>, Box<dyn std::error::Error>> {
+        let old_abs = self.vault_path.join(old_rel);
+        let new_abs = self.vault_path.join(new_rel);
+        if old_abs == new_abs {
+            return Ok(Vec::new());
+        }
+
+        if let Some(parent) = new_abs.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if old_abs.exists() {
+            // A full save may have pre-created the (empty) destination; remove it
+            // so the rename can land there.
+            if new_abs.exists() {
+                let _ = fs::remove_dir(&new_abs);
+            }
+            fs::rename(&old_abs, &new_abs)?;
+        } else {
+            // Folder had no directory yet (e.g. empty/never-written): just create.
+            fs::create_dir_all(&new_abs)?;
+        }
+
+        // Remap every note path that was under the old directory.
+        let mut updated = Vec::new();
+        for note in notebook.notes.values() {
+            if let Some(p) = &note.file_path {
+                if let Ok(rel) = p.strip_prefix(&old_abs) {
+                    updated.push((note.id, new_abs.join(rel)));
+                }
+            }
+        }
+        Ok(updated)
+    }
 }
 
 pub struct Storage {
@@ -578,6 +630,44 @@ mod tests {
         nb.notes.get_mut(&aid).unwrap().file_path = Some(path.clone());
         storage.save_incremental(&nb, &[], &[path]).unwrap();
         assert!(!dir.join("Alpha.md").exists(), "deleted note's file must be removed");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn relocate_folder_moves_dir_and_remaps_note_paths() {
+        use crate::models::Folder;
+        let dir = std::env::temp_dir().join(format!("scribble_reloc_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut nb = NotebookData::new();
+        let folder = Folder::new("Work".to_string(), None);
+        let fid = folder.id;
+        nb.add_folder(folder);
+        let note = Note::new("Task".to_string(), Some(fid));
+        let nid = note.id;
+        nb.add_note(note);
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        storage.save_notebook(&nb).unwrap();
+        assert!(dir.join("Work").join("Task.md").exists());
+        // store the assigned path back (as the app does)
+        nb.notes.get_mut(&nid).unwrap().file_path = Some(dir.join("Work").join("Task.md"));
+
+        // Rename the folder Work -> Projects.
+        let updated = storage
+            .relocate_folder(&nb, Path::new("Work"), Path::new("Projects"))
+            .unwrap();
+
+        assert!(!dir.join("Work").exists(), "old folder dir must be gone");
+        assert!(
+            dir.join("Projects").join("Task.md").exists(),
+            "the file must have followed into the renamed dir"
+        );
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].0, nid);
+        assert_eq!(updated[0].1, dir.join("Projects").join("Task.md"));
 
         let _ = fs::remove_dir_all(&dir);
     }
