@@ -197,7 +197,13 @@ pub struct App {
     // file watcher ignore the changes we cause ourselves.
     pub pending_disk_save: bool,
     pub last_self_write: Option<std::time::Instant>,
-    
+    /// Notes changed since the last disk write (written incrementally).
+    pub dirty_note_ids: HashSet<Uuid>,
+    /// Files of deleted notes to remove from the vault on the next write.
+    pub deleted_note_paths: Vec<std::path::PathBuf>,
+    /// Folder-structure change: fall back to a full save (rare, but correct).
+    pub force_full_save: bool,
+
     // Quick jump and recent files
     pub quick_jump_query: String,
     pub quick_jump_results: Vec<Uuid>,
@@ -347,6 +353,9 @@ impl App {
             save_status: SaveStatus::Saved,
             pending_disk_save: false,
             last_self_write: None,
+            dirty_note_ids: HashSet::new(),
+            deleted_note_paths: Vec::new(),
+            force_full_save: false,
             last_operation: None,
             operation_result: None,
             operation_result_time: None,
@@ -610,7 +619,7 @@ impl App {
         self.notebook.add_note(note);
         self.refresh_tree_view();
         self.select_note(note_id);
-        self.request_disk_save();
+        self.mark_note_dirty(note_id);
         self.set_message("New note created".to_string());
     }
 
@@ -618,7 +627,7 @@ impl App {
         let folder = Folder::new(name, parent_id);
         self.notebook.add_folder(folder);
         self.refresh_tree_view();
-        self.request_disk_save();
+        self.request_full_save();
         self.set_message("New folder created".to_string());
     }
 
@@ -685,7 +694,9 @@ impl App {
             
             self.mark_saved();
             // The actual disk write is performed by the main loop.
-            self.pending_disk_save = true;
+            if let Some(id) = self.current_note.as_ref().map(|n| n.id) {
+                self.mark_note_dirty(id);
+            }
             self.set_operation_success("Note saved".to_string(), Some("💾".to_string()));
             Ok(())
         } else {
@@ -710,7 +721,21 @@ impl App {
         if let (Some(item_id), Some(item_type)) = (self.delete_item_id, self.delete_item_type.clone()) {
             match item_type {
                 TreeItemType::Note => {
+                    // Capture the file path BEFORE removing so we can delete it
+                    // from disk too (otherwise the file lingers and the note
+                    // reappears on the next reload).
+                    let file_path = self
+                        .notebook
+                        .notes
+                        .get(&item_id)
+                        .and_then(|n| n.file_path.clone());
                     self.notebook.remove_note(item_id);
+                    self.dirty_note_ids.remove(&item_id);
+                    if let Some(path) = file_path {
+                        self.mark_note_deleted(path);
+                    } else {
+                        self.pending_disk_save = true; // unsaved note: nothing on disk
+                    }
                     if let Some(ref current_note) = self.current_note {
                         if current_note.id == item_id {
                             self.current_note = None;
@@ -721,10 +746,11 @@ impl App {
                 }
                 TreeItemType::Folder => {
                     self.notebook.remove_folder(item_id)?;
+                    self.request_full_save();
                     self.set_message(format!("Folder '{}' deleted", self.delete_item_name));
                 }
             }
-            
+
             // Clear deletion state
             self.delete_item_id = None;
             self.delete_item_type = None;
@@ -732,7 +758,6 @@ impl App {
             self.mode = AppMode::Normal;
 
             self.refresh_tree_view();
-            self.request_disk_save();
 
             // Adjust selection if needed
             if self.selected_folder_index >= self.folder_tree_items.len() {
@@ -1249,16 +1274,23 @@ impl App {
         self.save_status = SaveStatus::Saving;
     }
 
-    /// Request that the main loop write the notebook to disk. Call after any
-    /// change that must survive a crash (note create/delete/rename, tag edits).
-    pub fn request_disk_save(&mut self) {
+    /// Mark a single note as needing an incremental disk write.
+    pub fn mark_note_dirty(&mut self, id: Uuid) {
+        self.dirty_note_ids.insert(id);
         self.pending_disk_save = true;
     }
 
-    /// The main loop calls this to learn whether a disk write is due, clearing
-    /// the flag. On a failed write the caller re-requests so it retries later.
-    pub fn take_pending_disk_save(&mut self) -> bool {
-        std::mem::take(&mut self.pending_disk_save)
+    /// Mark a note's file for removal from the vault on the next write.
+    pub fn mark_note_deleted(&mut self, path: std::path::PathBuf) {
+        self.deleted_note_paths.push(path);
+        self.pending_disk_save = true;
+    }
+
+    /// Request a full save (folder-structure changes the incremental path can't
+    /// express). Correct but writes every note; used for the rare folder ops.
+    pub fn request_full_save(&mut self) {
+        self.force_full_save = true;
+        self.pending_disk_save = true;
     }
 
     /// Record a successful disk write: marks the buffer clean and timestamps the
@@ -1900,7 +1932,9 @@ impl App {
         self.input_buffer.clear();
         self.mode = AppMode::Normal;
         self.refresh_tree_view();
-        self.request_disk_save();
+        // Rename can move a directory / change a note's frontmatter title — use a
+        // full save to keep the vault consistent (renames are infrequent).
+        self.request_full_save();
 
         self.set_operation_success(format!("Renamed to '{}'!", new_name), Some("✏️".to_string()));
         Ok(())
@@ -2412,7 +2446,7 @@ impl App {
                     format!("Added tag: #{}", tag),
                     Some("➕".to_string())
                 );
-                self.request_disk_save();
+                self.mark_note_dirty(current_note_id);
             }
         }
     }
@@ -2431,7 +2465,7 @@ impl App {
                     format!("Removed tag: #{}", tag),
                     Some("🗑️".to_string())
                 );
-                self.request_disk_save();
+                self.mark_note_dirty(current_note_id);
             }
         }
     }
@@ -3437,10 +3471,9 @@ mod persistence_tests {
 
         // editor content was committed to the in-memory notebook
         assert_eq!(app.notebook.notes.get(&id).unwrap().content, "hello world");
-        // a disk write is now pending, and the loop can consume it exactly once
+        // a disk write is now pending, and the note is in the dirty set
         assert!(app.pending_disk_save);
-        assert!(app.take_pending_disk_save());
-        assert!(!app.pending_disk_save);
+        assert!(app.dirty_note_ids.contains(&id));
 
         // after a successful write, our own change is suppressed for the watcher
         app.mark_disk_saved();

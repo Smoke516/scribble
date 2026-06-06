@@ -4,7 +4,7 @@ use serde_json;
 use serde_yaml;
 use std::fs;
 use std::path::PathBuf;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use walkdir::WalkDir;
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
@@ -27,6 +27,20 @@ struct NoteFrontmatter {
 pub trait NotebookStorage {
     fn load_notebook(&self) -> Result<NotebookData, Box<dyn std::error::Error>>;
     fn save_notebook(&self, notebook: &NotebookData) -> Result<(), Box<dyn std::error::Error>>;
+
+    /// Write only the `dirty` notes and delete `deleted_paths`, returning the
+    /// on-disk path assigned to any note that did not have one yet (so the caller
+    /// can store it back). Default: fall back to a full save (correct, just not
+    /// incremental) — used by single-file backends where it's already cheap.
+    fn save_incremental(
+        &self,
+        notebook: &NotebookData,
+        _dirty: &[Uuid],
+        _deleted_paths: &[PathBuf],
+    ) -> Result<Vec<(Uuid, PathBuf)>, Box<dyn std::error::Error>> {
+        self.save_notebook(notebook)?;
+        Ok(Vec::new())
+    }
 }
 
 // Vault-based storage for Obsidian compatibility
@@ -108,6 +122,90 @@ impl VaultStorage {
         }
         
         path_to_folder_id
+    }
+
+    /// Absolute directory for a folder, following its parent chain.
+    fn folder_dir(&self, folder: &Folder, notebook: &NotebookData) -> PathBuf {
+        let mut components = Vec::new();
+        let mut current = folder;
+        loop {
+            components.push(current.name.clone());
+            match current.parent_id.and_then(|pid| notebook.folders.get(&pid)) {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+        components.reverse();
+        let mut dir = self.vault_path.clone();
+        for c in components {
+            dir.push(c);
+        }
+        dir
+    }
+
+    /// Absolute directory a note lives in (vault root, or its folder chain).
+    fn note_dir(&self, folder_id: Option<Uuid>, notebook: &NotebookData) -> PathBuf {
+        match folder_id.and_then(|fid| notebook.folders.get(&fid)) {
+            Some(folder) => self.folder_dir(folder, notebook),
+            None => self.vault_path.clone(),
+        }
+    }
+
+    /// Create every folder directory in the notebook.
+    fn ensure_folders(&self, notebook: &NotebookData) -> Result<(), Box<dyn std::error::Error>> {
+        for folder in notebook.folders.values() {
+            fs::create_dir_all(self.folder_dir(folder, notebook))?;
+        }
+        Ok(())
+    }
+
+    /// Resolve a note's on-disk path: its existing path, or a sanitized,
+    /// collision-free name (disambiguated with a short id suffix). Records the
+    /// chosen path in `claimed`.
+    fn resolve_note_path(
+        &self,
+        note: &Note,
+        notebook: &NotebookData,
+        claimed: &mut HashSet<PathBuf>,
+    ) -> PathBuf {
+        let path = if let Some(existing) = &note.file_path {
+            existing.clone()
+        } else {
+            let dir = self.note_dir(note.folder_id, notebook);
+            let mut base = crate::app::sanitize_filename(&note.title);
+            if base.is_empty() {
+                base = "untitled".to_string();
+            }
+            let mut candidate = dir.join(format!("{}.md", base));
+            if claimed.contains(&candidate) {
+                let short = &note.id.to_string()[..8];
+                candidate = dir.join(format!("{}-{}.md", base, short));
+                let mut n = 2;
+                while claimed.contains(&candidate) {
+                    candidate = dir.join(format!("{}-{}-{}.md", base, short, n));
+                    n += 1;
+                }
+            }
+            candidate
+        };
+        claimed.insert(path.clone());
+        path
+    }
+
+    /// Write a single note to disk, returning its resolved path.
+    fn write_note(
+        &self,
+        note: &Note,
+        notebook: &NotebookData,
+        claimed: &mut HashSet<PathBuf>,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let file_path = self.resolve_note_path(note, notebook, claimed);
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content = self.create_markdown_with_frontmatter(note, &note.content);
+        fs::write(&file_path, content)?;
+        Ok(file_path)
     }
 }
 
@@ -212,103 +310,47 @@ impl NotebookStorage for VaultStorage {
     }
     
     fn save_notebook(&self, notebook: &NotebookData) -> Result<(), Box<dyn std::error::Error>> {
-        // Create directories for folders
-        for folder in notebook.folders.values() {
-            let mut folder_path = self.vault_path.clone();
-            
-            // Build full folder path
-            let mut path_components = Vec::new();
-            let mut current_folder = folder;
-            
-            loop {
-                path_components.push(current_folder.name.clone());
-                if let Some(parent_id) = current_folder.parent_id {
-                    if let Some(parent_folder) = notebook.folders.get(&parent_id) {
-                        current_folder = parent_folder;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            
-            path_components.reverse();
-            for component in path_components {
-                folder_path.push(component);
-            }
-            
-            fs::create_dir_all(&folder_path)?;
-        }
-        
-        // Save notes as markdown files.
-        //
-        // Two safeguards prevent silent note loss:
-        //  1. Filenames are derived from the SANITIZED title — a raw title like
-        //     "06/2026 plan" would otherwise be written into a subdirectory (or
-        //     fail on Windows for ':' '*' etc.).
-        //  2. A claimed-paths set guarantees two notes never resolve to the same
-        //     file; on collision we disambiguate deterministically with a short
-        //     id suffix. Iterating in id order keeps assignments stable across
-        //     saves (HashMap order is otherwise random), so files don't churn.
+        self.ensure_folders(notebook)?;
+
+        // Iterate in id order so collision-disambiguation is stable across saves
+        // (HashMap order is otherwise random, which would churn filenames).
         let mut notes: Vec<&Note> = notebook.notes.values().collect();
         notes.sort_by_key(|n| n.id);
-        let mut claimed: std::collections::HashSet<PathBuf> =
+        let mut claimed: HashSet<PathBuf> =
             notes.iter().filter_map(|n| n.file_path.clone()).collect();
 
         for note in notes {
-            let file_path = if let Some(existing_path) = &note.file_path {
-                existing_path.clone()
-            } else {
-                // Build the destination directory (vault + folder chain).
-                let mut dir = self.vault_path.clone();
-                if let Some(folder_id) = note.folder_id {
-                    if let Some(folder) = notebook.folders.get(&folder_id) {
-                        let mut path_components = Vec::new();
-                        let mut current_folder = folder;
-                        loop {
-                            path_components.push(current_folder.name.clone());
-                            match current_folder.parent_id.and_then(|pid| notebook.folders.get(&pid)) {
-                                Some(parent) => current_folder = parent,
-                                None => break,
-                            }
-                        }
-                        path_components.reverse();
-                        for component in path_components {
-                            dir.push(component);
-                        }
-                    }
-                }
+            self.write_note(note, notebook, &mut claimed)?;
+        }
+        Ok(())
+    }
 
-                let mut base = crate::app::sanitize_filename(&note.title);
-                if base.is_empty() {
-                    base = "untitled".to_string();
-                }
-                let mut candidate = dir.join(format!("{}.md", base));
-                if claimed.contains(&candidate) {
-                    let short = &note.id.to_string()[..8];
-                    candidate = dir.join(format!("{}-{}.md", base, short));
-                    let mut n = 2;
-                    while claimed.contains(&candidate) {
-                        candidate = dir.join(format!("{}-{}-{}.md", base, short, n));
-                        n += 1;
-                    }
-                }
-                candidate
-            };
-            claimed.insert(file_path.clone());
-
-            // Create directory if it doesn't exist
-            if let Some(parent) = file_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-
-            // Create content with frontmatter and write the file
-            let content_with_frontmatter = self.create_markdown_with_frontmatter(note, &note.content);
-            fs::write(&file_path, content_with_frontmatter)?;
+    fn save_incremental(
+        &self,
+        notebook: &NotebookData,
+        dirty: &[Uuid],
+        deleted_paths: &[PathBuf],
+    ) -> Result<Vec<(Uuid, PathBuf)>, Box<dyn std::error::Error>> {
+        // Remove files for deleted notes (ignore if already gone).
+        for path in deleted_paths {
+            let _ = fs::remove_file(path);
         }
 
-        Ok(())
+        // Claim every known path so a brand-new dirty note can't collide with one.
+        let mut claimed: HashSet<PathBuf> =
+            notebook.notes.values().filter_map(|n| n.file_path.clone()).collect();
+
+        let mut assigned = Vec::new();
+        for id in dirty {
+            if let Some(note) = notebook.notes.get(id) {
+                let had_path = note.file_path.is_some();
+                let path = self.write_note(note, notebook, &mut claimed)?;
+                if !had_path {
+                    assigned.push((*id, path));
+                }
+            }
+        }
+        Ok(assigned)
     }
 }
 
@@ -505,6 +547,37 @@ mod tests {
             vec!["06/2026 plan", "Meeting Notes", "Meeting Notes"],
             "titles did not round-trip cleanly"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn incremental_save_writes_only_dirty_and_removes_deleted() {
+        let dir = std::env::temp_dir().join(format!("scribble_inc_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut nb = NotebookData::new();
+        let a = Note::new("Alpha".to_string(), None);
+        let b = Note::new("Beta".to_string(), None);
+        let aid = a.id;
+        nb.add_note(a);
+        nb.add_note(b);
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+
+        // Save ONLY Alpha incrementally → its file exists, Beta's does not.
+        let assigned = storage.save_incremental(&nb, &[aid], &[]).unwrap();
+        assert_eq!(assigned.len(), 1, "new note should report its assigned path");
+        assert_eq!(assigned[0].0, aid);
+        assert!(dir.join("Alpha.md").exists());
+        assert!(!dir.join("Beta.md").exists(), "Beta must not be written");
+
+        // Store the path back (as the app does), then delete Alpha's file.
+        let path = assigned[0].1.clone();
+        nb.notes.get_mut(&aid).unwrap().file_path = Some(path.clone());
+        storage.save_incremental(&nb, &[], &[path]).unwrap();
+        assert!(!dir.join("Alpha.md").exists(), "deleted note's file must be removed");
 
         let _ = fs::remove_dir_all(&dir);
     }
