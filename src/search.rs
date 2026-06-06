@@ -220,11 +220,8 @@ impl EnhancedSearch {
     }
     
     fn find_text_matches(&self, text: &str, query: &SearchQuery, match_type: MatchType, line_num: usize) -> Result<Option<Vec<SearchMatch>>, String> {
-        let (search_text, search_query) = if query.case_sensitive {
-            (text, query.text.as_str())
-        } else {
-            (text, query.text.as_str())
-        };
+        // Case folding is applied per-iteration in the match loop below.
+        let (search_text, search_query) = (text, query.text.as_str());
         
         let mut matches = Vec::new();
         let mut start_pos = 0;

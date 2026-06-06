@@ -13,20 +13,18 @@ impl App {
         
         // Add default vault if not already in recent
         if let Some(default_vault) = &config.vaults.default {
-            if default_vault.exists() && default_vault.join(".obsidian").exists() {
-                if !self.available_vaults.contains(default_vault) {
+            if default_vault.exists() && default_vault.join(".obsidian").exists()
+                && !self.available_vaults.contains(default_vault) {
                     self.available_vaults.push(default_vault.clone());
                 }
-            }
         }
         
         // Add current directory if it's a vault
         if let Ok(current_dir) = std::env::current_dir() {
-            if current_dir.join(".obsidian").exists() {
-                if !self.available_vaults.contains(&current_dir) {
+            if current_dir.join(".obsidian").exists()
+                && !self.available_vaults.contains(&current_dir) {
                     self.available_vaults.push(current_dir);
                 }
-            }
         }
         
         // Scan common locations for additional vaults
@@ -44,11 +42,10 @@ impl App {
                     if let Ok(entries) = std::fs::read_dir(location) {
                         for entry in entries.filter_map(|e| e.ok()) {
                             let path = entry.path();
-                            if path.is_dir() && path.join(".obsidian").exists() {
-                                if !self.available_vaults.contains(&path) {
+                            if path.is_dir() && path.join(".obsidian").exists()
+                                && !self.available_vaults.contains(&path) {
                                     self.available_vaults.push(path);
                                 }
-                            }
                         }
                     }
                 }

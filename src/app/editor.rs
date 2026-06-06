@@ -88,8 +88,8 @@ impl App {
     pub(crate) fn get_line_start_position(&self, line_index: usize) -> usize {
         let lines: Vec<&str> = self.editor_content.lines().collect();
         let mut pos = 0;
-        for i in 0..line_index.min(lines.len()) {
-            pos += lines[i].len() + 1; // +1 for the newline character
+        for line in lines.iter().take(line_index.min(lines.len())) {
+            pos += line.len() + 1; // +1 for the newline character
         }
         pos
     }

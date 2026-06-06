@@ -269,7 +269,7 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
         .title(title)
         .border_style(border_style);
 
-    if let Some(_) = app.current_note {
+    if app.current_note.is_some() {
         let content = if app.editor_content.is_empty() {
             "# Start writing your note here...\n\nPress 'i' to enter insert mode\nPress 'Esc' to return to normal mode"
         } else {
@@ -1887,7 +1887,7 @@ fn draw_vault_switcher_dialog(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(format!("📁 Vault Switcher"))
+        .title("📁 Vault Switcher".to_string())
         .borders(Borders::ALL)
         .border_style(TokyoNightTheme::border_focused())
         .style(TokyoNightTheme::popup());

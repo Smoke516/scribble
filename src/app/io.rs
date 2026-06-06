@@ -84,7 +84,7 @@ impl App {
             let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
             let path = entry.path();
             
-            if path.is_file() && path.extension().map_or(false, |ext| ext == "md") {
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
                 match self.import_note_from_file(&path, &mut result) {
                     Ok(_) => result.successful_imports += 1,
                     Err(e) => {

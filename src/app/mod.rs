@@ -1,5 +1,4 @@
 use crate::autocomplete::{AutocompleteState, MarkdownAutocomplete};
-use pulldown_cmark;
 use crate::models::{Note, Folder, NotebookData, FolderTreeNode};
 use crate::search::{EnhancedSearch, SearchResult};
 use crate::tags::TagManager;

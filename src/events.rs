@@ -890,8 +890,7 @@ fn execute_command(app: &mut App, command: &str) {
                         }
                     },
                 }
-            } else
-            if command.starts_with("export ") {
+            } else if command.starts_with("export ") {
                 let path = command.strip_prefix("export ").unwrap_or("").trim();
                 match app.export_notes_to_directory(path) {
                     Ok(count) => app.set_operation_success(format!("Exported {} notes to '{}'", count, path), Some("📦".to_string())),

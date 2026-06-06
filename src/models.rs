@@ -364,7 +364,7 @@ impl NotebookData {
         if let Some(note) = self.notes.get(&note_id) {
             let link_regex = regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
             
-            for (_pos, cap) in link_regex.captures_iter(&note.content).enumerate() {
+            for cap in link_regex.captures_iter(&note.content) {
                 if let Some(title_match) = cap.get(1) {
                     let target_title = title_match.as_str().to_string();
                     let target_id = self.find_note_by_title(&target_title);

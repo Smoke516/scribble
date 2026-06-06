@@ -119,16 +119,16 @@ impl App {
         // In the future, this could use pulldown-cmark for proper rendering
         content.lines()
             .map(|line| {
-                if line.starts_with("# ") {
-                    format!("▉ {}", &line[2..])
-                } else if line.starts_with("## ") {
-                    format!("▊ {}", &line[3..])
-                } else if line.starts_with("### ") {
-                    format!("▋ {}", &line[4..])
+                if let Some(rest) = line.strip_prefix("# ") {
+                    format!("▉ {}", rest)
+                } else if let Some(rest) = line.strip_prefix("## ") {
+                    format!("▊ {}", rest)
+                } else if let Some(rest) = line.strip_prefix("### ") {
+                    format!("▋ {}", rest)
                 } else if line.starts_with("- ") || line.starts_with("* ") {
                     format!("• {}", &line[2..])
-                } else if line.starts_with("> ") {
-                    format!("│ {}", &line[2..])
+                } else if let Some(rest) = line.strip_prefix("> ") {
+                    format!("│ {}", rest)
                 } else if line.starts_with("```") {
                     "┌─────────────────────────────────────┐".to_string()
                 } else {
