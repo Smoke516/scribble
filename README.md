@@ -19,9 +19,10 @@ A powerful terminal-based note-taking app with advanced tag management, Obsidian
 - **🎨 Theme System** - Multiple beautiful themes with interactive browser (`F3` or `:theme list`)
 - **✏️ Rename Support** - Easily rename folders and notes with duplicate checking (`r`)
 - **✏️ External editor support** - Edit notes in Helix, Neovim, or your favorite editor
-- **💾 Auto-save** - Notes are automatically saved when you exit edit mode
-- **🔍 Full-text search** - Search through all your notes by title or content
-- **⌨️ Vim-like navigation** - Familiar keyboard shortcuts for efficient navigation
+- **💾 Crash-safe auto-save** - Notes are persisted to disk continuously (on edit, periodic autosave, and structural changes like move/rename/delete) — not just on exit, so your work survives an unexpected exit
+- **🔍 Full-text search** - Search through all your notes by title or content, with advanced regex/field search (`Ctrl+A`) and search & replace (`Ctrl+R`)
+- **🔤 Spell check** - Optional aspell-backed spell checking with inline error highlighting and Vim-style `z=` suggestions
+- **⌨️ Vim-like navigation** - Familiar keyboard shortcuts, including a Visual selection mode (`v`)
 
 ### 🚀 Productivity Features
 - **🏷️ Tag Filtering** - Filter notes by tags with interactive browser and analytics (`Ctrl+T`)
@@ -35,6 +36,10 @@ A powerful terminal-based note-taking app with advanced tag management, Obsidian
 - **👁️ Live Preview** - Real-time markdown preview in split-screen mode (`Ctrl+P`)
 - **↩️ Undo/Delete Safety** - Safely delete with full undo capability (`u` to undo)
 - **🔗 Note Linking** - Wiki-style `[[Note Title]]` links between notes (`Ctrl+L` to follow)
+- **🔙 Backlinks Panel** - See which notes link *to* the current note and where it links *out* (`Ctrl+B`)
+- **🔎 Advanced Search** - Regex and field-scoped search like `case:`/`tag:` (`Ctrl+A`), plus in-note search with `/` and `n`/`N` to step through matches
+- **🔁 Search & Replace** - Find-and-replace across notes (`Ctrl+R`)
+- **📑 Templates** - Create notes from Blank/Daily/Meeting/Project templates (`N`)
 - **💾 Session Persistence** - Remembers your last opened note and editor state
 - **🆔 Version Display** - Always know what version you're running (`--version` or in-app help)
 - **🎯 Smart Autocompletion** - Intelligent markdown completion with context awareness
@@ -85,6 +90,7 @@ This creates an `asciinema` recording perfect for sharing!
 
 ### Prerequisites
 - **Rust** (1.70+) - Install from [rustup.rs](https://rustup.rs/)
+- **aspell** *(optional)* - Enables spell check (`:spell`, `z=`). Install with `sudo apt install aspell` (Debian/Ubuntu), `sudo dnf install aspell` (Fedora), or `brew install aspell` (macOS)
 
 ### Quick Install (Recommended)
 
@@ -249,11 +255,14 @@ Once started, press '?' for in-app help.
 | `Enter` | Open note or toggle folder expansion |
 | `Tab` | Switch between folder pane and editor |
 | `n` | Create new note |
+| `N` | Create new note from a template |
 | `f` | Create new folder |
 | `r` | Rename selected folder or note |
 | `d` | Delete selected item |
 | `m` | Move selected item |
+| `t` | Edit the current note's tags |
 | `i` | Enter insert mode (edit note) |
+| `v` | Enter Visual selection mode |
 | `e` | Open note in external editor |
 | `Esc` | Return to normal mode |
 
@@ -265,10 +274,14 @@ Once started, press '?' for in-app help.
 | `Ctrl+V` | Vault Switcher - switch between multiple vaults |
 | `/` | Search notes by content or title (regular search) |
 | `Ctrl+F` | Fuzzy search mode - intelligent search with typo tolerance |
+| `Ctrl+A` | Advanced search - regex and field scopes (e.g. `case:`, `tag:`) |
+| `Ctrl+R` | Search & replace across notes |
+| `/` then `n`/`N` | In-note search; jump to next/previous match |
 | `Tab` (in search) | Switch between regular and fuzzy search |
 | `Ctrl+J` | Quick Jump - instant fuzzy search across all notes |
 | `Ctrl+O` | Recent files - quick access to recently opened notes |
 | `Ctrl+L` | Follow [[wiki-style]] link at cursor |
+| `Ctrl+B` | Links panel - backlinks (in) and outgoing links (out) |
 | `u` | Undo last delete operation (restore from trash) |
 | `?` | Show comprehensive scrollable help with all shortcuts |
 
@@ -283,6 +296,12 @@ Once started, press '?' for in-app help.
 | `:w` or `Ctrl+S` | Save current note |
 | `:q` | Quit application |
 | `:wq` | Save and quit |
+| `:N` | Jump to line number N |
+| `:export [path]` | Export all notes as markdown files |
+| `:export html [path]` | Export all notes as HTML (default `~/Documents/scribble_export`) |
+| `:import <dir>` | Import markdown files from a directory |
+| `:backup` / `:backups` | Create a backup / list existing backups |
+| `:spell` / `:nospell` | Enable / disable spell check |
 | `:theme list` | Open theme browser |
 | `:theme <name>` | Switch to specific theme |
 | `:theme current` | Show current theme name |
@@ -291,7 +310,7 @@ Once started, press '?' for in-app help.
 ### Note Format
 Write notes in standard markdown:
 
-```markdown
+````markdown
 # This is a heading
 
 ## Subheading
@@ -303,12 +322,12 @@ Write notes in standard markdown:
 
 **Bold text** and *italic text*
 
-`inline code` and:
+`inline code` and fenced code blocks:
 
-```code
+```
 code blocks
 ```
-```
+````
 
 ### Visual Indicators
 - 📁 Collapsed folder (Tokyo Night blue) | 📂 Expanded folder (Tokyo Night cyan)
@@ -359,11 +378,14 @@ Scribble automatically detects and supports these editors:
 
 ## Data Storage
 
-Scribble stores your notes in platform-appropriate locations:
-- **Linux**: `~/.local/share/scribble/`
-- **macOS**: `~/Library/Application Support/scribble/`
+Scribble has two storage backends:
 
-Data is stored in JSON format and automatically saved when you quit the application.
+- **Default notebook** - a single `notebook.json` in a platform-appropriate location:
+  - **Linux**: `~/.local/share/scribble/`
+  - **macOS**: `~/Library/Application Support/scribble/`
+- **Obsidian vault** - when working in a vault, notes are individual Markdown files with YAML frontmatter, fully compatible with Obsidian.
+
+Either way, changes are written to disk continuously — on edit, on a periodic autosave, and after structural operations (move/rename/delete) — so your work is not lost if the app exits unexpectedly. Vault saves are incremental: only changed files are rewritten.
 
 ## Keyboard Shortcuts Reference
 
@@ -372,23 +394,41 @@ Data is stored in JSON format and automatically saved when you quit the applicat
 - `g/G` - Go to top/bottom
 - `Enter` - Open/expand item
 - `Tab` - Switch panes
-- `n` - New note
+- `n` / `N` - New note / new note from template
 - `f` - New folder
-- `d` - Delete item
+- `r` / `m` / `d` - Rename / move / delete item
+- `t` - Edit current note's tags
 - `i` - Insert mode
+- `v` - Visual selection mode
+- `e` - Open in external editor
 - `/` - Search
+- `Ctrl+B` - Links panel (backlinks + outgoing)
 - `:` - Command mode
 - `Ctrl+S` - Save
 - `q` - Quit
 - `?` - Help
 
 ### Insert Mode
-- `Esc` - Return to normal mode
+- `Esc` - Return to normal mode (auto-saves and runs spell check)
 - `Ctrl+S` - Save
-- Regular typing for content
-- Arrow keys for navigation
-- `Tab` - Insert 4 spaces
+- `Ctrl+P` - Toggle live preview
+- `Ctrl+V` - Paste from the system clipboard
+- `Ctrl+L` - Follow `[[wiki link]]` at cursor
+- `Ctrl+Z` / `Ctrl+Y` - Undo / redo
+- `[[` - Wiki-link autocomplete; `Tab` accepts a suggestion (or inserts 4 spaces)
+- Regular typing for content; arrow keys for navigation
 - `Backspace` - Delete character
+
+### Visual Mode (`v`)
+- `h/j/k/l`, `w/b`, `0/$`, `g/G` - Extend the selection
+- `y` - Yank selection
+- `d` - Delete selection
+- `c` - Change (delete then enter Insert mode)
+- `Esc` / `v` - Cancel
+
+### Spell Check (requires aspell)
+- `:spell` / `:nospell` - Enable / disable
+- `z=` - Suggestions for the word at the cursor; `1`-`9` to pick, `Enter` to apply
 
 ### Search Mode
 - Type to search
@@ -396,9 +436,14 @@ Data is stored in JSON format and automatically saved when you quit the applicat
 - `Esc` - Cancel search
 
 ### Command Mode
-- `:w` - Write/save
-- `:q` - Quit
-- `:wq` - Save and quit
+- `:w` / `:q` / `:wq` - Write / quit / save and quit
+- `:N` - Jump to line N
+- `:export [path]` / `:export html [path]` - Export as markdown / HTML
+- `:import <dir>` - Import markdown files
+- `:backup` / `:backups` - Create / list backups
+- `:spell` / `:nospell` - Toggle spell check
+- `:theme list|<name>|current` - Theme browser / switch / show active
+- `:vault` - Vault switcher
 - `Esc` - Cancel command
 
 ## Building
