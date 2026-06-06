@@ -14,7 +14,6 @@ pub enum AppMode {
     Normal,
     Insert,
     Search,
-    #[allow(dead_code)]  // TODO: advanced-search mode (unfinished)
     SearchAdvanced,
     SearchReplace,
     Command,
@@ -278,7 +277,8 @@ pub struct App {
 
     // Backlinks panel
     pub backlinks_selected: usize,
-    pub backlinks_cache: Vec<(Uuid, String)>,  // (note_id, title)
+    pub backlinks_cache: Vec<(Uuid, String)>,  // (note_id, title) — notes linking here
+    pub outgoing_links_cache: Vec<String>,     // titles this note links to
 
     // Per-note cursor memory: restore position when revisiting a note
     pub note_cursor_map: HashMap<Uuid, (u16, u16)>,
@@ -434,6 +434,7 @@ impl App {
             // Backlinks
             backlinks_selected: 0,
             backlinks_cache: Vec::new(),
+            outgoing_links_cache: Vec::new(),
 
             // Per-note cursor memory
             note_cursor_map: HashMap::new(),
@@ -1012,7 +1013,12 @@ impl App {
         }
     }
 
-    #[allow(dead_code)]  // TODO: outgoing wiki-links not surfaced
+    /// Enter advanced search (regex:/case: prefixes over note content).
+    pub fn start_advanced_search(&mut self) {
+        self.mode = AppMode::SearchAdvanced;
+        self.input_buffer.clear();
+    }
+
     pub fn get_outgoing_links_for_current_note(&self) -> Vec<String> {
         if let Some(ref note) = self.current_note {
             self.notebook.get_outgoing_links(note.id)
@@ -3004,8 +3010,9 @@ impl App {
                     .map(|id| (id, title))
             })
             .collect();
-        if self.backlinks_cache.is_empty() {
-            self.set_message("No notes link to this note".to_string());
+        self.outgoing_links_cache = self.get_outgoing_links_for_current_note();
+        if self.backlinks_cache.is_empty() && self.outgoing_links_cache.is_empty() {
+            self.set_message("No links to or from this note".to_string());
         } else {
             self.backlinks_selected = 0;
             self.mode = AppMode::Backlinks;

@@ -393,6 +393,11 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             app.search_dialog_note_ids.clear();
             app.search_dialog_selected = 0;
         }
+
+        // Advanced search — regex:/case: over note content (Ctrl+A)
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.start_advanced_search();
+        }
         
         // Search and replace (Ctrl+R)
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
