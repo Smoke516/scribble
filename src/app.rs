@@ -203,6 +203,8 @@ pub struct App {
     pub deleted_note_paths: Vec<std::path::PathBuf>,
     /// Folder-structure change: fall back to a full save (rare, but correct).
     pub force_full_save: bool,
+    /// Folder directories to move/rename on disk: (old relative path, new).
+    pub pending_folder_relocations: Vec<(std::path::PathBuf, std::path::PathBuf)>,
 
     // Quick jump and recent files
     pub quick_jump_query: String,
@@ -356,6 +358,7 @@ impl App {
             dirty_note_ids: HashSet::new(),
             deleted_note_paths: Vec::new(),
             force_full_save: false,
+            pending_folder_relocations: Vec::new(),
             last_operation: None,
             operation_result: None,
             operation_result_time: None,
@@ -1293,6 +1296,30 @@ impl App {
         self.pending_disk_save = true;
     }
 
+    /// A folder's path relative to the vault root (its chain of folder names).
+    pub fn folder_rel_path(&self, folder_id: Uuid) -> std::path::PathBuf {
+        let mut components = Vec::new();
+        let mut current = self.notebook.folders.get(&folder_id);
+        while let Some(folder) = current {
+            components.push(folder.name.clone());
+            current = folder.parent_id.and_then(|pid| self.notebook.folders.get(&pid));
+        }
+        components.reverse();
+        components.iter().collect()
+    }
+
+    /// Queue a folder directory move/rename to be applied on the next disk write.
+    pub fn queue_folder_relocation(
+        &mut self,
+        old_rel: std::path::PathBuf,
+        new_rel: std::path::PathBuf,
+    ) {
+        if old_rel != new_rel && !old_rel.as_os_str().is_empty() {
+            self.pending_folder_relocations.push((old_rel, new_rel));
+            self.pending_disk_save = true;
+        }
+    }
+
     /// Record a successful disk write: marks the buffer clean and timestamps the
     /// write so the file watcher ignores the events it generated.
     pub fn mark_disk_saved(&mut self) {
@@ -1791,8 +1818,11 @@ impl App {
                     self.move_note(move_id, destination_folder_id)?;
                 },
                 TreeItemType::Folder => {
+                    // Relocate the directory (and its files) on disk.
+                    let old_rel = self.folder_rel_path(move_id);
                     self.move_folder(move_id, destination_folder_id)?;
-                    self.request_full_save();
+                    let new_rel = self.folder_rel_path(move_id);
+                    self.queue_folder_relocation(old_rel, new_rel);
                 },
             }
             
@@ -1912,26 +1942,32 @@ impl App {
     
     pub fn execute_rename(&mut self) -> Result<(), String> {
         let rename_id = self.rename_item_id.ok_or("No item selected for renaming")?;
-        let rename_type = self.rename_item_type.as_ref().ok_or("No item type selected")?;
+        let rename_type = self.rename_item_type.clone().ok_or("No item type selected")?;
         let new_name = self.input_buffer.trim().to_string();
-        
+
         if new_name.is_empty() {
             return Err("Name cannot be empty".to_string());
         }
-        
+
         if new_name == self.rename_item_name {
             return Err("Name unchanged".to_string());
         }
-        
+
         match rename_type {
             TreeItemType::Note => {
                 self.rename_note(rename_id, new_name.clone())?;
+                // Rewrite the note so its frontmatter title is updated on disk.
+                self.mark_note_dirty(rename_id);
             },
             TreeItemType::Folder => {
+                // Rename the directory on disk (and remap contained notes).
+                let old_rel = self.folder_rel_path(rename_id);
                 self.rename_folder(rename_id, new_name.clone())?;
+                let new_rel = self.folder_rel_path(rename_id);
+                self.queue_folder_relocation(old_rel, new_rel);
             },
         }
-        
+
         // Reset rename state
         self.rename_item_id = None;
         self.rename_item_type = None;
@@ -1939,9 +1975,6 @@ impl App {
         self.input_buffer.clear();
         self.mode = AppMode::Normal;
         self.refresh_tree_view();
-        // Rename can move a directory / change a note's frontmatter title — use a
-        // full save to keep the vault consistent (renames are infrequent).
-        self.request_full_save();
 
         self.set_operation_success(format!("Renamed to '{}'!", new_name), Some("✏️".to_string()));
         Ok(())

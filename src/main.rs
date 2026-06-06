@@ -183,6 +183,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             last_tick = Instant::now();
         }
 
+        // Apply queued folder moves/renames on disk first (rename the directory
+        // and its files), remapping the in-memory note paths to the new location.
+        if !app.pending_folder_relocations.is_empty() {
+            let relocations = std::mem::take(&mut app.pending_folder_relocations);
+            for (old_rel, new_rel) in relocations {
+                match storage.relocate_folder(&app.notebook, &old_rel, &new_rel) {
+                    Ok(updated) => {
+                        for (id, new_path) in updated {
+                            if let Some(n) = app.notebook.notes.get_mut(&id) {
+                                n.file_path = Some(new_path.clone());
+                            }
+                            if app.current_note.as_ref().map(|n| n.id) == Some(id) {
+                                if let Some(cn) = app.current_note.as_mut() {
+                                    cn.file_path = Some(new_path);
+                                }
+                            }
+                        }
+                        app.mark_disk_saved();
+                    }
+                    Err(e) => app.report_save_failure(e.to_string()),
+                }
+            }
+        }
+
         // Persist pending changes to disk as they happen (autosave, explicit
         // save, structural edits) so work survives a crash — not only on exit.
         // Writes only the changed notes (and removes deleted files); folder-tree
