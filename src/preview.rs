@@ -55,9 +55,15 @@ fn parse_callout(text: &str, c: &ThemeColors) -> Option<CalloutInfo> {
     Some(CalloutInfo { icon, label, color })
 }
 
-/// Render markdown content to styled ratatui Text (Obsidian-like)
-pub fn render_markdown_preview(content: &str, theme: &ThemeManager) -> Text<'static> {
+/// Render markdown content to styled ratatui Text (Obsidian-like).
+///
+/// `width` is the inner width of the preview pane in columns; full-width
+/// decorations (heading underlines, code-block borders, horizontal rules) are
+/// sized to it so they fill the pane exactly instead of wrapping into stub lines.
+pub fn render_markdown_preview(content: &str, theme: &ThemeManager, width: usize) -> Text<'static> {
     let c = theme.colors();
+    // Clamp to a sane floor so very narrow panes still render a short rule.
+    let rule_width = width.clamp(4, 400);
     let parser = Parser::new_ext(content, pulldown_cmark::Options::all());
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current_line: Vec<Span<'static>> = Vec::new();
@@ -200,7 +206,7 @@ pub fn render_markdown_preview(content: &str, theme: &ThemeManager) -> Text<'sta
                         // Obsidian-style: subtle separator under H1 and H2
                         if heading_level <= 2 {
                             lines.push(Line::from(Span::styled(
-                                "─".repeat(40),
+                                "─".repeat(rule_width),
                                 Style::default().fg(c.bg_highlight),
                             )));
                         }
@@ -208,7 +214,7 @@ pub fn render_markdown_preview(content: &str, theme: &ThemeManager) -> Text<'sta
                     }
                     TagEnd::CodeBlock => {
                         lines.push(Line::from(Span::styled(
-                            "╰─────────────────────────────────────────".to_string(),
+                            format!("╰{}", "─".repeat(rule_width.saturating_sub(1).max(3))),
                             Style::default().fg(c.comment),
                         )));
                         in_code_block = false;
@@ -441,7 +447,7 @@ pub fn render_markdown_preview(content: &str, theme: &ThemeManager) -> Text<'sta
                 }
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                    "━".repeat(rule_width),
                     Style::default().fg(c.comment),
                 )));
                 lines.push(Line::from(""));
@@ -521,7 +527,7 @@ pub fn render_markdown_preview(content: &str, theme: &ThemeManager) -> Text<'sta
 }
 
 /// Generate a sample preview showcasing all supported features
-pub fn generate_preview_sample(theme: &ThemeManager) -> Text<'static> {
+pub fn generate_preview_sample(theme: &ThemeManager, width: usize) -> Text<'static> {
     let sample_markdown = r#"# Welcome to Live Preview!
 
 This is a **live markdown preview** that updates as you type.
@@ -565,5 +571,5 @@ fn hello_world() {
 
 Start editing your note to see the magic happen!"#;
 
-    render_markdown_preview(sample_markdown, theme)
+    render_markdown_preview(sample_markdown, theme, width)
 }

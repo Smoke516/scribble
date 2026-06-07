@@ -228,11 +228,15 @@ impl App {
         self.input_buffer.clear();
     }
 
-    pub fn get_outgoing_links_for_current_note(&self) -> Vec<String> {
+    /// Outgoing links for the current note as `(target_id_if_exists, title)`,
+    /// de-duplicated by title so a note linked twice shows once.
+    pub fn get_outgoing_links_for_current_note(&self) -> Vec<(Option<uuid::Uuid>, String)> {
         if let Some(ref note) = self.current_note {
+            let mut seen = std::collections::HashSet::new();
             self.notebook.get_outgoing_links(note.id)
                 .iter()
-                .map(|link| link.target_note_title.clone())
+                .filter(|link| seen.insert(link.target_note_title.to_lowercase()))
+                .map(|link| (link.target_note_id, link.target_note_title.clone()))
                 .collect()
         } else {
             Vec::new()

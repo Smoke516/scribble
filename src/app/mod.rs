@@ -47,6 +47,14 @@ pub enum AppMode {
     Visual,
     TemplatePicker,
     SpellSuggest,
+    Outline,
+}
+
+/// Which section of the links panel keyboard navigation currently acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BacklinkFocus {
+    Incoming,
+    Outgoing,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -291,7 +299,13 @@ pub struct App {
     // Backlinks panel
     pub backlinks_selected: usize,
     pub backlinks_cache: Vec<(Uuid, String)>,  // (note_id, title) — notes linking here
-    pub outgoing_links_cache: Vec<String>,     // titles this note links to
+    pub outgoing_selected: usize,
+    pub outgoing_links_cache: Vec<(Option<Uuid>, String)>, // (target_id_if_exists, title) — links from here
+    pub backlinks_focus: BacklinkFocus,        // which section navigation acts on
+
+    // Outline panel
+    pub outline_headings: Vec<(usize, u8, String)>, // (line_index, level, text)
+    pub outline_selected: usize,
 
     // Per-note cursor memory: restore position when revisiting a note
     pub note_cursor_map: HashMap<Uuid, (u16, u16)>,
@@ -447,7 +461,11 @@ impl App {
             // Backlinks
             backlinks_selected: 0,
             backlinks_cache: Vec::new(),
+            outgoing_selected: 0,
             outgoing_links_cache: Vec::new(),
+            backlinks_focus: BacklinkFocus::Incoming,
+            outline_headings: Vec::new(),
+            outline_selected: 0,
 
             // Per-note cursor memory
             note_cursor_map: HashMap::new(),
@@ -1152,6 +1170,13 @@ impl App {
             self.set_message("No links to or from this note".to_string());
         } else {
             self.backlinks_selected = 0;
+            self.outgoing_selected = 0;
+            // Start focus on whichever section has entries (prefer incoming).
+            self.backlinks_focus = if self.backlinks_cache.is_empty() {
+                BacklinkFocus::Outgoing
+            } else {
+                BacklinkFocus::Incoming
+            };
             self.mode = AppMode::Backlinks;
         }
     }
@@ -1160,23 +1185,175 @@ impl App {
         self.mode = AppMode::Normal;
     }
 
+    /// Toggle navigation focus between the incoming and outgoing sections,
+    /// but only when the other section actually has entries.
+    pub fn backlinks_toggle_focus(&mut self) {
+        self.backlinks_focus = match self.backlinks_focus {
+            BacklinkFocus::Incoming if !self.outgoing_links_cache.is_empty() => BacklinkFocus::Outgoing,
+            BacklinkFocus::Outgoing if !self.backlinks_cache.is_empty() => BacklinkFocus::Incoming,
+            other => other,
+        };
+    }
+
     pub fn backlinks_navigate_up(&mut self) {
-        if self.backlinks_selected > 0 {
-            self.backlinks_selected -= 1;
+        match self.backlinks_focus {
+            BacklinkFocus::Incoming => {
+                self.backlinks_selected = self.backlinks_selected.saturating_sub(1);
+            }
+            BacklinkFocus::Outgoing => {
+                self.outgoing_selected = self.outgoing_selected.saturating_sub(1);
+            }
         }
     }
 
     pub fn backlinks_navigate_down(&mut self) {
-        if self.backlinks_selected < self.backlinks_cache.len().saturating_sub(1) {
-            self.backlinks_selected += 1;
+        match self.backlinks_focus {
+            BacklinkFocus::Incoming => {
+                if self.backlinks_selected < self.backlinks_cache.len().saturating_sub(1) {
+                    self.backlinks_selected += 1;
+                }
+            }
+            BacklinkFocus::Outgoing => {
+                if self.outgoing_selected < self.outgoing_links_cache.len().saturating_sub(1) {
+                    self.outgoing_selected += 1;
+                }
+            }
         }
     }
 
-    /// Open the note selected in the backlinks panel.
+    /// Open the link selected in whichever section currently has focus.
+    /// For an outgoing link whose target note doesn't exist yet, create it first.
     pub fn open_selected_backlink(&mut self) {
-        if let Some(note_id) = self.backlinks_cache.get(self.backlinks_selected).map(|(id, _)| *id) {
+        match self.backlinks_focus {
+            BacklinkFocus::Incoming => {
+                if let Some(note_id) = self.backlinks_cache.get(self.backlinks_selected).map(|(id, _)| *id) {
+                    self.mode = AppMode::Normal;
+                    self.open_note_by_id(note_id);
+                }
+            }
+            BacklinkFocus::Outgoing => {
+                let Some((target_id, title)) = self.outgoing_links_cache.get(self.outgoing_selected).cloned() else {
+                    return;
+                };
+                self.mode = AppMode::Normal;
+                match target_id {
+                    Some(id) => self.open_note_by_id(id),
+                    None => {
+                        // Broken link: create the missing note in the same folder, then
+                        // refresh links so the source note's link now resolves.
+                        let folder_id = self.current_note.as_ref().and_then(|n| n.folder_id);
+                        self.create_new_note(title.clone(), folder_id);
+                        self.notebook.rebuild_links();
+                        self.set_message(format!("Created note '{}'", title));
+                    }
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Outline panel
+    // -------------------------------------------------------------------------
+
+    /// Populate the outline from the current note's headings and enter Outline mode.
+    pub fn show_outline(&mut self) {
+        if self.current_note.is_none() {
+            self.set_message("No note selected".to_string());
+            return;
+        }
+        self.outline_headings = Self::parse_headings(&self.editor_content);
+        if self.outline_headings.is_empty() {
+            self.set_message("No headings in this note".to_string());
+            return;
+        }
+        self.outline_selected = 0;
+        self.mode = AppMode::Outline;
+    }
+
+    /// Parse markdown ATX headings (`#`..`######`), skipping fenced code blocks.
+    fn parse_headings(content: &str) -> Vec<(usize, u8, String)> {
+        let mut headings = Vec::new();
+        let mut in_code = false;
+        for (i, line) in content.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("```") {
+                in_code = !in_code;
+                continue;
+            }
+            if in_code {
+                continue;
+            }
+            let level = trimmed.bytes().take_while(|&b| b == b'#').count();
+            if (1..=6).contains(&level) && trimmed[level..].starts_with(' ') {
+                headings.push((i, level as u8, trimmed[level..].trim().to_string()));
+            }
+        }
+        headings
+    }
+
+    pub fn outline_navigate_up(&mut self) {
+        self.outline_selected = self.outline_selected.saturating_sub(1);
+    }
+
+    pub fn outline_navigate_down(&mut self) {
+        if self.outline_selected < self.outline_headings.len().saturating_sub(1) {
+            self.outline_selected += 1;
+        }
+    }
+
+    pub fn cancel_outline(&mut self) {
+        self.mode = AppMode::Normal;
+    }
+
+    /// Jump the editor to the selected heading and return to Normal mode.
+    pub fn outline_select(&mut self) {
+        if let Some(&(line_idx, _, _)) = self.outline_headings.get(self.outline_selected) {
             self.mode = AppMode::Normal;
-            self.open_note_by_id(note_id);
+            self.focused_pane = FocusedPane::Editor;
+            self.jump_to_line(line_idx + 1); // jump_to_line is 1-based
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Task checkboxes & daily notes
+    // -------------------------------------------------------------------------
+
+    /// Toggle a markdown task checkbox (`[ ]` <-> `[x]`) on the current line.
+    pub fn toggle_task_checkbox(&mut self) {
+        if self.current_note.is_none() {
+            return;
+        }
+        let row = self.editor_cursor.0 as usize;
+        let lines: Vec<&str> = self.editor_content.lines().collect();
+        let Some(line) = lines.get(row).copied() else { return; };
+
+        // Prefer flipping an unchecked box; otherwise uncheck a checked one.
+        let replacement = line.find("[ ]").map(|pos| (pos, "[x]"))
+            .or_else(|| line.to_ascii_lowercase().find("[x]").map(|pos| (pos, "[ ]")));
+
+        let Some((col, new)) = replacement else {
+            self.set_message("No checkbox on this line".to_string());
+            return;
+        };
+
+        self.push_undo_snapshot();
+        let start = self.get_line_start_position(row) + col;
+        // `[ ]` and `[x]` are both 3 bytes, so the cursor stays valid.
+        self.editor_content.replace_range(start..start + 3, new);
+        self.update_preview_content();
+        self.mark_modified();
+    }
+
+    /// Open today's daily note (`YYYY-MM-DD`), creating it at the root if absent.
+    pub fn open_daily_note(&mut self) {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        if let Some(id) = self.notebook.find_note_by_title(&today) {
+            self.open_note_by_id(id);
+            self.set_message(format!("Daily note: {}", today));
+        } else {
+            self.create_new_note(today.clone(), None);
+            self.focused_pane = FocusedPane::Editor;
+            self.set_message(format!("Created daily note: {}", today));
         }
     }
 
@@ -1553,5 +1730,181 @@ mod persistence_tests {
         // old file queued for deletion, note queued for (re)write
         assert!(app.deleted_note_paths.contains(&old_path));
         assert!(app.dirty_note_ids.contains(&nid));
+    }
+}
+
+#[cfg(test)]
+mod backlink_graph_tests {
+    use super::*;
+    use crate::models::Note;
+
+    /// Build an app holding `source` (which links out via `[[..]]` in its content)
+    /// with `source` loaded as the current note and its links parsed.
+    fn app_with_source(content: &str) -> (App, Uuid) {
+        let mut app = App::default();
+        let mut source = Note::new("Source".to_string(), None);
+        source.content = content.to_string();
+        let sid = source.id;
+        app.notebook.add_note(source.clone());
+        app.current_note = Some(source);
+        app.notebook.rebuild_links();
+        (app, sid)
+    }
+
+    #[test]
+    fn outgoing_link_to_existing_note_resolves_and_opens() {
+        let (mut app, _) = app_with_source("see [[Target]] for details");
+        let target = Note::new("Target".to_string(), None);
+        let tid = target.id;
+        app.notebook.add_note(target);
+        app.notebook.rebuild_links();
+
+        app.show_backlinks_panel();
+        assert_eq!(app.mode, AppMode::Backlinks);
+        // Incoming empty, so focus lands on the outgoing section.
+        assert_eq!(app.backlinks_focus, BacklinkFocus::Outgoing);
+        assert_eq!(app.outgoing_links_cache, vec![(Some(tid), "Target".to_string())]);
+
+        app.open_selected_backlink();
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.current_note.as_ref().unwrap().id, tid);
+    }
+
+    #[test]
+    fn opening_broken_outgoing_link_creates_the_missing_note() {
+        let (mut app, sid) = app_with_source("a link to [[Ghost]]");
+
+        app.show_backlinks_panel();
+        // Target doesn't exist yet → flagged as broken (None id).
+        assert_eq!(app.outgoing_links_cache, vec![(None, "Ghost".to_string())]);
+
+        app.open_selected_backlink();
+
+        // The missing note now exists and the source link resolves to it.
+        let ghost_id = app.notebook.find_note_by_title("Ghost");
+        assert!(ghost_id.is_some(), "broken link should create the note");
+        let resolved: Vec<_> = app.notebook.get_outgoing_links(sid)
+            .iter()
+            .map(|l| l.target_note_id)
+            .collect();
+        assert_eq!(resolved, vec![ghost_id]);
+    }
+
+    #[test]
+    fn duplicate_outgoing_links_are_deduped_by_title() {
+        let (mut app, _) = app_with_source("[[Target]] and again [[target]]");
+        app.notebook.add_note(Note::new("Target".to_string(), None));
+        app.notebook.rebuild_links();
+
+        let outgoing = app.get_outgoing_links_for_current_note();
+        assert_eq!(outgoing.len(), 1, "case-insensitive duplicate titles collapse to one");
+    }
+
+    #[test]
+    fn tab_only_switches_focus_to_a_non_empty_section() {
+        let (mut app, _) = app_with_source("links to [[Ghost]]");
+        app.show_backlinks_panel();
+        // No incoming links, so Tab must keep focus on outgoing.
+        assert_eq!(app.backlinks_focus, BacklinkFocus::Outgoing);
+        app.backlinks_toggle_focus();
+        assert_eq!(app.backlinks_focus, BacklinkFocus::Outgoing);
+    }
+}
+
+#[cfg(test)]
+mod outline_and_task_tests {
+    use super::*;
+    use crate::models::Note;
+
+    /// App with a single note loaded into the editor with the given content.
+    fn app_editing(content: &str) -> App {
+        let mut app = App::default();
+        let mut note = Note::new("Doc".to_string(), None);
+        note.content = content.to_string();
+        app.notebook.add_note(note.clone());
+        app.current_note = Some(note);
+        app.editor_content = content.to_string();
+        app
+    }
+
+    #[test]
+    fn parse_headings_collects_levels_and_skips_code_fences() {
+        let content = "\
+# Title
+intro text
+## Section A
+```
+# not a heading (inside code)
+```
+### Sub A1
+###### Deep
+####### too many hashes
+#no-space";
+        let headings = App::parse_headings(content);
+        assert_eq!(headings, vec![
+            (0, 1, "Title".to_string()),
+            (2, 2, "Section A".to_string()),
+            (6, 3, "Sub A1".to_string()),
+            (7, 6, "Deep".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn outline_select_jumps_cursor_to_heading_line() {
+        let mut app = app_editing("# A\n\ntext\n## B\nmore");
+        app.show_outline();
+        assert_eq!(app.mode, AppMode::Outline);
+        // Two headings: "# A" at line 0, "## B" at line 3.
+        assert_eq!(app.outline_headings.len(), 2);
+        app.outline_navigate_down();
+        app.outline_select();
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.editor_cursor.0, 3); // jumped to "## B"
+    }
+
+    #[test]
+    fn toggle_task_checkbox_flips_both_ways() {
+        let mut app = app_editing("- [ ] buy milk");
+        app.editor_cursor = (0, 0);
+
+        app.toggle_task_checkbox();
+        assert_eq!(app.editor_content, "- [x] buy milk");
+
+        app.toggle_task_checkbox();
+        assert_eq!(app.editor_content, "- [ ] buy milk");
+    }
+
+    #[test]
+    fn toggle_task_checkbox_unchecks_uppercase_and_preserves_other_lines() {
+        let mut app = app_editing("first\n- [X] done\nlast");
+        app.editor_cursor = (1, 0); // on the checkbox line
+        app.toggle_task_checkbox();
+        assert_eq!(app.editor_content, "first\n- [ ] done\nlast");
+    }
+
+    #[test]
+    fn toggle_task_checkbox_is_a_noop_without_a_checkbox() {
+        let mut app = app_editing("just a paragraph");
+        app.editor_cursor = (0, 0);
+        app.toggle_task_checkbox();
+        assert_eq!(app.editor_content, "just a paragraph");
+    }
+
+    #[test]
+    fn daily_note_creates_then_reopens_the_same_note() {
+        let mut app = App::default();
+        let before = app.notebook.notes.len();
+
+        app.open_daily_note();
+        let after_create = app.notebook.notes.len();
+        assert_eq!(after_create, before + 1);
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let id = app.notebook.find_note_by_title(&today).expect("daily note exists");
+
+        // Opening again must reuse the existing note, not create a duplicate.
+        app.open_daily_note();
+        assert_eq!(app.notebook.notes.len(), after_create);
+        assert_eq!(app.notebook.find_note_by_title(&today), Some(id));
     }
 }
