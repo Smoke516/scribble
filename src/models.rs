@@ -388,13 +388,21 @@ impl NotebookData {
             .map(|note| note.id)
     }
 
+    /// Resolve a folder by name (case-insensitive). Returns the first match;
+    /// names aren't guaranteed unique across the tree.
+    pub fn find_folder_by_name(&self, name: &str) -> Option<Uuid> {
+        self.folders.values()
+            .find(|folder| folder.name.eq_ignore_ascii_case(name))
+            .map(|folder| folder.id)
+    }
+
     pub fn get_backlinks(&self, note_id: Uuid) -> Vec<&NoteLink> {
         self.links.iter()
             .filter(|link| link.target_note_id == Some(note_id))
             .collect()
     }
 
-    #[allow(dead_code)]  // TODO: backlink graph: outgoing links unused
+    /// Links originating from `note_id` (used by the links panel's outgoing section).
     pub fn get_outgoing_links(&self, note_id: Uuid) -> Vec<&NoteLink> {
         self.links.iter()
             .filter(|link| link.source_note_id == note_id)

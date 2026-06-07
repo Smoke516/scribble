@@ -1,8 +1,8 @@
-# Scribble ✏️ v2.0.0
+# Scribble ✏️ v2.1.0
 
 A powerful terminal-based note-taking app with advanced tag management, Obsidian vault integration, real-time file watching, folder organization, markdown support, and syntax highlighting.
 
-![Version](https://img.shields.io/badge/version-2.0.0-brightgreen)
+![Version](https://img.shields.io/badge/version-2.1.0-brightgreen)
 ![Terminal Interface](https://img.shields.io/badge/interface-terminal-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)
@@ -32,12 +32,15 @@ A powerful terminal-based note-taking app with advanced tag management, Obsidian
 - **🔔 Change Notifications** - Real-time alerts for external file modifications
 - **🔍 Fuzzy Search** - Intelligent search that finds matches even with typos (`Ctrl+F`)
 - **⚡ Quick Jump** - Instant note navigation with `Ctrl+J` - like VS Code's quick open
+- **🗂️ Outline Panel** - Jump to any heading in the current note (`Ctrl+G`)
+- **☑️ Task Checkboxes** - Toggle `- [ ]`/`- [x]` on the current line with `Space`
+- **📅 Daily Notes** - One-key open-or-create of today's dated note (`F4` or `:daily`)
 - **📋 Recent Files** - Quick access to recently opened notes (`Ctrl+O`)
 - **👁️ Live Preview** - Real-time markdown preview in split-screen mode (`Ctrl+P`)
 - **↩️ Undo/Delete Safety** - Safely delete with full undo capability (`u` to undo)
 - **🔗 Note Linking** - Wiki-style `[[Note Title]]` links between notes (`Ctrl+L` to follow)
-- **🔙 Backlinks Panel** - See which notes link *to* the current note and where it links *out* (`Ctrl+B`)
-- **🔎 Advanced Search** - Regex and field-scoped search like `case:`/`tag:` (`Ctrl+A`), plus in-note search with `/` and `n`/`N` to step through matches
+- **🔙 Backlinks Panel** - See which notes link *to* the current note and where it links *out*; `Tab` switches sections, `Enter` opens either, and opening a broken outgoing link creates the missing note (`Ctrl+B`)
+- **🔎 Advanced Search** - Regex and scoped search like `case:`/`folder:Name` (`Ctrl+A`), plus in-note search with `/` and `n`/`N` to step through matches
 - **🔁 Search & Replace** - Find-and-replace across notes (`Ctrl+R`)
 - **📑 Templates** - Create notes from Blank/Daily/Meeting/Project templates (`N`)
 - **💾 Session Persistence** - Remembers your last opened note and editor state
@@ -125,7 +128,7 @@ cargo install --path .
 ```bash
 # Check version
 scribble --version
-# Output: scribble 2.0.0
+# Output: scribble 2.1.0
 
 # View help
 scribble --help
@@ -150,7 +153,7 @@ scribble -h           # Show help (short form)
 
 ### Command Line Help Output
 ```
-scribble v2.0.0
+scribble v2.1.0
 
 A powerful terminal-based note-taking app with folder organization,
 markdown support, and syntax highlighting.
@@ -180,7 +183,7 @@ Once started, press '?' for in-app help.
    ```
 
 2. **First time setup:**
-   - The app starts with an enhanced welcome screen showing version 2.0.0
+   - The app starts with an enhanced welcome screen showing version 2.1.0
    - The welcome screen provides organized quick-start categories:
      - 📝 **Creating Content**: `n` (new note), `f` (folder), `i` (edit)
      - 🧭 **Navigation**: `Tab` (switch panes), `j/k` (move), `Enter` (open)
@@ -203,6 +206,30 @@ Once started, press '?' for in-app help.
    - Press `e` to open the current note in your external editor
    - Supports Helix (`hx`), Neovim, Vim, and more
    - Changes are automatically saved back to Scribble
+
+## 🆕 What's New in v2.1.0
+
+### 🗂️ Outline Panel (`Ctrl+G`)
+- Jump to any heading in the current note; navigate with `j/k`, `Enter` to jump
+- Skips headings inside fenced code blocks
+
+### ☑️ Task Checkboxes (`Space`)
+- Toggle `- [ ]` / `- [x]` on the current editor line with a single keystroke
+
+### 📅 Daily Notes (`F4` or `:daily`)
+- Open or create today's `YYYY-MM-DD` note in one step (no duplicates)
+
+### 🔗 Backlinks: navigable outgoing links (`Ctrl+B`)
+- `Tab` switches between the incoming and outgoing sections; `Enter` opens either
+- Broken outgoing links are flagged, and opening one creates the missing note
+
+### 🔎 Folder-scoped search (`Ctrl+A` → `folder:Name term`)
+- Restrict advanced search to a folder; an empty term lists the whole folder
+
+### 🐛 Fixes
+- Live preview decorations (heading underlines, code-block borders, horizontal
+  rules) now size to the pane width instead of wrapping into stray stub lines
+- Advanced search no longer hangs on an empty query
 
 ## 🆕 What's New in v2.0.0
 
@@ -274,7 +301,7 @@ Once started, press '?' for in-app help.
 | `Ctrl+V` | Vault Switcher - switch between multiple vaults |
 | `/` | Search notes by content or title (regular search) |
 | `Ctrl+F` | Fuzzy search mode - intelligent search with typo tolerance |
-| `Ctrl+A` | Advanced search - regex and field scopes (e.g. `case:`, `tag:`) |
+| `Ctrl+A` | Advanced search - regex and scopes (e.g. `case:`, `folder:Name`) |
 | `Ctrl+R` | Search & replace across notes |
 | `/` then `n`/`N` | In-note search; jump to next/previous match |
 | `Tab` (in search) | Switch between regular and fuzzy search |
@@ -282,6 +309,8 @@ Once started, press '?' for in-app help.
 | `Ctrl+O` | Recent files - quick access to recently opened notes |
 | `Ctrl+L` | Follow [[wiki-style]] link at cursor |
 | `Ctrl+B` | Links panel - backlinks (in) and outgoing links (out) |
+| `Ctrl+G` | Outline panel - jump to any heading in the current note |
+| `F4` | Open (or create) today's daily note (`YYYY-MM-DD`) |
 | `u` | Undo last delete operation (restore from trash) |
 | `?` | Show comprehensive scrollable help with all shortcuts |
 
@@ -306,6 +335,7 @@ Once started, press '?' for in-app help.
 | `:theme <name>` | Switch to specific theme |
 | `:theme current` | Show current theme name |
 | `:vault` | Open vault switcher |
+| `:daily` / `:today` | Open or create today's daily note |
 
 ### Note Format
 Write notes in standard markdown:
@@ -400,9 +430,12 @@ Either way, changes are written to disk continuously — on edit, on a periodic 
 - `t` - Edit current note's tags
 - `i` - Insert mode
 - `v` - Visual selection mode
+- `Space` - Toggle task checkbox `[ ]`/`[x]` on the current line (editor)
 - `e` - Open in external editor
 - `/` - Search
 - `Ctrl+B` - Links panel (backlinks + outgoing)
+- `Ctrl+G` - Outline panel (jump to heading)
+- `F4` - Open today's daily note
 - `:` - Command mode
 - `Ctrl+S` - Save
 - `q` - Quit

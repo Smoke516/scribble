@@ -125,10 +125,19 @@ impl EnhancedSearch {
         };
         
         let mut results = Vec::new();
-        
-        for note in notes_to_search {
-            if let Some(search_result) = self.search_note(note, &query)? {
-                results.push(search_result);
+
+        // An empty query (e.g. `folder:Work` with no term) lists every note in
+        // scope. This also guards the matchers, which would otherwise loop
+        // forever scanning for an empty needle.
+        if query.text.is_empty() {
+            results = notes_to_search.into_iter()
+                .map(|note| SearchResult { note: note.clone(), matches: Vec::new() })
+                .collect();
+        } else {
+            for note in notes_to_search {
+                if let Some(search_result) = self.search_note(note, &query)? {
+                    results.push(search_result);
+                }
             }
         }
         
@@ -326,5 +335,74 @@ impl EnhancedSearch {
 impl Default for EnhancedSearch {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Folder;
+
+    /// A notebook with one folder ("Work") holding "Memo", plus an unfiled "Idea".
+    fn fixture() -> (NotebookData, uuid::Uuid) {
+        let mut nb = NotebookData::new();
+        let work = Folder::new("Work".to_string(), None);
+        let work_id = work.id;
+        nb.add_folder(work);
+
+        let mut memo = Note::new("Memo".to_string(), Some(work_id));
+        memo.content = "quarterly report".to_string();
+        nb.add_note(memo);
+
+        let mut idea = Note::new("Idea".to_string(), None);
+        idea.content = "quarterly brainstorm".to_string();
+        nb.add_note(idea);
+
+        (nb, work_id)
+    }
+
+    #[test]
+    fn folder_filter_restricts_results_to_that_folder() {
+        let (nb, work_id) = fixture();
+        let mut engine = EnhancedSearch::new();
+
+        // Unfiltered: "quarterly" hits both notes.
+        let all = engine.search(&nb, SearchQuery::new("quarterly".to_string())).unwrap();
+        assert_eq!(all.len(), 2);
+
+        // Scoped to Work: only the Memo matches.
+        let scoped = engine.search(
+            &nb,
+            SearchQuery::new("quarterly".to_string()).in_folder(Some(work_id)),
+        ).unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].note.title, "Memo");
+    }
+
+    #[test]
+    fn empty_query_lists_every_note_in_scope_without_hanging() {
+        let (nb, work_id) = fixture();
+        let mut engine = EnhancedSearch::new();
+
+        // Empty text + folder => list the folder's notes (and must not infinite-loop).
+        let listed = engine.search(
+            &nb,
+            SearchQuery::new(String::new()).in_folder(Some(work_id)),
+        ).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].note.title, "Memo");
+        assert!(listed[0].matches.is_empty());
+
+        // Empty text, no folder => every note.
+        let everything = engine.search(&nb, SearchQuery::new(String::new())).unwrap();
+        assert_eq!(everything.len(), 2);
+    }
+
+    #[test]
+    fn find_folder_by_name_is_case_insensitive() {
+        let (nb, work_id) = fixture();
+        assert_eq!(nb.find_folder_by_name("work"), Some(work_id));
+        assert_eq!(nb.find_folder_by_name("WORK"), Some(work_id));
+        assert_eq!(nb.find_folder_by_name("nope"), None);
     }
 }

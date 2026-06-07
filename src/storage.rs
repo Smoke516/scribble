@@ -568,7 +568,7 @@ mod tests {
         let mut files: Vec<String> = fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |x| x == "md"))
+            .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
         files.sort();

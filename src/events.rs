@@ -27,6 +27,7 @@ pub fn handle_event(app: &mut App, event: Event) -> Result<(), Box<dyn std::erro
         AppMode::Visual => handle_visual_mode(app, key),
         AppMode::TemplatePicker => handle_template_picker_mode(app, key),
         AppMode::SpellSuggest => handle_spell_suggest_mode(app, key),
+        AppMode::Outline => handle_outline_mode(app, key),
         }
     }
     Ok(())
@@ -90,6 +91,10 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         // Quick jump (Ctrl+J) - check this BEFORE basic j navigation
         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.start_quick_jump();
+        }
+        // Outline panel (Ctrl+G) - check BEFORE basic g (go-to-top)
+        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.show_outline();
         }
 
         // Navigation / cursor movement
@@ -246,6 +251,10 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             app.delete_char_at_cursor();
             app.mark_modified();
         }
+        // Space: toggle a task checkbox [ ] <-> [x] on the current line
+        KeyCode::Char(' ') if editor_focused => {
+            app.toggle_task_checkbox();
+        }
         KeyCode::Char('p') if editor_focused => {
             app.push_undo_snapshot();
             app.paste_below();
@@ -394,7 +403,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             app.search_dialog_selected = 0;
         }
 
-        // Advanced search — regex:/case: over note content (Ctrl+A)
+        // Advanced search — regex:/case:/folder: over note content (Ctrl+A)
         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.start_advanced_search();
         }
@@ -493,6 +502,11 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         // Theme browser (F3)
         KeyCode::F(3) => {
             app.show_theme_browser();
+        }
+
+        // Daily note (F4) — open or create today's YYYY-MM-DD note
+        KeyCode::F(4) => {
+            app.open_daily_note();
         }
         
         // Help
@@ -865,6 +879,9 @@ fn execute_command(app: &mut App, command: &str) {
             // Show vault switcher
             app.show_vault_switcher();
         },
+        "daily" | "today" => {
+            app.open_daily_note();
+        },
         _ => {
             if command.starts_with("theme ") {
                 let theme_arg = command.strip_prefix("theme ").unwrap_or("").trim();
@@ -1078,7 +1095,8 @@ fn handle_advanced_search_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => {
             if !app.input_buffer.is_empty() {
                 let mut query = SearchQuery::new(app.input_buffer.clone());
-                
+                let mut run_search = true;
+
                 // Check for special modifiers in the query
                 if app.input_buffer.starts_with("regex:") {
                     let pattern = app.input_buffer.strip_prefix("regex:").unwrap_or("").trim();
@@ -1086,12 +1104,28 @@ fn handle_advanced_search_mode(app: &mut App, key: KeyEvent) {
                 } else if app.input_buffer.starts_with("case:") {
                     let pattern = app.input_buffer.strip_prefix("case:").unwrap_or("").trim();
                     query = SearchQuery::new(pattern.to_string()).case_sensitive();
+                } else if app.input_buffer.starts_with("folder:") {
+                    // `folder:Name term` — restrict to a folder by name; the rest is
+                    // the search text (empty text lists every note in the folder).
+                    let rest = app.input_buffer.strip_prefix("folder:").unwrap_or("").trim_start();
+                    let (folder_name, term) = match rest.split_once(char::is_whitespace) {
+                        Some((name, t)) => (name, t.trim()),
+                        None => (rest, ""),
+                    };
+                    match app.notebook.find_folder_by_name(folder_name) {
+                        Some(fid) => {
+                            query = SearchQuery::new(term.to_string()).in_folder(Some(fid));
+                        }
+                        None => {
+                            app.set_message(format!("No folder named '{}'", folder_name));
+                            run_search = false;
+                        }
+                    }
                 }
-                
-                // TODO: Add folder filtering support
-                // if app.input_buffer.starts_with("folder:") { ... }
-                
-                app.enhanced_search_notes(query);
+
+                if run_search {
+                    app.enhanced_search_notes(query);
+                }
             }
             app.mode = AppMode::Normal;
             app.input_buffer.clear();
@@ -1550,6 +1584,16 @@ fn handle_note_search_mode(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn handle_outline_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.cancel_outline(),
+        KeyCode::Enter => app.outline_select(),
+        KeyCode::Up | KeyCode::Char('k') => app.outline_navigate_up(),
+        KeyCode::Down | KeyCode::Char('j') => app.outline_navigate_down(),
+        _ => {}
+    }
+}
+
 fn handle_backlinks_mode(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
@@ -1558,6 +1602,10 @@ fn handle_backlinks_mode(app: &mut App, key: KeyEvent) {
 
         KeyCode::Enter => {
             app.open_selected_backlink();
+        }
+
+        KeyCode::Tab | KeyCode::BackTab => {
+            app.backlinks_toggle_focus();
         }
 
         KeyCode::Up | KeyCode::Char('k') => {
