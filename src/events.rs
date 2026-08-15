@@ -1972,6 +1972,47 @@ mod dispatch_tests {
         }
     }
 
+    /// The help dialog is organised by topic, not by mode, and covers modes this
+    /// table does not describe — so it is hand-written on purpose and generating
+    /// it would be a downgrade. What can be enforced is that it stays complete:
+    /// every Ctrl chord and function key in the table must appear in the help text.
+    ///
+    /// The source is pulled in with `include_str!` rather than restructuring 251
+    /// lines of carefully aligned UI into data.
+    #[test]
+    fn every_ctrl_chord_and_fkey_is_documented_in_help() {
+        const UI_SRC: &str = include_str!("ui.rs");
+        let help = {
+            let start = UI_SRC.find("fn draw_help_dialog").expect("help dialog not found");
+            &UI_SRC[start..]
+        };
+        // The help text abbreviates pairs as "Ctrl+U/D"; expand so both halves
+        // count as documented.
+        let expanded = regex::Regex::new(r"Ctrl\+([A-Z])/([A-Z])")
+            .unwrap()
+            .replace_all(help, "Ctrl+$1 Ctrl+$2")
+            .to_string();
+
+        let mut undocumented = Vec::new();
+        for b in NORMAL_BINDINGS {
+            let label = match (b.code, b.mods) {
+                (KeyCode::Char(c), KeyModifiers::CONTROL) => {
+                    format!("Ctrl+{}", c.to_ascii_uppercase())
+                }
+                (KeyCode::F(n), _) => format!("F{}", n),
+                _ => continue, // plain letters are too short to match reliably
+            };
+            if !expanded.contains(&label) {
+                undocumented.push(format!("{} ({})", label, b.desc));
+            }
+        }
+        assert!(
+            undocumented.is_empty(),
+            "bindings missing from the help screen: {:?}",
+            undocumented
+        );
+    }
+
     /// A binding with no label cannot be documented, so refuse to add one.
     #[test]
     fn every_binding_is_described() {
