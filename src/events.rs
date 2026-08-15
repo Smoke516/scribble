@@ -156,6 +156,8 @@ enum Action {
     WelcomeDown,
     WelcomeActivate,
     ShowExplorer,
+    /// Close the note and return to the landing page.
+    GoHome,
     // Meta
     CommandMode,
     Help,
@@ -286,7 +288,11 @@ const NORMAL_BINDINGS: &[Binding] = &[
     // --- meta ---
     k(KeyCode::Char(':'), Ctx::Any, Action::CommandMode, "Command"),
     k(KeyCode::Char('?'), Ctx::Any, Action::Help, "Help"),
-    k(KeyCode::Char('q'), Ctx::Any, Action::Quit, "Quit"),
+    // `q` backs out one level: a note returns to the landing page, and the
+    // landing page quits. `Q` skips the ladder for when you just want out.
+    k(KeyCode::Char('q'), Ctx::Welcome, Action::Quit, "Quit"),
+    k(KeyCode::Char('q'), Ctx::Any, Action::GoHome, "Close note, back to the landing page"),
+    k(KeyCode::Char('Q'), Ctx::Any, Action::Quit, "Quit immediately"),
 ];
 
 /// SHIFT is already baked into the character an uppercase key produces, and
@@ -703,6 +709,18 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
         Action::Help => {
             app.mode = AppMode::Help;
             app.reset_help_scroll();
+        }
+        Action::GoHome => {
+            // Save on the way out: closing a note must never be a way to lose the
+            // last edit. The landing page is rebuilt from the notebook, so the
+            // note has to be committed to it first.
+            if app.current_note.is_some() {
+                if let Err(e) = app.save_current_note() {
+                    app.set_message(e);
+                }
+            }
+            app.set_welcome_message();
+            app.welcome_selected = 0;
         }
         Action::Quit => app.quit(),
     }
@@ -2174,6 +2192,22 @@ mod dispatch_tests {
         assert_eq!(lookup(&e, false, false), Some(Action::ExternalEditor));
     }
 
+    /// `q` backs out one level rather than always quitting, so a note returns to
+    /// the landing page and only the landing page exits. `Q` skips the ladder.
+    #[test]
+    fn q_backs_out_one_level_and_shift_q_always_quits() {
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let shift_q = KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::NONE);
+
+        assert_eq!(lookup(&q, false, true), Some(Action::Quit), "q on the landing page quits");
+        assert_eq!(lookup(&q, false, false), Some(Action::GoHome), "q in a note goes home");
+        assert_eq!(lookup(&q, true, false), Some(Action::GoHome), "including with the editor focused");
+
+        assert_eq!(lookup(&shift_q, false, true), Some(Action::Quit));
+        assert_eq!(lookup(&shift_q, false, false), Some(Action::Quit));
+        assert_eq!(lookup(&shift_q, true, false), Some(Action::Quit));
+    }
+
     /// A binding with no label cannot be documented, so refuse to add one.
     #[test]
     fn every_binding_is_described() {
@@ -2217,8 +2251,20 @@ mod dispatch_tests {
     /// quit on the old code but hung on the first version of this table.
     #[test]
     fn alt_modified_key_falls_back_to_the_plain_binding() {
+        // Whatever plain `q` resolves to in that context, Alt+q must reach it too.
         let alt_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT);
-        assert_eq!(lookup(&alt_q, false, false), Some(Action::Quit), "Esc-then-q must still quit");
+        let plain_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(
+            lookup(&alt_q, false, true),
+            lookup(&plain_q, false, true),
+            "Esc-then-q on the landing page must still quit"
+        );
+        assert_eq!(
+            lookup(&alt_q, false, false),
+            lookup(&plain_q, false, false),
+            "and must still back out of a note"
+        );
+        assert_eq!(lookup(&alt_q, false, true), Some(Action::Quit));
 
         // The fallback must not paper over Ctrl: Ctrl+Alt+P is not Ctrl+P.
         let ctrl_alt_p = KeyEvent::new(
