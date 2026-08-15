@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use crate::autocomplete::{AutocompleteState, MarkdownAutocomplete};
 use crate::models::{Note, Folder, NotebookData, FolderTreeNode};
 use crate::search::{EnhancedSearch, SearchResult};
@@ -246,6 +247,51 @@ impl Default for LinksState {
     }
 }
 
+/// One row of the "where you left off" list.
+#[derive(Debug, Clone)]
+pub struct RecentEntry {
+    pub id: Uuid,
+    pub title: String,
+    /// Containing folder name, empty for notes at the vault root.
+    pub folder: String,
+    /// Coarse "2h ago" style age, for a glanceable column.
+    pub age: String,
+}
+
+/// Everything the landing page shows.
+///
+/// Computed rather than stored: it is read once per frame from state that is
+/// already authoritative, so it cannot drift the way a cached copy would.
+#[derive(Debug, Default)]
+pub struct Dashboard {
+    pub recent: Vec<RecentEntry>,
+    pub today_title: String,
+    pub today_exists: bool,
+    pub open_tasks: usize,
+    pub notes_with_tasks: usize,
+    pub note_count: usize,
+    pub folder_count: usize,
+    pub tag_count: usize,
+    pub vault_label: Option<String>,
+}
+
+/// Render a duration as the coarsest unit that is still true. Deliberately
+/// approximate: the column exists to be scanned, not to be precise.
+fn humanize_age(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let mins = (now - then).num_minutes();
+    if mins < 1 {
+        "just now".to_string()
+    } else if mins < 60 {
+        format!("{}m ago", mins)
+    } else if mins < 60 * 24 {
+        format!("{}h ago", mins / 60)
+    } else if mins < 60 * 24 * 7 {
+        format!("{}d ago", mins / (60 * 24))
+    } else {
+        format!("{}w ago", mins / (60 * 24 * 7))
+    }
+}
+
 pub struct App {
     pub links: LinksState,
     pub note_search: NoteSearchState,
@@ -337,6 +383,8 @@ pub struct App {
     // Theme management
     pub theme_manager: ThemeManager,
     pub config: Config,
+    /// Vault root actually in use, for the landing page. None in JSON mode.
+    pub vault_path: Option<std::path::PathBuf>,
     pub theme_browser_selected: usize,
     
     // Help dialog
@@ -485,6 +533,7 @@ impl App {
             // Theme management
             theme_manager: ThemeManager::new(&config.ui.theme),
             config: config.clone(),
+            vault_path: None,
             theme_browser_selected: 0,
             
             // Help dialog
@@ -873,18 +922,81 @@ impl App {
     }
 
     // Recent Files functionality
+    /// Build the landing-page view of the notebook.
+    ///
+    /// The landing page answers "what was I doing, and what should I do next" —
+    /// so it is built from the notebook's actual state (recency, open tasks,
+    /// today's note) rather than from a list of the app's features, which is
+    /// what `?` is for.
+    pub fn dashboard(&self) -> Dashboard {
+        let now = Utc::now();
+
+        let mut by_recency: Vec<&Note> = self.notebook.notes.values().collect();
+        // Ties broken by id so the list never reshuffles between frames.
+        by_recency.sort_by(|a, b| b.modified_at.cmp(&a.modified_at).then(a.id.cmp(&b.id)));
+
+        let recent = by_recency
+            .iter()
+            .take(5)
+            .map(|n| RecentEntry {
+                id: n.id,
+                title: n.title.clone(),
+                folder: n
+                    .folder_id
+                    .and_then(|fid| self.notebook.folders.get(&fid))
+                    .map(|f| f.name.clone())
+                    .unwrap_or_default(),
+                age: humanize_age(n.modified_at, now),
+            })
+            .collect();
+
+        let today_title = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let today_exists = self.notebook.find_note_by_title(&today_title).is_some();
+
+        let mut open_tasks = 0usize;
+        let mut notes_with_tasks = 0usize;
+        for note in self.notebook.notes.values() {
+            let n = note
+                .content
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    t.starts_with("- [ ]") || t.starts_with("* [ ]")
+                })
+                .count();
+            if n > 0 {
+                open_tasks += n;
+                notes_with_tasks += 1;
+            }
+        }
+
+        Dashboard {
+            recent,
+            today_title,
+            today_exists,
+            open_tasks,
+            notes_with_tasks,
+            note_count: self.notebook.notes.len(),
+            folder_count: self.notebook.folders.len(),
+            tag_count: self.tag_manager.get_tags_alphabetical().len(),
+            vault_label: self.vault_path.as_ref().and_then(|p| {
+                p.file_name().map(|n| n.to_string_lossy().to_string())
+            }),
+        }
+    }
+
     pub fn set_welcome_message(&mut self) {
         let note_count = self.notebook.notes.len();
         let folder_count = self.notebook.folders.len();
         
+        // The landing page already shows the counts and the keys, so repeating
+        // them in the status bar is just noise. Only the empty vault needs a nudge.
         if note_count == 0 {
-            self.set_message("Welcome to Scribble! Press 'n' to create your first note or '?' for help".to_string());
+            self.set_message("Press 'n' to write your first note, or '?' for help".to_string());
         } else {
-            self.set_message(format!(
-                "Welcome back! Loaded {} notes across {} folders. Press 'n' for new note, '?' for help", 
-                note_count, folder_count
-            ));
+            self.set_message(String::new());
         }
+        let _ = folder_count;
         
         // Start with focus on the folder tree to encourage exploration
         self.focused_pane = FocusedPane::Folders;
@@ -1954,5 +2066,95 @@ intro text
         app.open_daily_note();
         assert_eq!(app.notebook.notes.len(), after_create);
         assert_eq!(app.notebook.find_note_by_title(&today), Some(id));
+    }
+}
+
+#[cfg(test)]
+mod dashboard_tests {
+    use super::*;
+    use crate::models::{Folder, Note};
+
+    /// App::new seeds a sample note and three folders, which would skew every
+    /// count here — start from a genuinely empty notebook instead.
+    fn empty_app() -> App {
+        let mut app = App::default();
+        app.notebook.notes.clear();
+        app.notebook.folders.clear();
+        app
+    }
+
+    fn note_at(title: &str, minutes_ago: i64, folder: Option<Uuid>) -> Note {
+        let mut n = Note::new(title.to_string(), folder);
+        n.modified_at = Utc::now() - chrono::Duration::minutes(minutes_ago);
+        n
+    }
+
+    /// The list answers "what was I doing", so it is newest-first and capped at
+    /// five however large the vault is.
+    #[test]
+    fn recent_list_is_newest_first_and_capped_at_five() {
+        let mut app = empty_app();
+        for (i, title) in ["oldest", "e", "d", "c", "b", "newest"].iter().enumerate() {
+            app.notebook.add_note(note_at(title, (6 - i as i64) * 10, None));
+        }
+        let d = app.dashboard();
+        assert_eq!(d.recent.len(), 5, "capped at five");
+        assert_eq!(d.recent[0].title, "newest");
+        assert!(
+            !d.recent.iter().any(|e| e.title == "oldest"),
+            "the oldest note must fall off the list"
+        );
+    }
+
+    /// The folder column names the containing folder, and root notes say so
+    /// rather than rendering an empty gap.
+    #[test]
+    fn recent_entries_carry_their_folder() {
+        let mut app = empty_app();
+        let folder = Folder::new("Cheat-Sheets".to_string(), None);
+        let fid = folder.id;
+        app.notebook.add_folder(folder);
+        app.notebook.add_note(note_at("yazi", 1, Some(fid)));
+        app.notebook.add_note(note_at("loose", 2, None));
+
+        let d = app.dashboard();
+        assert_eq!(d.recent[0].folder, "Cheat-Sheets");
+        assert_eq!(d.recent[1].folder, "", "root notes carry no folder name");
+    }
+
+    /// Only unchecked boxes count — a finished list is not outstanding work.
+    #[test]
+    fn only_unchecked_tasks_are_counted() {
+        let mut app = empty_app();
+        let mut a = Note::new("Plan".to_string(), None);
+        a.content = "- [ ] one\n- [x] done\n  - [ ] indented\n* [ ] star bullet\n- not a task".into();
+        let mut b = Note::new("Done".to_string(), None);
+        b.content = "- [x] all\n- [X] finished".into();
+        app.notebook.add_note(a);
+        app.notebook.add_note(b);
+
+        let d = app.dashboard();
+        assert_eq!(d.open_tasks, 3, "two dash bullets plus the star bullet");
+        assert_eq!(d.notes_with_tasks, 1, "the fully-checked note does not count");
+    }
+
+    #[test]
+    fn ages_read_as_the_coarsest_true_unit() {
+        let now = Utc::now();
+        let ago = |m: i64| humanize_age(now - chrono::Duration::minutes(m), now);
+        assert_eq!(ago(0), "just now");
+        assert_eq!(ago(5), "5m ago");
+        assert_eq!(ago(90), "1h ago");
+        assert_eq!(ago(60 * 30), "1d ago");
+        assert_eq!(ago(60 * 24 * 10), "1w ago");
+    }
+
+    /// An empty vault has no recency to show; the renderer branches on this.
+    #[test]
+    fn empty_vault_yields_an_empty_recent_list() {
+        let d = empty_app().dashboard();
+        assert!(d.recent.is_empty());
+        assert_eq!(d.open_tasks, 0);
+        assert!(!d.today_exists);
     }
 }

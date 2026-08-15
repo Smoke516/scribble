@@ -574,191 +574,176 @@ fn draw_preview_pane(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// The landing page.
+///
+/// This answers "what was I doing, and what should I do next" — recency, today's
+/// note, outstanding tasks — rather than listing what the app can do. The feature
+/// tour that used to live here duplicated `?`, and a landing page that is never
+/// quiet is one you stop reading.
 fn draw_welcome_screen(f: &mut Frame, app: &App, area: Rect, block: Block) {
-    let content_width = 64u16;
-    let left_padding = if area.width > content_width { (area.width - content_width) / 2 } else { 0 };
-    let p = left_padding as usize;
+    let d = app.dashboard();
 
-    let editor_status = if let Some(ref editor) = app.external_editor {
-        format!("External editor: {}", editor)
-    } else {
-        "$EDITOR not set — using built-in editor".to_string()
-    };
+    // One measured column, centred as a block so every row shares a left edge.
+    // Centring each line independently would make the list ragged.
+    const W: u16 = 66;
+    let pad = if area.width > W { (area.width - W) / 2 } else { 1 } as usize;
+    let indent = |n: usize| Span::raw(" ".repeat(pad + n));
 
-    // Helper closures for repeated patterns
-    macro_rules! pad { () => { Span::raw(" ".repeat(p)) }; }
-    macro_rules! pad2 { () => { Span::raw(" ".repeat(p + 2)) }; }
-    macro_rules! pad4 { () => { Span::raw(" ".repeat(p + 4)) }; }
-    macro_rules! key {
-        ($k:expr) => {
-            Span::styled(format!("{:<9}", $k),
-                Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD))
-        };
-    }
-    macro_rules! desc {
-        ($d:expr) => { Span::styled($d, TokyoNightTheme::help_text()) };
-    }
-    macro_rules! section {
-        ($label:expr, $color:expr, $rule:expr) => {
-            vec![
-                Line::from(""),
-                Line::from(vec![
-                    pad!(),
-                    Span::styled($label, Style::default().fg($color).add_modifier(Modifier::BOLD)),
-                ]),
-                Line::from(vec![
-                    pad!(),
-                    Span::styled($rule, Style::default().fg($color)),
-                ]),
-                Line::from(""),
-            ]
-        };
-    }
+    let dim = Style::default().fg(TokyoNightTheme::COMMENT);
+    let body = Style::default().fg(TokyoNightTheme::FG_DARK);
+    let heading = Style::default()
+        .fg(TokyoNightTheme::PURPLE)
+        .add_modifier(Modifier::BOLD);
+    let keycap = Style::default()
+        .fg(TokyoNightTheme::CYAN)
+        .add_modifier(Modifier::BOLD);
 
-    let mut lines: Vec<Line> = vec![
-        Line::from(""),
-        Line::from(""),
-        // ── Title ──────────────────────────────────────────────────────────
-        Line::from(vec![
-            pad!(),
-            Span::styled("SCRIBBLE", Style::default()
-                .fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(vec![
-            pad!(),
-            Span::styled("────────", Style::default().fg(TokyoNightTheme::CYAN)),
-        ]),
-        Line::from(vec![
-            pad!(),
-            Span::styled("Terminal Note-Taking, Vim-Powered", Style::default()
-                .fg(TokyoNightTheme::FG_DARK).add_modifier(Modifier::ITALIC)),
-        ]),
-        Line::from(vec![
-            pad!(),
-            Span::styled(format!("Version {}", VERSION), Style::default()
-                .fg(TokyoNightTheme::COMMENT).add_modifier(Modifier::ITALIC)),
-        ]),
-    ];
+    let mut lines: Vec<Line> = Vec::new();
+    let blank = |v: &mut Vec<Line>| v.push(Line::from(""));
 
-    // ── Features ────────────────────────────────────────────────────────────
-    lines.extend(section!("FEATURES", TokyoNightTheme::PURPLE, "────────"));
+    // ── Wordmark ────────────────────────────────────────────────────────────
+    // Kept small on purpose: Neovim's dashboard can afford a huge logo because
+    // it has no content to show. This screen does.
+    blank(&mut lines);
+    lines.push(Line::from(vec![
+        indent(0),
+        Span::styled(
+            "s c r i b b l e",
+            Style::default()
+                .fg(TokyoNightTheme::CYAN)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        indent(0),
+        Span::styled("───────────────", Style::default().fg(TokyoNightTheme::BLUE)),
+        Span::styled(format!("  v{}", VERSION), dim),
+    ]));
+    blank(&mut lines);
 
-    let features: &[(&str, ratatui::style::Color, &str)] = &[
-        (Icons::FOLDER_CLOSED, TokyoNightTheme::BLUE,   "Hierarchical folders — Obsidian vault compatible"),
-        (Icons::NOTE,          TokyoNightTheme::GREEN,  "Vim modal editing: Normal / Insert / Visual modes"),
-        (Icons::PREVIEW,       TokyoNightTheme::CYAN,   "Live split-pane Markdown preview (tables, code blocks)"),
-        (Icons::SEARCH,        TokyoNightTheme::PURPLE, "Full-text search (tree) · in-note search (editor)"),
-        (Icons::EDITOR,        TokyoNightTheme::ORANGE, "Wiki [[links]] autocomplete + backlinks panel"),
-        (Icons::NOTE,          TokyoNightTheme::YELLOW, "Note templates: Blank · Daily Note · Meeting · Project"),
-        (Icons::FOLDER_CLOSED, TokyoNightTheme::BLUE,   "Undo/redo, per-note cursor memory, relative line nums"),
-        (Icons::PREVIEW,       TokyoNightTheme::GREEN,  "HTML export · tag browser · auto-save"),
-    ];
-    for (icon, color, text) in features {
+    // ── Where you left off ──────────────────────────────────────────────────
+    if d.recent.is_empty() {
         lines.push(Line::from(vec![
-            pad2!(),
-            Span::styled(format!("{} ", icon), Style::default().fg(*color)),
-            Span::styled(*text, TokyoNightTheme::help_text()),
+            indent(0),
+            Span::styled("An empty vault.", heading),
         ]));
+        blank(&mut lines);
+        lines.push(Line::from(vec![
+            indent(2),
+            Span::styled("n", keycap),
+            Span::styled("   write your first note", body),
+        ]));
+        lines.push(Line::from(vec![
+            indent(2),
+            Span::styled("F4", keycap),
+            Span::styled("  start today's daily note", body),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            indent(0),
+            Span::styled("Where you left off", heading),
+        ]));
+        blank(&mut lines);
+        for (i, e) in d.recent.iter().enumerate() {
+            // Truncate the title, never the columns after it.
+            let title = if e.title.chars().count() > 30 {
+                format!("{}…", e.title.chars().take(29).collect::<String>())
+            } else {
+                e.title.clone()
+            };
+            let folder = if e.folder.is_empty() { "—".to_string() } else { e.folder.clone() };
+            let folder = if folder.chars().count() > 16 {
+                format!("{}…", folder.chars().take(15).collect::<String>())
+            } else {
+                folder
+            };
+            lines.push(Line::from(vec![
+                indent(2),
+                Span::styled(format!("{}", i + 1), keycap),
+                Span::styled("  ", body),
+                Span::styled(format!("{:<31}", title), Style::default().fg(TokyoNightTheme::FG_DARK)),
+                Span::styled(format!("{:<17}", folder), Style::default().fg(TokyoNightTheme::BLUE)),
+                Span::styled(&e.age, dim),
+            ]));
+        }
+    }
+    blank(&mut lines);
+
+    // ── Today ───────────────────────────────────────────────────────────────
+    lines.push(Line::from(vec![indent(0), Span::styled("Today", heading)]));
+    blank(&mut lines);
+    let (today_mark, today_note) = if d.today_exists {
+        (
+            Style::default().fg(TokyoNightTheme::GREEN),
+            "open".to_string(),
+        )
+    } else {
+        (dim, "not yet written".to_string())
+    };
+    lines.push(Line::from(vec![
+        indent(2),
+        Span::styled("F4", keycap),
+        Span::styled("  ", body),
+        Span::styled(format!("{:<31}", d.today_title), Style::default().fg(TokyoNightTheme::FG_DARK)),
+        Span::styled(today_note, today_mark),
+    ]));
+    blank(&mut lines);
+
+    // ── Outstanding work ────────────────────────────────────────────────────
+    // Only shown when there is any: an always-present "0 open tasks" is noise.
+    if d.open_tasks > 0 {
+        lines.push(Line::from(vec![
+            indent(0),
+            Span::styled("▸ ", Style::default().fg(TokyoNightTheme::ORANGE)),
+            Span::styled(
+                format!(
+                    "{} open task{} across {} note{}",
+                    d.open_tasks,
+                    if d.open_tasks == 1 { "" } else { "s" },
+                    d.notes_with_tasks,
+                    if d.notes_with_tasks == 1 { "" } else { "s" },
+                ),
+                Style::default().fg(TokyoNightTheme::ORANGE),
+            ),
+        ]));
+        blank(&mut lines);
     }
 
-    // ── Quick Start ─────────────────────────────────────────────────────────
-    lines.extend(section!("QUICK START", TokyoNightTheme::YELLOW, "───────────"));
-
-    // Creating
-    lines.push(Line::from(vec![
-        pad2!(),
-        Span::styled("Creating", Style::default().fg(TokyoNightTheme::GREEN).add_modifier(Modifier::BOLD)),
-    ]));
-    let creating: &[(&str, &str)] = &[
-        ("n",   "New note"),
-        ("N",   "New note from template"),
-        ("f",   "New folder"),
-        ("i",   "Enter Insert mode (start editing)"),
+    // ── Actions ─────────────────────────────────────────────────────────────
+    // Four, not thirty. The full reference is `?`.
+    let actions: &[(&str, &str)] = &[
+        ("n", "New note"),
+        ("/", "Search"),
+        ("Ctrl+J", "Jump"),
+        ("?", "Help"),
     ];
-    for &(k, d) in creating { lines.push(Line::from(vec![pad4!(), key!(k), desc!(d)])); }
+    let mut action_line: Vec<Span> = vec![indent(2)];
+    for (i, (k, label)) in actions.iter().enumerate() {
+        if i > 0 {
+            action_line.push(Span::styled("     ", body));
+        }
+        action_line.push(Span::styled(*k, keycap));
+        action_line.push(Span::styled(format!("  {}", label), body));
+    }
+    lines.push(Line::from(action_line));
+    blank(&mut lines);
 
-    // Navigation
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        pad2!(),
-        Span::styled("Navigation", Style::default().fg(TokyoNightTheme::PURPLE).add_modifier(Modifier::BOLD)),
-    ]));
-    let nav: &[(&str, &str)] = &[
-        ("Tab",    "Switch panes"),
-        ("j / k",  "Down / up"),
-        ("h / l",  "Left / right (editor)"),
-        ("g / G",  "Top / bottom of note"),
-        (":N",     "Jump to line N"),
-        ("Enter",  "Open note or folder"),
-    ];
-    for &(k, d) in nav { lines.push(Line::from(vec![pad4!(), key!(k), desc!(d)])); }
+    // ── Footer ──────────────────────────────────────────────────────────────
+    let mut footer = format!(
+        "{} note{} · {} folder{} · {} tag{}",
+        d.note_count,
+        if d.note_count == 1 { "" } else { "s" },
+        d.folder_count,
+        if d.folder_count == 1 { "" } else { "s" },
+        d.tag_count,
+        if d.tag_count == 1 { "" } else { "s" },
+    );
+    if let Some(v) = &d.vault_label {
+        footer.push_str(&format!(" · {}", v));
+    }
+    lines.push(Line::from(vec![indent(0), Span::styled(footer, dim)]));
 
-    // Visual mode
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        pad2!(),
-        Span::styled("Visual Mode", Style::default().fg(TokyoNightTheme::BLUE).add_modifier(Modifier::BOLD)),
-    ]));
-    let visual: &[(&str, &str)] = &[
-        ("v",  "Enter Visual select"),
-        ("y",  "Yank (copy) selection"),
-        ("d",  "Delete selection"),
-        ("c",  "Change (delete + Insert)"),
-        ("Esc","Cancel selection"),
-    ];
-    for &(k, d) in visual { lines.push(Line::from(vec![pad4!(), key!(k), desc!(d)])); }
-
-    // Tools
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        pad2!(),
-        Span::styled("Tools", Style::default().fg(TokyoNightTheme::ORANGE).add_modifier(Modifier::BOLD)),
-    ]));
-    let tools: &[(&str, &str)] = &[
-        ("/",        "Search notes (tree) · in-note search (editor)"),
-        ("n / N",    "Next / prev match (in-note search)"),
-        ("[[",       "Wiki-link autocomplete"),
-        ("Ctrl+B",   "Backlinks panel"),
-        ("Ctrl+J",   "Quick jump to note"),
-        ("Ctrl+G",   "Outline / jump to heading"),
-        ("Space",    "Toggle task checkbox (editor)"),
-        ("F4",       "Open today's daily note"),
-        ("Ctrl+P",   "Toggle live preview"),
-        ("?",        "Full help"),
-        (":export html", "Export all notes to HTML"),
-    ];
-    for &(k, d) in tools { lines.push(Line::from(vec![pad4!(), key!(k), desc!(d)])); }
-
-    // ── Status ───────────────────────────────────────────────────────────────
-    lines.extend(section!("STATUS", TokyoNightTheme::GREEN, "──────"));
-    lines.push(Line::from(vec![
-        pad2!(),
-        Span::styled("Folders: ", Style::default().fg(TokyoNightTheme::COMMENT)),
-        Span::styled(format!("{}", app.notebook.folders.len()), Style::default().fg(TokyoNightTheme::FG)),
-        Span::raw("   "),
-        Span::styled("Notes: ", Style::default().fg(TokyoNightTheme::COMMENT)),
-        Span::styled(format!("{}", app.notebook.notes.len()), Style::default().fg(TokyoNightTheme::FG)),
-    ]));
-    lines.push(Line::from(vec![
-        pad2!(),
-        Span::styled("Editor: ", Style::default().fg(TokyoNightTheme::COMMENT)),
-        Span::styled(editor_status, Style::default().fg(TokyoNightTheme::FG_DARK)),
-    ]));
-    lines.push(Line::from(""));
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        pad!(),
-        Span::styled("Select a note from the sidebar to begin", Style::default()
-            .fg(TokyoNightTheme::COMMENT).add_modifier(Modifier::ITALIC)),
-    ]));
-
-    let paragraph = Paragraph::new(Text::from(lines))
-        .block(block)
-        .style(TokyoNightTheme::normal())
-        .wrap(Wrap { trim: false })
-        .alignment(Alignment::Left);
-
-    f.render_widget(paragraph, area);
+    f.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {

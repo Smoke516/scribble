@@ -77,6 +77,9 @@ pub fn handle_paste(app: &mut App, text: &str) -> Result<(), Box<dyn std::error:
 enum Ctx {
     Any,
     Editor,
+    /// The landing page: no note is open, so the digits are free to act as
+    /// shortcuts into the recent list instead of meaning anything in an editor.
+    Welcome,
 }
 
 /// What a key does, named independently of which key triggers it.
@@ -148,6 +151,8 @@ enum Action {
     ScrollHalfDown,
     ScrollPageUp,
     ScrollPageDown,
+    /// Open the Nth entry of the landing page's recent list (1-based).
+    OpenRecent(u8),
     // Meta
     CommandMode,
     Help,
@@ -259,6 +264,13 @@ const NORMAL_BINDINGS: &[Binding] = &[
     k(KeyCode::PageUp, Ctx::Any, Action::ScrollPageUp, "Page up"),
     k(KeyCode::PageDown, Ctx::Any, Action::ScrollPageDown, "Page down"),
 
+    // --- landing page: digits jump straight into the recent list ---
+    k(KeyCode::Char('1'), Ctx::Welcome, Action::OpenRecent(1), "Open 1st recent note"),
+    k(KeyCode::Char('2'), Ctx::Welcome, Action::OpenRecent(2), "Open 2nd recent note"),
+    k(KeyCode::Char('3'), Ctx::Welcome, Action::OpenRecent(3), "Open 3rd recent note"),
+    k(KeyCode::Char('4'), Ctx::Welcome, Action::OpenRecent(4), "Open 4th recent note"),
+    k(KeyCode::Char('5'), Ctx::Welcome, Action::OpenRecent(5), "Open 5th recent note"),
+
     // --- meta ---
     k(KeyCode::Char(':'), Ctx::Any, Action::CommandMode, "Command"),
     k(KeyCode::Char('?'), Ctx::Any, Action::Help, "Help"),
@@ -274,9 +286,19 @@ fn effective_mods(key: &KeyEvent) -> KeyModifiers {
 
 /// Exact match on code + modifiers. Editor bindings are consulted first, and only
 /// while the editor is focused; everything else falls through to the global set.
-fn lookup_exact(code: KeyCode, mods: KeyModifiers, editor_focused: bool) -> Option<Action> {
+fn lookup_exact(
+    code: KeyCode,
+    mods: KeyModifiers,
+    editor_focused: bool,
+    on_welcome: bool,
+) -> Option<Action> {
     let matches = |b: &&Binding, ctx: Ctx| b.ctx == ctx && b.code == code && b.mods == mods;
 
+    if on_welcome {
+        if let Some(b) = NORMAL_BINDINGS.iter().find(|b| matches(b, Ctx::Welcome)) {
+            return Some(b.action);
+        }
+    }
     if editor_focused {
         if let Some(b) = NORMAL_BINDINGS.iter().find(|b| matches(b, Ctx::Editor)) {
             return Some(b.action);
@@ -289,9 +311,9 @@ fn lookup_exact(code: KeyCode, mods: KeyModifiers, editor_focused: bool) -> Opti
 }
 
 /// Resolve a key to an action.
-fn lookup(key: &KeyEvent, editor_focused: bool) -> Option<Action> {
+fn lookup(key: &KeyEvent, editor_focused: bool, on_welcome: bool) -> Option<Action> {
     let mods = effective_mods(key);
-    if let Some(action) = lookup_exact(key.code, mods, editor_focused) {
+    if let Some(action) = lookup_exact(key.code, mods, editor_focused, on_welcome) {
         return Some(action);
     }
 
@@ -302,7 +324,7 @@ fn lookup(key: &KeyEvent, editor_focused: bool) -> Option<Action> {
     // (which ignored modifiers entirely) happened to get right. An explicit Alt
     // binding added later still wins, because the exact pass runs first.
     if mods.contains(KeyModifiers::ALT) {
-        return lookup_exact(key.code, mods & !KeyModifiers::ALT, editor_focused);
+        return lookup_exact(key.code, mods & !KeyModifiers::ALT, editor_focused, on_welcome);
     }
     None
 }
@@ -318,8 +340,10 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
     }
 
     let editor_focused = app.focused_pane == FocusedPane::Editor && app.current_note.is_some();
+    // The landing page shows exactly when no note is open.
+    let on_welcome = app.current_note.is_none();
 
-    if let Some(action) = lookup(&key, editor_focused) {
+    if let Some(action) = lookup(&key, editor_focused, on_welcome) {
         run_action(app, action, editor_focused);
     }
 }
@@ -633,6 +657,14 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
         Action::ScrollPageDown => {
             if (editor_focused || preview_focused) && app.current_note.is_some() {
                 app.scroll_page_down();
+            }
+        }
+
+        Action::OpenRecent(n) => {
+            if let Some(entry) = app.dashboard().recent.get(n as usize - 1) {
+                let id = entry.id;
+                app.select_note(id);
+                app.focused_pane = FocusedPane::Editor;
             }
         }
 
@@ -2013,6 +2045,17 @@ mod dispatch_tests {
         );
     }
 
+    /// The digits are only shortcuts while the landing page is up. Anywhere else
+    /// they must stay unbound, or typing a number in Normal mode would teleport
+    /// you into another note.
+    #[test]
+    fn recent_note_digits_bind_only_on_the_landing_page() {
+        let two = KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE);
+        assert_eq!(lookup(&two, false, true), Some(Action::OpenRecent(2)));
+        assert_eq!(lookup(&two, false, false), None, "inert in the tree");
+        assert_eq!(lookup(&two, true, false), None, "inert with the editor focused");
+    }
+
     /// A binding with no label cannot be documented, so refuse to add one.
     #[test]
     fn every_binding_is_described() {
@@ -2026,12 +2069,12 @@ mod dispatch_tests {
     #[test]
     fn editor_bindings_do_not_fire_outside_the_editor() {
         assert_eq!(
-            lookup(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE), false),
+            lookup(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE), false, false),
             None,
             "'w' is an editor motion and has no meaning in the tree"
         );
         assert_eq!(
-            lookup(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE), true),
+            lookup(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE), true, false),
             Some(Action::WordForward)
         );
     }
@@ -2046,8 +2089,8 @@ mod dispatch_tests {
             ('l', Action::FollowLink),
         ] {
             let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
-            assert_eq!(lookup(&key, false), Some(expected), "Ctrl+{} in tree", c);
-            assert_eq!(lookup(&key, true), Some(expected), "Ctrl+{} with editor focused", c);
+            assert_eq!(lookup(&key, false, false), Some(expected), "Ctrl+{} in tree", c);
+            assert_eq!(lookup(&key, true, false), Some(expected), "Ctrl+{} with editor focused", c);
         }
     }
 
@@ -2057,14 +2100,14 @@ mod dispatch_tests {
     #[test]
     fn alt_modified_key_falls_back_to_the_plain_binding() {
         let alt_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT);
-        assert_eq!(lookup(&alt_q, false), Some(Action::Quit), "Esc-then-q must still quit");
+        assert_eq!(lookup(&alt_q, false, false), Some(Action::Quit), "Esc-then-q must still quit");
 
         // The fallback must not paper over Ctrl: Ctrl+Alt+P is not Ctrl+P.
         let ctrl_alt_p = KeyEvent::new(
             KeyCode::Char('p'),
             KeyModifiers::CONTROL | KeyModifiers::ALT,
         );
-        assert_eq!(lookup(&ctrl_alt_p, false), Some(Action::TogglePreview));
+        assert_eq!(lookup(&ctrl_alt_p, false, false), Some(Action::TogglePreview));
     }
 
     /// Terminals disagree about whether SHIFT is reported alongside an uppercase
