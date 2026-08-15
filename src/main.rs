@@ -54,6 +54,19 @@ fn detect_obsidian_vault() -> Option<PathBuf> {
     None
 }
 
+/// Put the terminal back the way we found it. Best-effort and idempotent: it runs
+/// from the panic hook as well as the normal exit path, and a failure here must
+/// not mask whatever error is already unwinding.
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
     let mut config = config::Config::load();
@@ -91,6 +104,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         i += 1;
     }
     
+    // A panic must not strand the user in raw mode on the alternate screen with no
+    // echo and no line editing. Restore first, then chain to the default hook so
+    // the message and backtrace land on a terminal that can actually show them.
+    let default_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        default_panic_hook(info);
+    }));
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -149,30 +171,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if app.just_returned_from_editor {
             app.just_returned_from_editor = false;
             // Force a complete redraw
-            terminal.clear()?;
+            if let Err(e) = terminal.clear() {
+                break Err(e.into());
+            }
         }
-        
-        // Draw UI
-        terminal.draw(|f| ui::draw(f, &mut app))?;
+
+        // Draw UI. Every fallible call in this loop must `break Err(..)` rather
+        // than `?`: returning straight out of main would skip the terminal
+        // restore below and leave the shell in raw mode.
+        if let Err(e) = terminal.draw(|f| ui::draw(f, &mut app)) {
+            break Err(e.into());
+        }
 
         // Handle events
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
 
-        if crossterm::event::poll(timeout)? {
-            match event::read()? {
-                Event::Key(key) => {
+        let event_ready = match crossterm::event::poll(timeout) {
+            Ok(ready) => ready,
+            Err(e) => break Err(e.into()),
+        };
+
+        if event_ready {
+            match event::read() {
+                Ok(Event::Key(key)) => {
                     if let Err(e) = events::handle_event(&mut app, Event::Key(key)) {
                         break Err(e);
                     }
                 }
-                Event::Paste(text) => {
+                Ok(Event::Paste(text)) => {
                     if let Err(e) = events::handle_paste(&mut app, &text) {
                         break Err(e);
                     }
                 }
-                _ => {}
+                Ok(_) => {}
+                Err(e) => break Err(e.into()),
             }
         }
 
@@ -252,15 +286,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Failed to save notebook data: {}", e);
     }
 
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-        DisableBracketedPaste
-    )?;
-    terminal.show_cursor()?;
+    // Restore terminal. Best-effort for the same reason as the panic hook: if
+    // disabling raw mode fails we still want to leave the alternate screen, so
+    // none of these steps may short-circuit the ones after it.
+    restore_terminal();
+    let _ = terminal.show_cursor();
 
     result
 }

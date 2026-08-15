@@ -20,6 +20,42 @@ struct NoteFrontmatter {
     folder_path: Option<String>,
 }
 
+/// Write `content` to `path` atomically: fill a sibling temp file, flush it to
+/// the device, then rename it over the target. `fs::write` truncates before it
+/// writes, so a crash mid-write leaves a zero-length note; rename is atomic on
+/// POSIX, so a reader sees either the old file or the complete new one.
+///
+/// The temp file is dot-prefixed so a crashed run leaves something the vault
+/// loader already skips rather than a stray note.
+fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let dir = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("path has no parent directory: {:?}", path),
+        )
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("scribble-note");
+    let tmp = dir.join(format!(".{}.tmp", file_name));
+
+    // Scope the handle so it is closed before the rename.
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+    }
+
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 // Abstract trait for different storage backends
 pub trait NotebookStorage {
     fn load_notebook(&self) -> Result<NotebookData, Box<dyn std::error::Error>>;
@@ -214,7 +250,7 @@ impl VaultStorage {
             fs::create_dir_all(parent)?;
         }
         let content = self.create_markdown_with_frontmatter(note, &note.content);
-        fs::write(&file_path, content)?;
+        write_atomic(&file_path, &content)?;
         Ok(file_path)
     }
 }
@@ -230,9 +266,17 @@ impl NotebookStorage for VaultStorage {
             .filter_map(|e| e.ok())
         {
             let path = entry.path();
-            
-            // Skip .obsidian and other hidden directories/files
-            if path.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.')) {
+
+            // Skip .obsidian and other hidden directories/files. Only the
+            // vault-RELATIVE components may disqualify an entry: the vault's own
+            // absolute path may legitimately sit under a dot-directory (a vault in
+            // ~/.notes, or inside a dotfiles checkout), and testing those
+            // components would silently skip every file in the vault.
+            let relative_to_vault = self.get_relative_path(path);
+            if relative_to_vault
+                .components()
+                .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+            {
                 continue;
             }
             
@@ -449,7 +493,9 @@ impl Storage {
 
     pub fn save_notebook(&self, notebook: &NotebookData) -> Result<(), Box<dyn std::error::Error>> {
         let json = serde_json::to_string_pretty(notebook)?;
-        fs::write(&self.notebook_file, json)?;
+        // Single-file backend: a truncated write here loses the whole notebook,
+        // not one note, so atomicity matters even more than in vault mode.
+        write_atomic(&self.notebook_file, &json)?;
         Ok(())
     }
 
@@ -629,6 +675,65 @@ mod tests {
         assert!(!dir.join("Alpha.md").exists(), "deleted note's file must be removed");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A vault whose absolute path sits under a dot-directory (~/.notes, a dotfiles
+    /// checkout) must still load. Regression: the hidden-entry filter used to test
+    /// every component of the absolute path, so such a vault loaded as empty — and
+    /// the next save wrote that empty state back over it.
+    #[test]
+    fn vault_under_hidden_ancestor_still_loads_notes() {
+        let root = std::env::temp_dir().join(format!(".scribble_hidden_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("Note.md"), "hello world").unwrap();
+        // A genuinely hidden entry *inside* the vault must still be skipped.
+        fs::create_dir_all(root.join(".obsidian")).unwrap();
+        fs::write(root.join(".obsidian").join("workspace.md"), "config").unwrap();
+
+        let storage = VaultStorage::new(root.clone()).unwrap();
+        let nb = storage.load_notebook().unwrap();
+
+        let titles: Vec<String> = nb.notes.values().map(|n| n.title.clone()).collect();
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(titles, vec!["Note"], "expected exactly the vault's own note");
+    }
+
+    /// Saving must never leave a truncated note or a stray temp file behind.
+    #[test]
+    fn writes_are_atomic_and_leave_no_temp_files() {
+        let dir = std::env::temp_dir().join(format!("scribble_atomic_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut nb = NotebookData::new();
+        let mut note = Note::new("Draft".to_string(), None);
+        note.content = "first version".to_string();
+        let id = note.id;
+        nb.add_note(note);
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        storage.save_notebook(&nb).unwrap();
+
+        // Overwrite the same note to exercise the rename-over-existing path.
+        nb.notes.get_mut(&id).unwrap().content = "second version".to_string();
+        nb.notes.get_mut(&id).unwrap().file_path = Some(dir.join("Draft.md"));
+        storage.save_notebook(&nb).unwrap();
+
+        let body = fs::read_to_string(dir.join("Draft.md")).unwrap();
+        let leftovers: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(body.contains("second version"), "content not replaced: {:?}", body);
+        assert!(!body.contains("first version"), "stale content survived: {:?}", body);
+        assert!(leftovers.is_empty(), "temp files left behind: {:?}", leftovers);
     }
 
     #[test]
