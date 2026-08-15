@@ -49,12 +49,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 .border_style(TokyoNightTheme::border_inactive())
                 .style(TokyoNightTheme::normal()),
         );
-    } else {
+    } else if app.config.ui.show_sidebar {
         // Draw folder tree with recent files if enabled
         draw_folder_tree_with_recent(f, app, main_chunks[0]);
 
         // Draw editor
         draw_editor(f, app, main_chunks[1]);
+    } else {
+        // Sidebar off (the default): the editor gets the full width and the tree
+        // is a Ctrl+E overlay. Set ui.show_sidebar = true to pin it back.
+        draw_editor(f, app, chunks[1]);
     }
     
     
@@ -1410,11 +1414,16 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
             Span::styled("Notes & Tree", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
         ]),
         Line::from(""),
-        Line::from("  n          New note (in selected folder)   N    New note from template"),
-        Line::from("  f          New folder (root)               F    New subfolder"),
-        Line::from("  r          Rename selected item            m    Move selected item"),
-        Line::from("  d          Delete (confirm prompt)         u    Undo last delete"),
+        Line::from("  Ctrl+E     Explorer: the folder tree as an overlay (sidebar is off by default)"),
+        Line::from("  In Explorer: j/k move · Enter open · h collapse · Esc close"),
+        Line::from("               n new note · f new folder · F folder at root"),
+        Line::from("               r rename · m move · d delete (returns to the tree)"),
+        Line::from(""),
+        Line::from("  n          New note                        N    New note from template"),
+        Line::from("  r          Rename current note             m    Move current note"),
+        Line::from("  u          Undo last delete                dd   Delete line (editor)"),
         Line::from("  Enter      Open note / expand folder"),
+        Line::from("  Pin the sidebar back with  show_sidebar = true  under [ui] in config.toml"),
         Line::from(""),
 
         // ── Normal Mode ───────────────────────────────────────────────────────

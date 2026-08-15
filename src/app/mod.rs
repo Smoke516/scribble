@@ -416,6 +416,9 @@ pub struct App {
     pub vault_path: Option<std::path::PathBuf>,
     /// Highlighted row of the landing page menu.
     pub welcome_selected: usize,
+    /// Where a confirm dialog should return to. Without this, deleting from the
+    /// explorer would dump you back to Normal instead of the tree you were in.
+    pub modal_return: Option<AppMode>,
     pub theme_browser_selected: usize,
     
     // Help dialog
@@ -566,6 +569,7 @@ impl App {
             config: config.clone(),
             vault_path: None,
             welcome_selected: 0,
+            modal_return: None,
             theme_browser_selected: 0,
             
             // Help dialog
@@ -1058,6 +1062,28 @@ impl App {
     /// Move the landing-page highlight, clamped rather than wrapped: running off
     /// the end of a short list and silently landing back at the top is
     /// disorienting on a page you are only glancing at.
+    /// Point the tree selection at the note currently open.
+    ///
+    /// The rename/move/delete commands all act on the tree selection. With the
+    /// sidebar hidden that selection is invisible, so acting on it blind is a
+    /// footgun — retarget it at the note actually on screen first, and the
+    /// existing commands keep working unchanged.
+    pub fn focus_tree_on_current_note(&mut self) -> bool {
+        let Some(id) = self.current_note.as_ref().map(|n| n.id) else {
+            return false;
+        };
+        if let Some(idx) = self
+            .folder_tree_items
+            .iter()
+            .position(|t| t.id == id && t.item_type == TreeItemType::Note)
+        {
+            self.selected_folder_index = idx;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn welcome_move(&mut self, delta: isize) {
         let len = self.dashboard().menu.len();
         if len == 0 {
@@ -2304,5 +2330,38 @@ mod dashboard_tests {
             app.welcome_action_at_cursor(),
             Some(WelcomeAction::OpenNote(newest_id))
         );
+    }
+
+    /// Rename/move act on the tree selection. With the sidebar hidden that
+    /// selection is invisible, so they retarget it at the open note first.
+    #[test]
+    fn focus_tree_on_current_note_targets_the_open_note() {
+        let mut app = empty_app();
+        let a = note_at("Alpha", 5, None);
+        let b = note_at("Beta", 9, None);
+        let b_id = b.id;
+        app.notebook.add_note(a);
+        app.notebook.add_note(b.clone());
+        app.refresh_tree_view();
+
+        app.current_note = Some(b);
+        app.selected_folder_index = 0;
+        assert!(app.focus_tree_on_current_note());
+
+        let sel = app.get_selected_item().expect("something must be selected");
+        assert_eq!(sel.id, b_id, "selection follows the note on screen");
+    }
+
+    /// Nothing open means nothing to retarget, and it must not move the cursor.
+    #[test]
+    fn focus_tree_on_current_note_is_a_noop_with_no_note() {
+        let mut app = empty_app();
+        app.notebook.add_note(note_at("Alpha", 5, None));
+        app.refresh_tree_view();
+        app.current_note = None;
+        app.selected_folder_index = 0;
+
+        assert!(!app.focus_tree_on_current_note());
+        assert_eq!(app.selected_folder_index, 0);
     }
 }

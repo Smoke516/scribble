@@ -123,8 +123,6 @@ enum Action {
     SpellSuggestions,
     // Items
     NewNoteOrSearchNext,
-    NewFolderAtRoot,
-    NewSubfolder,
     MoveItem,
     RenameItem,
     SaveNote,
@@ -234,8 +232,6 @@ const NORMAL_BINDINGS: &[Binding] = &[
 
     // --- items ---
     k(KeyCode::Char('n'), Ctx::Any, Action::NewNoteOrSearchNext, "New note / next match"),
-    k(KeyCode::Char('f'), Ctx::Any, Action::NewFolderAtRoot, "New folder at root"),
-    k(KeyCode::Char('F'), Ctx::Any, Action::NewSubfolder, "New subfolder"),
     k(KeyCode::Char('m'), Ctx::Any, Action::MoveItem, "Move item"),
     k(KeyCode::Char('r'), Ctx::Any, Action::RenameItem, "Rename item"),
     k(KeyCode::Char('e'), Ctx::Any, Action::ExternalEditor, "Open in external editor"),
@@ -246,6 +242,7 @@ const NORMAL_BINDINGS: &[Binding] = &[
     ctrl(KeyCode::Char('j'), Ctx::Any, Action::QuickJump, "Quick jump to note"),
     ctrl(KeyCode::Char('g'), Ctx::Any, Action::ShowOutline, "Outline panel"),
     ctrl(KeyCode::Char('b'), Ctx::Any, Action::Backlinks, "Backlinks panel"),
+    ctrl(KeyCode::Char('e'), Ctx::Any, Action::ShowExplorer, "Explorer: browse the vault"),
     ctrl(KeyCode::Char('o'), Ctx::Any, Action::RecentFiles, "Recent files"),
     ctrl(KeyCode::Char('v'), Ctx::Any, Action::VaultSwitcher, "Switch vault"),
     ctrl(KeyCode::Char('t'), Ctx::Any, Action::TagBrowser, "Tag browser"),
@@ -275,7 +272,6 @@ const NORMAL_BINDINGS: &[Binding] = &[
     k(KeyCode::Char('k'), Ctx::Welcome, Action::WelcomeUp, "Previous item"),
     k(KeyCode::Up, Ctx::Welcome, Action::WelcomeUp, "Previous item"),
     k(KeyCode::Enter, Ctx::Welcome, Action::WelcomeActivate, "Activate item"),
-    k(KeyCode::Char('e'), Ctx::Welcome, Action::ShowExplorer, "Browse the vault"),
 
     // --- landing page: digits jump straight into the recent list ---
     k(KeyCode::Char('1'), Ctx::Welcome, Action::OpenRecent(1), "Open 1st recent note"),
@@ -560,27 +556,16 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
                 app.start_new_note_input(folder_id);
             }
         }
-        Action::NewFolderAtRoot => {
-            // Default behavior: create folder at root level
-            // Use Shift+F to create subfolder in selected folder
-            app.start_new_folder_input(None);
+        Action::MoveItem => {
+            // Act on the note in front of you, not on whatever the hidden tree
+            // selection happens to be pointing at.
+            app.focus_tree_on_current_note();
+            app.start_move_item();
         }
-        Action::NewSubfolder => {
-            let parent_id = if let Some(item) = app.get_selected_item() {
-                match item.item_type {
-                    TreeItemType::Folder => Some(item.id),
-                    TreeItemType::Note => {
-                        // Find the parent folder of the selected note
-                        app.notebook.notes.get(&item.id).and_then(|note| note.folder_id)
-                    }
-                }
-            } else {
-                None
-            };
-            app.start_new_folder_input(parent_id);
+        Action::RenameItem => {
+            app.focus_tree_on_current_note();
+            app.start_rename_item();
         }
-        Action::MoveItem => app.start_move_item(),
-        Action::RenameItem => app.start_rename_item(),
         Action::SaveNote => {
             if let Err(e) = app.save_current_note() {
                 app.set_message(e);
@@ -1431,6 +1416,42 @@ fn handle_move_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('k') | KeyCode::Up => app.navigate_up(),
         KeyCode::Char('g') => app.navigate_to_top(),
         KeyCode::Char('G') => app.navigate_to_bottom(),
+        KeyCode::Char('h') | KeyCode::Left => {
+            // Collapse rather than leave: the overlay is the only tree on screen.
+            if let Some(item) = app.get_selected_item() {
+                if item.item_type == TreeItemType::Folder && item.expanded {
+                    app.toggle_folder_expansion();
+                }
+            }
+        }
+
+        // --- structural edits, acting on the highlighted row ---
+        KeyCode::Char('n') => {
+            let folder_id = app.get_selected_item().and_then(|item| match item.item_type {
+                TreeItemType::Folder => Some(item.id),
+                TreeItemType::Note => app.notebook.notes.get(&item.id).and_then(|n| n.folder_id),
+            });
+            app.start_new_note_input(folder_id);
+        }
+        KeyCode::Char('f') => {
+            let parent = app.get_selected_item().and_then(|item| match item.item_type {
+                TreeItemType::Folder => Some(item.id),
+                TreeItemType::Note => app.notebook.notes.get(&item.id).and_then(|n| n.folder_id),
+            });
+            app.start_new_folder_input(parent);
+        }
+        KeyCode::Char('F') => app.start_new_folder_input(None),
+        KeyCode::Char('r') => app.start_rename_item(),
+        KeyCode::Char('m') => app.start_move_item(),
+        KeyCode::Char('d') => {
+            // Stack the confirm over the tree and come back to it afterwards:
+            // being dumped out of the explorer to delete one file is annoying.
+            app.modal_return = Some(AppMode::Explorer);
+            if let Err(e) = app.start_delete_confirmation() {
+                app.modal_return = None;
+                app.set_message(e);
+            }
+        }
         
         // Execute move
         KeyCode::Enter => {
@@ -1496,16 +1517,17 @@ fn handle_delete_confirm_mode(app: &mut App, key: KeyEvent) {
                 app.set_message(e);
             }
         }
-        
+
         // Cancel deletion with 'n', Esc, or any other key
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-            app.cancel_delete();
-        }
-        
-        // Any other key cancels the operation
         _ => {
             app.cancel_delete();
         }
+    }
+
+    // Both paths leave the confirm; return to whatever opened it. Deleting from
+    // the explorer and being dropped back to Normal loses your place in the tree.
+    if let Some(back) = app.modal_return.take() {
+        app.mode = back;
     }
 }
 
@@ -2135,10 +2157,16 @@ mod dispatch_tests {
         let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
+        let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
 
         assert_eq!(lookup(&j, false, true), Some(Action::WelcomeDown));
         assert_eq!(lookup(&enter, false, true), Some(Action::WelcomeActivate));
-        assert_eq!(lookup(&e, false, true), Some(Action::ShowExplorer));
+
+        // The explorer is Ctrl+E everywhere; plain `e` stays external-editor, so
+        // the landing page must not shadow it.
+        assert_eq!(lookup(&ctrl_e, false, true), Some(Action::ShowExplorer));
+        assert_eq!(lookup(&ctrl_e, false, false), Some(Action::ShowExplorer));
+        assert_eq!(lookup(&e, false, true), Some(Action::ExternalEditor));
 
         // With a note open the same keys revert to their normal meanings.
         assert_eq!(lookup(&j, false, false), Some(Action::CursorDown));
