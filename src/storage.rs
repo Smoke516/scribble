@@ -7,16 +7,27 @@ use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-// YAML frontmatter for markdown files
+// YAML frontmatter for markdown files.
+//
+// Every field is skipped when absent rather than written as `null`: these files
+// are read and hand-edited by people (and by Obsidian), so a note with no tags
+// should simply not mention tags. Deserialization is unaffected — a missing key
+// and an explicit null both produce None.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct NoteFrontmatter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     scribble_id: Option<String>,
     /// The note's real title. Persisted so the filename (which is sanitized and
     /// may carry a disambiguation suffix) never has to round-trip as the title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     created_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     modified_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     folder_path: Option<String>,
 }
 
@@ -120,14 +131,29 @@ impl VaultStorage {
         (None, content.to_string())
     }
     
-    fn create_markdown_with_frontmatter(&self, note: &Note, content: &str) -> String {
+    /// `file_path` is the path the note is actually being written to, which is not
+    /// always `note.file_path`: a note being saved for the first time has none yet,
+    /// and passing it in is what lets `folder_path` be correct on the first write
+    /// rather than only on the second.
+    fn create_markdown_with_frontmatter(&self, note: &Note, file_path: &Path, content: &str) -> String {
         let frontmatter = NoteFrontmatter {
             scribble_id: Some(note.id.to_string()),
             title: Some(note.title.clone()),
             created_at: Some(note.created_at),
             modified_at: Some(note.modified_at),
             tags: if note.tags.is_empty() { None } else { Some(note.tags.clone()) },
-            folder_path: note.file_path.as_ref().and_then(|p| p.parent().map(|parent| parent.to_string_lossy().to_string())),
+            // Vault-RELATIVE, and omitted entirely for notes at the vault root.
+            // This used to be the absolute path, which pinned every note to one
+            // machine and one user's home directory, and leaked that username into
+            // any note that got shared or published.
+            folder_path: file_path.parent().and_then(|parent| {
+                let relative = self.get_relative_path(parent);
+                if relative.as_os_str().is_empty() {
+                    None
+                } else {
+                    Some(relative.to_string_lossy().to_string())
+                }
+            }),
         };
         
         if let Ok(yaml) = serde_yaml::to_string(&frontmatter) {
@@ -249,7 +275,7 @@ impl VaultStorage {
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let content = self.create_markdown_with_frontmatter(note, &note.content);
+        let content = self.create_markdown_with_frontmatter(note, &file_path, &note.content);
         write_atomic(&file_path, &content)?;
         Ok(file_path)
     }
@@ -314,6 +340,10 @@ impl NotebookStorage for VaultStorage {
                     
                     // Create note
                     let title = path.file_stem().unwrap().to_string_lossy().to_string();
+                    // Whether the note itself records when it was last modified.
+                    // Checked before `fm` is consumed below.
+                    let has_recorded_modified_at =
+                        frontmatter.as_ref().and_then(|fm| fm.modified_at).is_some();
                     let mut note = if let Some(fm) = frontmatter {
                         // Use existing frontmatter data
                         let note_id = fm.scribble_id
@@ -340,14 +370,20 @@ impl NotebookStorage for VaultStorage {
                         note
                     };
                     
-                    // Use filesystem metadata for timestamps if not in frontmatter
-                    if let Ok(metadata) = fs::metadata(path) {
-                        if let Ok(modified) = metadata.modified() {
-                            if let Ok(modified_utc) = modified.duration_since(std::time::UNIX_EPOCH) {
-                                note.modified_at = DateTime::from_timestamp(
-                                    modified_utc.as_secs() as i64, 
-                                    modified_utc.subsec_nanos()
-                                ).unwrap_or(note.modified_at);
+                    // Fall back to filesystem mtime only for notes that don't record
+                    // their own modified_at. A recorded timestamp must win: sync
+                    // clients, fresh clones and restores rewrite mtimes wholesale,
+                    // and letting the filesystem override would reset every note's
+                    // modified date to whenever the files last happened to be touched.
+                    if !has_recorded_modified_at {
+                        if let Ok(metadata) = fs::metadata(path) {
+                            if let Ok(modified) = metadata.modified() {
+                                if let Ok(modified_utc) = modified.duration_since(std::time::UNIX_EPOCH) {
+                                    note.modified_at = DateTime::from_timestamp(
+                                        modified_utc.as_secs() as i64,
+                                        modified_utc.subsec_nanos()
+                                    ).unwrap_or(note.modified_at);
+                                }
                             }
                         }
                     }
@@ -734,6 +770,87 @@ mod tests {
         assert!(body.contains("second version"), "content not replaced: {:?}", body);
         assert!(!body.contains("first version"), "stale content survived: {:?}", body);
         assert!(leftovers.is_empty(), "temp files left behind: {:?}", leftovers);
+    }
+
+    /// A modified_at recorded in frontmatter must survive a load. Regression: the
+    /// filesystem mtime was applied unconditionally, so syncing or re-cloning a
+    /// vault silently reset every note's modified date.
+    #[test]
+    fn recorded_modified_at_beats_filesystem_mtime() {
+        let dir = std::env::temp_dir().join(format!("scribble_mtime_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("Old.md"),
+            "---\ntitle: Old\nmodified_at: 2020-01-02T03:04:05Z\n---\nbody\n",
+        )
+        .unwrap();
+        // No frontmatter at all: this one SHOULD fall back to the filesystem.
+        fs::write(dir.join("Bare.md"), "just a body\n").unwrap();
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        let nb = storage.load_notebook().unwrap();
+
+        let recorded = nb.notes.values().find(|n| n.title == "Old").unwrap();
+        let bare = nb.notes.values().find(|n| n.title == "Bare").unwrap();
+        let recorded_year = recorded.modified_at.format("%Y").to_string();
+        let bare_year = bare.modified_at.format("%Y").to_string();
+        let now_year = Utc::now().format("%Y").to_string();
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(recorded_year, "2020", "frontmatter modified_at was overwritten");
+        assert_eq!(bare_year, now_year, "note without frontmatter should use file mtime");
+    }
+
+    /// Frontmatter must not embed absolute paths: they pin a note to one machine
+    /// and leak the user's home directory into anything shared.
+    #[test]
+    fn frontmatter_folder_path_is_vault_relative() {
+        use crate::models::Folder;
+        let dir = std::env::temp_dir().join(format!("scribble_relpath_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut nb = NotebookData::new();
+        let outer = Folder::new("Projects".to_string(), None);
+        let outer_id = outer.id;
+        nb.add_folder(outer);
+        let inner = Folder::new("Cheat-Sheets".to_string(), Some(outer_id));
+        let inner_id = inner.id;
+        nb.add_folder(inner);
+        nb.add_note(Note::new("Nested".to_string(), Some(inner_id)));
+        nb.add_note(Note::new("AtRoot".to_string(), None));
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        storage.save_notebook(&nb).unwrap();
+
+        let nested = fs::read_to_string(dir.join("Projects").join("Cheat-Sheets").join("Nested.md")).unwrap();
+        let at_root = fs::read_to_string(dir.join("AtRoot.md")).unwrap();
+        let vault_str = dir.to_string_lossy().to_string();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(
+            nested.contains("folder_path: Projects/Cheat-Sheets"),
+            "expected a vault-relative folder_path, got:\n{}",
+            nested
+        );
+        assert!(
+            !nested.contains(&vault_str),
+            "absolute vault path leaked into frontmatter:\n{}",
+            nested
+        );
+        assert!(
+            !at_root.contains("folder_path:"),
+            "a note at the vault root should carry no folder_path:\n{}",
+            at_root
+        );
+        // Absent fields are omitted, not written as `null`.
+        assert!(
+            !nested.contains("null"),
+            "frontmatter should omit empty fields rather than write null:\n{}",
+            nested
+        );
     }
 
     #[test]

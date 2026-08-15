@@ -281,9 +281,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Save notebook data before exiting
-    if let Err(e) = storage.save_notebook(&app.notebook) {
-        eprintln!("Failed to save notebook data: {}", e);
+    // Save anything the loop did not manage to flush. The loop persists as you
+    // type, so in the normal case there is nothing left to do here — and an
+    // unconditional full save would rewrite every note in the vault, bumping
+    // every mtime and re-uploading the lot to whatever is syncing it. Only the
+    // outstanding work is written, and only when there is some (a save that
+    // failed mid-session leaves `pending_disk_save` set for exactly this retry).
+    if app.pending_disk_save || !app.dirty_note_ids.is_empty() || !app.deleted_note_paths.is_empty()
+    {
+        let dirty: Vec<_> = app.dirty_note_ids.iter().copied().collect();
+        let outcome = if app.force_full_save {
+            storage.save_notebook(&app.notebook).map(|_| Vec::new())
+        } else {
+            storage.save_incremental(&app.notebook, &dirty, &app.deleted_note_paths)
+        };
+        if let Err(e) = outcome {
+            eprintln!("Failed to save notebook data: {}", e);
+        }
     }
 
     // Restore terminal. Best-effort for the same reason as the panic hook: if
