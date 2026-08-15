@@ -1,6 +1,7 @@
 mod app;
 mod autocomplete;
 mod config;
+mod error;
 mod events;
 mod models;
 mod preview;
