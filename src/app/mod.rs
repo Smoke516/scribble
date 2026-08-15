@@ -156,7 +156,100 @@ pub(crate) struct ParsedNote {
     tags: Vec<String>,
 }
 
+/// What the in-memory notebook still owes the disk.
+///
+/// These fields are one protocol, not six independent flags: the main loop reads
+/// them together on every tick to decide what to write, and a change to one
+/// without the others is a bug (a dirty id with no `pending_disk_save` never gets
+/// written; clearing `pending_disk_save` without clearing `dirty_note_ids` writes
+/// the same notes forever). Grouping them makes that contract visible and gives
+/// the invariants somewhere to live.
+#[derive(Debug, Default)]
+pub struct DiskState {
+    /// Set when in-memory changes need writing through to the vault; the main
+    /// loop performs the actual write.
+    pub pending_disk_save: bool,
+    /// Lets the file watcher ignore the changes we cause ourselves.
+    pub last_self_write: Option<std::time::Instant>,
+    /// Notes changed since the last disk write (written incrementally).
+    pub dirty_note_ids: HashSet<Uuid>,
+    /// Files of deleted notes to remove from the vault on the next write.
+    pub deleted_note_paths: Vec<std::path::PathBuf>,
+    /// Folder-structure change: fall back to a full save (rare, but correct).
+    pub force_full_save: bool,
+    /// Folder directories to move/rename on disk: (old relative path, new).
+    pub pending_folder_relocations: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+impl DiskState {
+    /// True when anything is still owed to the disk. The exit path uses this to
+    /// avoid rewriting an untouched vault.
+    pub fn has_pending_work(&self) -> bool {
+        self.pending_disk_save
+            || !self.dirty_note_ids.is_empty()
+            || !self.deleted_note_paths.is_empty()
+            || !self.pending_folder_relocations.is_empty()
+    }
+
+    /// Record that everything owed has now been written.
+    pub fn clear_after_write(&mut self) {
+        self.dirty_note_ids.clear();
+        self.deleted_note_paths.clear();
+        self.force_full_save = false;
+        self.pending_disk_save = false;
+    }
+}
+
+/// Spell-check state: whether it is on, what aspell found, and the suggestion
+/// popup's contents. Inert as a group when aspell is missing.
+#[derive(Debug, Default)]
+pub struct SpellState {
+    pub enabled: bool,
+    pub aspell_available: bool,
+    pub errors: Vec<(usize, usize, usize)>,
+    pub suggestions: Vec<String>,
+    pub suggestions_selected: usize,
+    pub word_range: (usize, usize, usize),
+}
+
+/// In-note search (`/` with the editor focused): the query, every match in the
+/// current note, and which one is highlighted. Distinct from the global note
+/// search, which lives in `search_query`/`search_results`.
+#[derive(Debug, Default)]
+pub struct NoteSearchState {
+    pub query: String,
+    pub matches: Vec<(u16, u16)>,
+    pub selected: usize,
+    pub active: bool,
+}
+
+/// The links panel: notes pointing here, links pointing out, and which of the
+/// two sections keyboard navigation currently drives.
+#[derive(Debug)]
+pub struct LinksState {
+    pub incoming: Vec<(Uuid, String)>,
+    pub incoming_selected: usize,
+    pub outgoing: Vec<(Option<Uuid>, String)>,
+    pub outgoing_selected: usize,
+    pub focus: BacklinkFocus,
+}
+
+impl Default for LinksState {
+    fn default() -> Self {
+        Self {
+            incoming: Vec::new(),
+            incoming_selected: 0,
+            outgoing: Vec::new(),
+            outgoing_selected: 0,
+            focus: BacklinkFocus::Incoming,
+        }
+    }
+}
+
 pub struct App {
+    pub links: LinksState,
+    pub note_search: NoteSearchState,
+    pub spell: SpellState,
     pub should_quit: bool,
     pub mode: AppMode,
     pub focused_pane: FocusedPane,
@@ -212,19 +305,8 @@ pub struct App {
     pub operation_result: Option<OperationResult>,
     pub operation_result_time: Option<std::time::Instant>,
 
-    // Disk persistence: set when in-memory changes need writing through to the
-    // vault; the main loop performs the actual write. last_self_write lets the
-    // file watcher ignore the changes we cause ourselves.
-    pub pending_disk_save: bool,
-    pub last_self_write: Option<std::time::Instant>,
-    /// Notes changed since the last disk write (written incrementally).
-    pub dirty_note_ids: HashSet<Uuid>,
-    /// Files of deleted notes to remove from the vault on the next write.
-    pub deleted_note_paths: Vec<std::path::PathBuf>,
-    /// Folder-structure change: fall back to a full save (rare, but correct).
-    pub force_full_save: bool,
-    /// Folder directories to move/rename on disk: (old relative path, new).
-    pub pending_folder_relocations: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+    /// Everything tracking what still needs to reach the disk.
+    pub disk: DiskState,
 
     // Quick jump and recent files
     pub quick_jump_query: String,
@@ -291,17 +373,8 @@ pub struct App {
     pub redo_stack: Vec<(String, (u16, u16))>,
 
     // In-note search
-    pub note_search_query: String,
-    pub note_search_matches: Vec<(u16, u16)>,  // (row, col) of each match
-    pub note_search_selected: usize,
-    pub note_search_active: bool,
 
     // Backlinks panel
-    pub backlinks_selected: usize,
-    pub backlinks_cache: Vec<(Uuid, String)>,  // (note_id, title) — notes linking here
-    pub outgoing_selected: usize,
-    pub outgoing_links_cache: Vec<(Option<Uuid>, String)>, // (target_id_if_exists, title) — links from here
-    pub backlinks_focus: BacklinkFocus,        // which section navigation acts on
 
     // Outline panel
     pub outline_headings: Vec<(usize, u8, String)>, // (line_index, level, text)
@@ -320,15 +393,6 @@ pub struct App {
     pub template_picker_selected: usize,
 
     // Spell check
-    pub spell_check_enabled: bool,
-    pub aspell_available: bool,
-    /// (row, col, word_len) for each misspelled word
-    pub spell_errors: Vec<(usize, usize, usize)>,
-    /// Suggestions for the word under cursor (shown in SpellSuggest popup)
-    pub spell_suggestions: Vec<String>,
-    pub spell_suggestions_selected: usize,
-    /// The word range being corrected: (row, col, len)
-    pub spell_word_range: (usize, usize, usize),
 }
 
 impl App {
@@ -379,13 +443,15 @@ impl App {
             markdown_autocomplete: MarkdownAutocomplete::new(),
             
             // Visual feedback
+            // aspell is probed once at startup; everything else starts empty.
+            spell: SpellState {
+                aspell_available: crate::spell::check_available(),
+                ..SpellState::default()
+            },
+            note_search: NoteSearchState::default(),
+            links: LinksState::default(),
             save_status: SaveStatus::Saved,
-            pending_disk_save: false,
-            last_self_write: None,
-            dirty_note_ids: HashSet::new(),
-            deleted_note_paths: Vec::new(),
-            force_full_save: false,
-            pending_folder_relocations: Vec::new(),
+            disk: DiskState::default(),
             last_operation: None,
             operation_result: None,
             operation_result_time: None,
@@ -452,18 +518,6 @@ impl App {
             // Redo
             redo_stack: Vec::new(),
 
-            // In-note search
-            note_search_query: String::new(),
-            note_search_matches: Vec::new(),
-            note_search_selected: 0,
-            note_search_active: false,
-
-            // Backlinks
-            backlinks_selected: 0,
-            backlinks_cache: Vec::new(),
-            outgoing_selected: 0,
-            outgoing_links_cache: Vec::new(),
-            backlinks_focus: BacklinkFocus::Incoming,
             outline_headings: Vec::new(),
             outline_selected: 0,
 
@@ -480,12 +534,6 @@ impl App {
             template_picker_selected: 0,
 
             // Spell check — detect aspell at startup
-            spell_check_enabled: config.behavior.spell_check,
-            aspell_available: crate::spell::check_available(),
-            spell_errors: Vec::new(),
-            spell_suggestions: Vec::new(),
-            spell_suggestions_selected: 0,
-            spell_word_range: (0, 0, 0),
         };
         
         // Create default folder structure
@@ -603,8 +651,8 @@ impl App {
             self.update_preview_content();
 
             // Run spell check if enabled
-            if self.spell_check_enabled && self.aspell_available {
-                self.spell_errors = crate::spell::check_content(&self.editor_content);
+            if self.spell.enabled && self.spell.aspell_available {
+                self.spell.errors = crate::spell::check_content(&self.editor_content);
             }
         }
     }
@@ -765,11 +813,11 @@ impl App {
                         .get(&item_id)
                         .and_then(|n| n.file_path.clone());
                     self.notebook.remove_note(item_id);
-                    self.dirty_note_ids.remove(&item_id);
+                    self.disk.dirty_note_ids.remove(&item_id);
                     if let Some(path) = file_path {
                         self.mark_note_deleted(path);
                     } else {
-                        self.pending_disk_save = true; // unsaved note: nothing on disk
+                        self.disk.pending_disk_save = true; // unsaved note: nothing on disk
                     }
                     if let Some(ref current_note) = self.current_note {
                         if current_note.id == item_id {
@@ -919,21 +967,21 @@ impl App {
 
     /// Mark a single note as needing an incremental disk write.
     pub fn mark_note_dirty(&mut self, id: Uuid) {
-        self.dirty_note_ids.insert(id);
-        self.pending_disk_save = true;
+        self.disk.dirty_note_ids.insert(id);
+        self.disk.pending_disk_save = true;
     }
 
     /// Mark a note's file for removal from the vault on the next write.
     pub fn mark_note_deleted(&mut self, path: std::path::PathBuf) {
-        self.deleted_note_paths.push(path);
-        self.pending_disk_save = true;
+        self.disk.deleted_note_paths.push(path);
+        self.disk.pending_disk_save = true;
     }
 
     /// Request a full save (folder-structure changes the incremental path can't
     /// express). Correct but writes every note; used for the rare folder ops.
     pub fn request_full_save(&mut self) {
-        self.force_full_save = true;
-        self.pending_disk_save = true;
+        self.disk.force_full_save = true;
+        self.disk.pending_disk_save = true;
     }
 
     /// A folder's path relative to the vault root (its chain of folder names).
@@ -955,29 +1003,29 @@ impl App {
         new_rel: std::path::PathBuf,
     ) {
         if old_rel != new_rel && !old_rel.as_os_str().is_empty() {
-            self.pending_folder_relocations.push((old_rel, new_rel));
-            self.pending_disk_save = true;
+            self.disk.pending_folder_relocations.push((old_rel, new_rel));
+            self.disk.pending_disk_save = true;
         }
     }
 
     /// Record a successful disk write: marks the buffer clean and timestamps the
     /// write so the file watcher ignores the events it generated.
     pub fn mark_disk_saved(&mut self) {
-        self.last_self_write = Some(std::time::Instant::now());
+        self.disk.last_self_write = Some(std::time::Instant::now());
         self.save_status = SaveStatus::Saved;
     }
 
     /// Surface a failed disk write and keep the save pending so it retries.
     pub fn report_save_failure(&mut self, err: String) {
         self.save_status = SaveStatus::Error;
-        self.pending_disk_save = true;
+        self.disk.pending_disk_save = true;
         self.set_operation_error(format!("Save failed: {}", err), Some("⚠️".to_string()));
     }
 
     /// Did we write to the vault very recently? Used to suppress the file
     /// watcher's "external change" notifications for our own saves.
     pub(crate) fn wrote_recently(&self) -> bool {
-        self.last_self_write
+        self.disk.last_self_write
             .map(|t| t.elapsed().as_millis() < 1500)
             .unwrap_or(false)
     }
@@ -1098,17 +1146,17 @@ impl App {
     /// Scan editor_content for all occurrences of note_search_query and store
     /// their (row, col) positions in note_search_matches.
     pub fn find_note_search_matches(&mut self) {
-        self.note_search_matches.clear();
-        self.note_search_selected = 0;
-        if self.note_search_query.is_empty() {
+        self.note_search.matches.clear();
+        self.note_search.selected = 0;
+        if self.note_search.query.is_empty() {
             return;
         }
-        let query_lower = self.note_search_query.to_lowercase();
+        let query_lower = self.note_search.query.to_lowercase();
         for (row, line) in self.editor_content.lines().enumerate() {
             let line_lower = line.to_lowercase();
             let mut start = 0;
             while let Some(col) = line_lower[start..].find(&query_lower) {
-                self.note_search_matches.push((row as u16, (start + col) as u16));
+                self.note_search.matches.push((row as u16, (start + col) as u16));
                 start += col + query_lower.len().max(1);
             }
         }
@@ -1116,25 +1164,25 @@ impl App {
 
     /// Jump to the next in-note search match (wraps around).
     pub fn note_search_next(&mut self) {
-        if self.note_search_matches.is_empty() { return; }
-        self.note_search_selected = (self.note_search_selected + 1)
-            % self.note_search_matches.len();
+        if self.note_search.matches.is_empty() { return; }
+        self.note_search.selected = (self.note_search.selected + 1)
+            % self.note_search.matches.len();
         self.jump_to_selected_match_pub();
     }
 
     /// Jump to the previous in-note search match (wraps around).
     pub fn note_search_prev(&mut self) {
-        if self.note_search_matches.is_empty() { return; }
-        if self.note_search_selected == 0 {
-            self.note_search_selected = self.note_search_matches.len() - 1;
+        if self.note_search.matches.is_empty() { return; }
+        if self.note_search.selected == 0 {
+            self.note_search.selected = self.note_search.matches.len() - 1;
         } else {
-            self.note_search_selected -= 1;
+            self.note_search.selected -= 1;
         }
         self.jump_to_selected_match_pub();
     }
 
     pub fn jump_to_selected_match_pub(&mut self) {
-        if let Some(&(row, col)) = self.note_search_matches.get(self.note_search_selected) {
+        if let Some(&(row, col)) = self.note_search.matches.get(self.note_search.selected) {
             self.editor_cursor = (row, col);
             self.adjust_scroll_to_cursor();
         }
@@ -1142,10 +1190,10 @@ impl App {
 
     /// Clear all in-note search state.
     pub fn clear_note_search(&mut self) {
-        self.note_search_query.clear();
-        self.note_search_matches.clear();
-        self.note_search_selected = 0;
-        self.note_search_active = false;
+        self.note_search.query.clear();
+        self.note_search.matches.clear();
+        self.note_search.selected = 0;
+        self.note_search.active = false;
     }
 
     // -------------------------------------------------------------------------
@@ -1158,21 +1206,21 @@ impl App {
             self.set_message("No note selected".to_string());
             return;
         }
-        self.backlinks_cache = self.get_backlinks_for_current_note()
+        self.links.incoming = self.get_backlinks_for_current_note()
             .into_iter()
             .filter_map(|title| {
                 self.notebook.find_note_by_title(&title)
                     .map(|id| (id, title))
             })
             .collect();
-        self.outgoing_links_cache = self.get_outgoing_links_for_current_note();
-        if self.backlinks_cache.is_empty() && self.outgoing_links_cache.is_empty() {
+        self.links.outgoing = self.get_outgoing_links_for_current_note();
+        if self.links.incoming.is_empty() && self.links.outgoing.is_empty() {
             self.set_message("No links to or from this note".to_string());
         } else {
-            self.backlinks_selected = 0;
-            self.outgoing_selected = 0;
+            self.links.incoming_selected = 0;
+            self.links.outgoing_selected = 0;
             // Start focus on whichever section has entries (prefer incoming).
-            self.backlinks_focus = if self.backlinks_cache.is_empty() {
+            self.links.focus = if self.links.incoming.is_empty() {
                 BacklinkFocus::Outgoing
             } else {
                 BacklinkFocus::Incoming
@@ -1188,34 +1236,34 @@ impl App {
     /// Toggle navigation focus between the incoming and outgoing sections,
     /// but only when the other section actually has entries.
     pub fn backlinks_toggle_focus(&mut self) {
-        self.backlinks_focus = match self.backlinks_focus {
-            BacklinkFocus::Incoming if !self.outgoing_links_cache.is_empty() => BacklinkFocus::Outgoing,
-            BacklinkFocus::Outgoing if !self.backlinks_cache.is_empty() => BacklinkFocus::Incoming,
+        self.links.focus = match self.links.focus {
+            BacklinkFocus::Incoming if !self.links.outgoing.is_empty() => BacklinkFocus::Outgoing,
+            BacklinkFocus::Outgoing if !self.links.incoming.is_empty() => BacklinkFocus::Incoming,
             other => other,
         };
     }
 
     pub fn backlinks_navigate_up(&mut self) {
-        match self.backlinks_focus {
+        match self.links.focus {
             BacklinkFocus::Incoming => {
-                self.backlinks_selected = self.backlinks_selected.saturating_sub(1);
+                self.links.incoming_selected = self.links.incoming_selected.saturating_sub(1);
             }
             BacklinkFocus::Outgoing => {
-                self.outgoing_selected = self.outgoing_selected.saturating_sub(1);
+                self.links.outgoing_selected = self.links.outgoing_selected.saturating_sub(1);
             }
         }
     }
 
     pub fn backlinks_navigate_down(&mut self) {
-        match self.backlinks_focus {
+        match self.links.focus {
             BacklinkFocus::Incoming => {
-                if self.backlinks_selected < self.backlinks_cache.len().saturating_sub(1) {
-                    self.backlinks_selected += 1;
+                if self.links.incoming_selected < self.links.incoming.len().saturating_sub(1) {
+                    self.links.incoming_selected += 1;
                 }
             }
             BacklinkFocus::Outgoing => {
-                if self.outgoing_selected < self.outgoing_links_cache.len().saturating_sub(1) {
-                    self.outgoing_selected += 1;
+                if self.links.outgoing_selected < self.links.outgoing.len().saturating_sub(1) {
+                    self.links.outgoing_selected += 1;
                 }
             }
         }
@@ -1224,15 +1272,15 @@ impl App {
     /// Open the link selected in whichever section currently has focus.
     /// For an outgoing link whose target note doesn't exist yet, create it first.
     pub fn open_selected_backlink(&mut self) {
-        match self.backlinks_focus {
+        match self.links.focus {
             BacklinkFocus::Incoming => {
-                if let Some(note_id) = self.backlinks_cache.get(self.backlinks_selected).map(|(id, _)| *id) {
+                if let Some(note_id) = self.links.incoming.get(self.links.incoming_selected).map(|(id, _)| *id) {
                     self.mode = AppMode::Normal;
                     self.open_note_by_id(note_id);
                 }
             }
             BacklinkFocus::Outgoing => {
-                let Some((target_id, title)) = self.outgoing_links_cache.get(self.outgoing_selected).cloned() else {
+                let Some((target_id, title)) = self.links.outgoing.get(self.links.outgoing_selected).cloned() else {
                     return;
                 };
                 self.mode = AppMode::Normal;
@@ -1524,25 +1572,25 @@ impl App {
 
     /// Re-run aspell on the current note content and update `spell_errors`.
     pub fn run_spell_check(&mut self) {
-        if !self.spell_check_enabled || !self.aspell_available {
+        if !self.spell.enabled || !self.spell.aspell_available {
             return;
         }
-        self.spell_errors = crate::spell::check_content(&self.editor_content);
+        self.spell.errors = crate::spell::check_content(&self.editor_content);
     }
 
     /// Toggle spell checking on/off.
     #[allow(dead_code)]
     pub fn toggle_spell_check(&mut self) {
-        if !self.aspell_available {
+        if !self.spell.aspell_available {
             self.set_message("aspell not found — install it with: sudo apt install aspell".to_string());
             return;
         }
-        self.spell_check_enabled = !self.spell_check_enabled;
-        if self.spell_check_enabled {
+        self.spell.enabled = !self.spell.enabled;
+        if self.spell.enabled {
             self.run_spell_check();
-            self.set_message(format!("Spell check ON — {} error(s) found", self.spell_errors.len()));
+            self.set_message(format!("Spell check ON — {} error(s) found", self.spell.errors.len()));
         } else {
-            self.spell_errors.clear();
+            self.spell.errors.clear();
             self.set_message("Spell check OFF".to_string());
         }
     }
@@ -1585,14 +1633,14 @@ impl App {
 
     /// Enter `SpellSuggest` mode for the word at the cursor.
     pub fn show_spell_suggestions(&mut self) {
-        if !self.aspell_available {
+        if !self.spell.aspell_available {
             self.set_message("aspell not found".to_string());
             return;
         }
         if let Some((row, col, len, word)) = self.get_word_at_cursor() {
-            self.spell_word_range = (row, col, len);
-            self.spell_suggestions = crate::spell::get_suggestions(&word);
-            self.spell_suggestions_selected = 0;
+            self.spell.word_range = (row, col, len);
+            self.spell.suggestions = crate::spell::get_suggestions(&word);
+            self.spell.suggestions_selected = 0;
             self.mode = AppMode::SpellSuggest;
         } else {
             self.set_message("No word at cursor".to_string());
@@ -1601,8 +1649,8 @@ impl App {
 
     /// Replace the word at `spell_word_range` with the currently selected suggestion.
     pub fn apply_spell_suggestion(&mut self) {
-        let (row, col, wlen) = self.spell_word_range;
-        if let Some(suggestion) = self.spell_suggestions.get(self.spell_suggestions_selected).cloned() {
+        let (row, col, wlen) = self.spell.word_range;
+        if let Some(suggestion) = self.spell.suggestions.get(self.spell.suggestions_selected).cloned() {
             let lines: Vec<&str> = self.editor_content.lines().collect();
             if row < lines.len() {
                 let line = lines[row];
@@ -1682,15 +1730,15 @@ mod persistence_tests {
         app.notebook.add_note(note.clone());
         app.current_note = Some(note);
         app.editor_content = "hello world".to_string();
-        app.pending_disk_save = false;
+        app.disk.pending_disk_save = false;
 
         app.save_current_note().unwrap();
 
         // editor content was committed to the in-memory notebook
         assert_eq!(app.notebook.notes.get(&id).unwrap().content, "hello world");
         // a disk write is now pending, and the note is in the dirty set
-        assert!(app.pending_disk_save);
-        assert!(app.dirty_note_ids.contains(&id));
+        assert!(app.disk.pending_disk_save);
+        assert!(app.disk.dirty_note_ids.contains(&id));
 
         // after a successful write, our own change is suppressed for the watcher
         app.mark_disk_saved();
@@ -1702,7 +1750,7 @@ mod persistence_tests {
     fn failed_save_keeps_request_pending_for_retry() {
         let mut app = App::default();
         app.report_save_failure("disk full".to_string());
-        assert!(app.pending_disk_save, "failed save must stay pending to retry");
+        assert!(app.disk.pending_disk_save, "failed save must stay pending to retry");
         assert_eq!(app.save_status, SaveStatus::Error);
     }
 
@@ -1728,8 +1776,8 @@ mod persistence_tests {
         // path cleared so the saver rewrites it inside the destination folder
         assert!(moved.file_path.is_none());
         // old file queued for deletion, note queued for (re)write
-        assert!(app.deleted_note_paths.contains(&old_path));
-        assert!(app.dirty_note_ids.contains(&nid));
+        assert!(app.disk.deleted_note_paths.contains(&old_path));
+        assert!(app.disk.dirty_note_ids.contains(&nid));
     }
 }
 
@@ -1762,8 +1810,8 @@ mod backlink_graph_tests {
         app.show_backlinks_panel();
         assert_eq!(app.mode, AppMode::Backlinks);
         // Incoming empty, so focus lands on the outgoing section.
-        assert_eq!(app.backlinks_focus, BacklinkFocus::Outgoing);
-        assert_eq!(app.outgoing_links_cache, vec![(Some(tid), "Target".to_string())]);
+        assert_eq!(app.links.focus, BacklinkFocus::Outgoing);
+        assert_eq!(app.links.outgoing, vec![(Some(tid), "Target".to_string())]);
 
         app.open_selected_backlink();
         assert_eq!(app.mode, AppMode::Normal);
@@ -1776,7 +1824,7 @@ mod backlink_graph_tests {
 
         app.show_backlinks_panel();
         // Target doesn't exist yet → flagged as broken (None id).
-        assert_eq!(app.outgoing_links_cache, vec![(None, "Ghost".to_string())]);
+        assert_eq!(app.links.outgoing, vec![(None, "Ghost".to_string())]);
 
         app.open_selected_backlink();
 
@@ -1805,9 +1853,9 @@ mod backlink_graph_tests {
         let (mut app, _) = app_with_source("links to [[Ghost]]");
         app.show_backlinks_panel();
         // No incoming links, so Tab must keep focus on outgoing.
-        assert_eq!(app.backlinks_focus, BacklinkFocus::Outgoing);
+        assert_eq!(app.links.focus, BacklinkFocus::Outgoing);
         app.backlinks_toggle_focus();
-        assert_eq!(app.backlinks_focus, BacklinkFocus::Outgoing);
+        assert_eq!(app.links.focus, BacklinkFocus::Outgoing);
     }
 }
 
