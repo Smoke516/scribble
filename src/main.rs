@@ -1,6 +1,7 @@
 mod app;
 mod autocomplete;
 mod config;
+mod error;
 mod events;
 mod models;
 mod preview;
@@ -219,8 +220,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Apply queued folder moves/renames on disk first (rename the directory
         // and its files), remapping the in-memory note paths to the new location.
-        if !app.pending_folder_relocations.is_empty() {
-            let relocations = std::mem::take(&mut app.pending_folder_relocations);
+        if !app.disk.pending_folder_relocations.is_empty() {
+            let relocations = std::mem::take(&mut app.disk.pending_folder_relocations);
             for (old_rel, new_rel) in relocations {
                 match storage.relocate_folder(&app.notebook, &old_rel, &new_rel) {
                     Ok(updated) => {
@@ -245,12 +246,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // save, structural edits) so work survives a crash — not only on exit.
         // Writes only the changed notes (and removes deleted files); folder-tree
         // changes fall back to a full save.
-        if app.pending_disk_save {
-            let result = if app.force_full_save {
+        if app.disk.pending_disk_save {
+            let result = if app.disk.force_full_save {
                 storage.save_notebook(&app.notebook).map(|_| Vec::new())
             } else {
-                let dirty: Vec<_> = app.dirty_note_ids.iter().copied().collect();
-                storage.save_incremental(&app.notebook, &dirty, &app.deleted_note_paths)
+                let dirty: Vec<_> = app.disk.dirty_note_ids.iter().copied().collect();
+                storage.save_incremental(&app.notebook, &dirty, &app.disk.deleted_note_paths)
             };
             match result {
                 Ok(assigned) => {
@@ -266,10 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    app.dirty_note_ids.clear();
-                    app.deleted_note_paths.clear();
-                    app.force_full_save = false;
-                    app.pending_disk_save = false;
+                    app.disk.clear_after_write();
                     app.mark_disk_saved();
                 }
                 Err(e) => app.report_save_failure(e.to_string()),
@@ -287,13 +285,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // every mtime and re-uploading the lot to whatever is syncing it. Only the
     // outstanding work is written, and only when there is some (a save that
     // failed mid-session leaves `pending_disk_save` set for exactly this retry).
-    if app.pending_disk_save || !app.dirty_note_ids.is_empty() || !app.deleted_note_paths.is_empty()
-    {
-        let dirty: Vec<_> = app.dirty_note_ids.iter().copied().collect();
-        let outcome = if app.force_full_save {
+    if app.disk.has_pending_work() {
+        let dirty: Vec<_> = app.disk.dirty_note_ids.iter().copied().collect();
+        let outcome = if app.disk.force_full_save {
             storage.save_notebook(&app.notebook).map(|_| Vec::new())
         } else {
-            storage.save_incremental(&app.notebook, &dirty, &app.deleted_note_paths)
+            storage.save_incremental(&app.notebook, &dirty, &app.disk.deleted_note_paths)
         };
         if let Err(e) = outcome {
             eprintln!("Failed to save notebook data: {}", e);

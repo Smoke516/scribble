@@ -1,3 +1,4 @@
+use crate::error::{IoResultExt, StorageError};
 use crate::models::{NotebookData, Note, Folder};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -69,8 +70,8 @@ fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
 
 // Abstract trait for different storage backends
 pub trait NotebookStorage {
-    fn load_notebook(&self) -> Result<NotebookData, Box<dyn std::error::Error>>;
-    fn save_notebook(&self, notebook: &NotebookData) -> Result<(), Box<dyn std::error::Error>>;
+    fn load_notebook(&self) -> Result<NotebookData, StorageError>;
+    fn save_notebook(&self, notebook: &NotebookData) -> Result<(), StorageError>;
 
     /// Write only the `dirty` notes and delete `deleted_paths`, returning the
     /// on-disk path assigned to any note that did not have one yet (so the caller
@@ -81,7 +82,7 @@ pub trait NotebookStorage {
         notebook: &NotebookData,
         _dirty: &[Uuid],
         _deleted_paths: &[PathBuf],
-    ) -> Result<Vec<(Uuid, PathBuf)>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<(Uuid, PathBuf)>, StorageError> {
         self.save_notebook(notebook)?;
         Ok(Vec::new())
     }
@@ -95,23 +96,24 @@ pub trait NotebookStorage {
         _notebook: &NotebookData,
         _old_rel: &Path,
         _new_rel: &Path,
-    ) -> Result<Vec<(Uuid, PathBuf)>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<(Uuid, PathBuf)>, StorageError> {
         Ok(Vec::new())
     }
 }
 
 // Vault-based storage for Obsidian compatibility
+#[derive(Debug)]
 pub struct VaultStorage {
     vault_path: PathBuf,
 }
 
 impl VaultStorage {
-    pub fn new(vault_path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(vault_path: PathBuf) -> Result<Self, StorageError> {
         if !vault_path.exists() {
-            return Err(format!("Vault path does not exist: {:?}", vault_path).into());
+            return Err(StorageError::VaultMissing(vault_path));
         }
         if !vault_path.is_dir() {
-            return Err(format!("Vault path is not a directory: {:?}", vault_path).into());
+            return Err(StorageError::VaultNotDirectory(vault_path));
         }
         
         Ok(Self { vault_path })
@@ -224,9 +226,10 @@ impl VaultStorage {
     }
 
     /// Create every folder directory in the notebook.
-    fn ensure_folders(&self, notebook: &NotebookData) -> Result<(), Box<dyn std::error::Error>> {
+    fn ensure_folders(&self, notebook: &NotebookData) -> Result<(), StorageError> {
         for folder in notebook.folders.values() {
-            fs::create_dir_all(self.folder_dir(folder, notebook))?;
+            let dir = self.folder_dir(folder, notebook);
+            fs::create_dir_all(&dir).create_dir_ctx(&dir)?;
         }
         Ok(())
     }
@@ -270,19 +273,19 @@ impl VaultStorage {
         note: &Note,
         notebook: &NotebookData,
         claimed: &mut HashSet<PathBuf>,
-    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    ) -> Result<PathBuf, StorageError> {
         let file_path = self.resolve_note_path(note, notebook, claimed);
         if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).create_dir_ctx(parent)?;
         }
         let content = self.create_markdown_with_frontmatter(note, &file_path, &note.content);
-        write_atomic(&file_path, &content)?;
+        write_atomic(&file_path, &content).write_ctx(&file_path)?;
         Ok(file_path)
     }
 }
 
 impl NotebookStorage for VaultStorage {
-    fn load_notebook(&self) -> Result<NotebookData, Box<dyn std::error::Error>> {
+    fn load_notebook(&self) -> Result<NotebookData, StorageError> {
         let mut notebook = NotebookData::new();
         let mut folders_created = HashMap::new();
         
@@ -399,7 +402,7 @@ impl NotebookStorage for VaultStorage {
         Ok(notebook)
     }
     
-    fn save_notebook(&self, notebook: &NotebookData) -> Result<(), Box<dyn std::error::Error>> {
+    fn save_notebook(&self, notebook: &NotebookData) -> Result<(), StorageError> {
         self.ensure_folders(notebook)?;
 
         // Iterate in id order so collision-disambiguation is stable across saves
@@ -420,7 +423,7 @@ impl NotebookStorage for VaultStorage {
         notebook: &NotebookData,
         dirty: &[Uuid],
         deleted_paths: &[PathBuf],
-    ) -> Result<Vec<(Uuid, PathBuf)>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<(Uuid, PathBuf)>, StorageError> {
         // Remove files for deleted notes (ignore if already gone).
         for path in deleted_paths {
             let _ = fs::remove_file(path);
@@ -448,7 +451,7 @@ impl NotebookStorage for VaultStorage {
         notebook: &NotebookData,
         old_rel: &Path,
         new_rel: &Path,
-    ) -> Result<Vec<(Uuid, PathBuf)>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<(Uuid, PathBuf)>, StorageError> {
         let old_abs = self.vault_path.join(old_rel);
         let new_abs = self.vault_path.join(new_rel);
         if old_abs == new_abs {
@@ -456,7 +459,7 @@ impl NotebookStorage for VaultStorage {
         }
 
         if let Some(parent) = new_abs.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).create_dir_ctx(parent)?;
         }
         if old_abs.exists() {
             // A full save may have pre-created the (empty) destination; remove it
@@ -464,10 +467,14 @@ impl NotebookStorage for VaultStorage {
             if new_abs.exists() {
                 let _ = fs::remove_dir(&new_abs);
             }
-            fs::rename(&old_abs, &new_abs)?;
+            fs::rename(&old_abs, &new_abs).map_err(|source| StorageError::Rename {
+                from: old_abs.clone(),
+                to: new_abs.clone(),
+                source,
+            })?;
         } else {
             // Folder had no directory yet (e.g. empty/never-written): just create.
-            fs::create_dir_all(&new_abs)?;
+            fs::create_dir_all(&new_abs).create_dir_ctx(&new_abs)?;
         }
 
         // Remap every note path that was under the old directory.
@@ -483,6 +490,7 @@ impl NotebookStorage for VaultStorage {
     }
 }
 
+#[derive(Debug)]
 pub struct Storage {
     data_dir: PathBuf,
     notebook_file: PathBuf,
@@ -490,9 +498,9 @@ pub struct Storage {
 
 
 impl Storage {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new() -> Result<Self, StorageError> {
         let data_dir = Self::get_data_dir()?;
-        fs::create_dir_all(&data_dir)?;
+        fs::create_dir_all(&data_dir).create_dir_ctx(&data_dir)?;
         
         let notebook_file = data_dir.join("notebook.json");
         
@@ -502,7 +510,7 @@ impl Storage {
         })
     }
 
-    fn get_data_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fn get_data_dir() -> Result<PathBuf, StorageError> {
         let data_dir = if let Some(data_dir) = dirs::data_dir() {
             data_dir.join("scribble")
         } else {
@@ -516,10 +524,15 @@ impl Storage {
         Ok(data_dir)
     }
 
-    pub fn load_notebook(&self) -> Result<NotebookData, Box<dyn std::error::Error>> {
+    pub fn load_notebook(&self) -> Result<NotebookData, StorageError> {
         if self.notebook_file.exists() {
-            let contents = fs::read_to_string(&self.notebook_file)?;
-            let notebook: NotebookData = serde_json::from_str(&contents)?;
+            let contents =
+                fs::read_to_string(&self.notebook_file).read_ctx(&self.notebook_file)?;
+            let notebook: NotebookData =
+                serde_json::from_str(&contents).map_err(|source| StorageError::Parse {
+                    path: self.notebook_file.clone(),
+                    source,
+                })?;
             Ok(notebook)
         } else {
             // Return empty notebook if file doesn't exist
@@ -527,11 +540,11 @@ impl Storage {
         }
     }
 
-    pub fn save_notebook(&self, notebook: &NotebookData) -> Result<(), Box<dyn std::error::Error>> {
-        let json = serde_json::to_string_pretty(notebook)?;
+    pub fn save_notebook(&self, notebook: &NotebookData) -> Result<(), StorageError> {
+        let json = serde_json::to_string_pretty(notebook).map_err(StorageError::Serialize)?;
         // Single-file backend: a truncated write here loses the whole notebook,
         // not one note, so atomicity matters even more than in vault mode.
-        write_atomic(&self.notebook_file, &json)?;
+        write_atomic(&self.notebook_file, &json).write_ctx(&self.notebook_file)?;
         Ok(())
     }
 
@@ -541,38 +554,38 @@ impl Storage {
     }
 
     #[allow(dead_code)]
-    pub fn export_note_to_file(&self, note_id: &str, content: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    pub fn export_note_to_file(&self, note_id: &str, content: &str) -> Result<PathBuf, StorageError> {
         let notes_dir = self.get_notes_dir();
-        fs::create_dir_all(&notes_dir)?;
+        fs::create_dir_all(&notes_dir).create_dir_ctx(&notes_dir)?;
         
         let file_path = notes_dir.join(format!("{}.md", note_id));
-        fs::write(&file_path, content)?;
+        write_atomic(&file_path, content).write_ctx(&file_path)?;
         Ok(file_path)
     }
 
     #[allow(dead_code)]
-    pub fn import_note_from_file(&self, file_path: &PathBuf) -> Result<String, Box<dyn std::error::Error>> {
-        let content = fs::read_to_string(file_path)?;
+    pub fn import_note_from_file(&self, file_path: &PathBuf) -> Result<String, StorageError> {
+        let content = fs::read_to_string(file_path).read_ctx(file_path)?;
         Ok(content)
     }
 
     #[allow(dead_code)]
-    pub fn backup_data(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    pub fn backup_data(&self) -> Result<PathBuf, StorageError> {
         let backup_dir = self.data_dir.join("backups");
-        fs::create_dir_all(&backup_dir)?;
+        fs::create_dir_all(&backup_dir).create_dir_ctx(&backup_dir)?;
         
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
         let backup_file = backup_dir.join(format!("notebook_backup_{}.json", timestamp));
         
         if self.notebook_file.exists() {
-            fs::copy(&self.notebook_file, &backup_file)?;
+            fs::copy(&self.notebook_file, &backup_file).write_ctx(&backup_file)?;
         }
         
         Ok(backup_file)
     }
 
     #[allow(dead_code)]
-    pub fn list_backups(&self) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    pub fn list_backups(&self) -> Result<Vec<PathBuf>, StorageError> {
         let backup_dir = self.data_dir.join("backups");
         
         if !backup_dir.exists() {
@@ -581,8 +594,8 @@ impl Storage {
         
         let mut backups = Vec::new();
         
-        for entry in fs::read_dir(&backup_dir)? {
-            let entry = entry?;
+        for entry in fs::read_dir(&backup_dir).read_ctx(&backup_dir)? {
+            let entry = entry.read_ctx(&backup_dir)?;
             let path = entry.path();
             
             if path.is_file() && path.extension().map(|s| s == "json").unwrap_or(false) {
@@ -602,20 +615,20 @@ impl Storage {
     }
 
     #[allow(dead_code)]
-    pub fn restore_from_backup(&self, backup_file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn restore_from_backup(&self, backup_file: &PathBuf) -> Result<(), StorageError> {
         if backup_file.exists() {
-            fs::copy(backup_file, &self.notebook_file)?;
+            fs::copy(backup_file, &self.notebook_file).write_ctx(&self.notebook_file)?;
         }
         Ok(())
     }
 }
 
 impl NotebookStorage for Storage {
-    fn load_notebook(&self) -> Result<NotebookData, Box<dyn std::error::Error>> {
+    fn load_notebook(&self) -> Result<NotebookData, StorageError> {
         self.load_notebook()
     }
     
-    fn save_notebook(&self, notebook: &NotebookData) -> Result<(), Box<dyn std::error::Error>> {
+    fn save_notebook(&self, notebook: &NotebookData) -> Result<(), StorageError> {
         self.save_notebook(notebook)
     }
 }
@@ -851,6 +864,52 @@ mod tests {
             "frontmatter should omit empty fields rather than write null:\n{}",
             nested
         );
+    }
+
+    /// The point of the typed error is that a failure says which file and which
+    /// operation. `Box<dyn Error>` produced a bare "Permission denied" with no
+    /// indication of what could not be written.
+    #[test]
+    fn storage_errors_name_the_path_and_the_operation() {
+        let missing = std::env::temp_dir().join("scribble_definitely_not_here_xyz");
+        let _ = fs::remove_dir_all(&missing);
+        let err = VaultStorage::new(missing.clone()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("vault path does not exist"), "got: {}", msg);
+        assert!(msg.contains(missing.to_str().unwrap()), "message omits the path: {}", msg);
+
+        // A write into a read-only directory must name the file it failed on.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("scribble_ro_{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+
+            let mut nb = NotebookData::new();
+            nb.add_note(Note::new("Blocked".to_string(), None));
+            let storage = VaultStorage::new(dir.clone()).unwrap();
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+            // Root ignores the permission bits, so confirm the directory really is
+            // unwritable before asserting on the failure. Cheaper and clearer than
+            // asking for the uid.
+            let actually_read_only = fs::write(dir.join(".probe"), "x").is_err();
+            let outcome = storage.save_notebook(&nb).map(|_| ()).map_err(|e| e.to_string());
+
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = fs::remove_dir_all(&dir);
+
+            if actually_read_only {
+                let msg = outcome.expect_err("save into a read-only vault must fail");
+                assert!(
+                    msg.contains("could not write") || msg.contains("could not create"),
+                    "message does not name the operation: {}",
+                    msg
+                );
+                assert!(msg.contains("Blocked.md"), "message does not name the file: {}", msg);
+            }
+        }
     }
 
     #[test]

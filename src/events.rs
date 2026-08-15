@@ -504,7 +504,7 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
 
         // --- items ---
         Action::NewNoteOrSearchNext => {
-            if editor_focused && app.note_search_active {
+            if editor_focused && app.note_search.active {
                 app.note_search_next();
             } else {
                 let folder_id = if let Some(item) = app.get_selected_item() {
@@ -572,9 +572,9 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
         // --- search ---
         Action::SearchInNoteOrGlobal => {
             if editor_focused {
-                app.note_search_query.clear();
-                app.note_search_matches.clear();
-                app.note_search_active = true;
+                app.note_search.query.clear();
+                app.note_search.matches.clear();
+                app.note_search.active = true;
                 app.mode = AppMode::NoteSearch;
             } else {
                 app.mode = AppMode::Search;
@@ -585,7 +585,7 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
             }
         }
         Action::SearchPrevOrTemplates => {
-            if editor_focused && app.note_search_active {
+            if editor_focused && app.note_search.active {
                 app.note_search_prev();
             } else if !editor_focused {
                 app.show_template_picker();
@@ -609,7 +609,7 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
         }
         Action::ClearNoteSearch => {
             // Inert unless an in-note search is actually highlighted.
-            if app.note_search_active {
+            if app.note_search.active {
                 app.clear_note_search();
             }
         }
@@ -1084,16 +1084,16 @@ fn execute_command(app: &mut App, command: &str) {
                     Err(e) => app.set_operation_error(format!("Import failed: {}", e), Some("🚨".to_string())),
                 }
         } else if command == "spell" || command == "spellon" {
-            if !app.aspell_available {
+            if !app.spell.aspell_available {
                 app.set_message("aspell not found — install it: sudo apt install aspell".to_string());
             } else {
-                app.spell_check_enabled = true;
+                app.spell.enabled = true;
                 app.run_spell_check();
-                app.set_message(format!("Spell check ON — {} error(s)", app.spell_errors.len()));
+                app.set_message(format!("Spell check ON — {} error(s)", app.spell.errors.len()));
             }
         } else if command == "nospell" || command == "spelloff" {
-            app.spell_check_enabled = false;
-            app.spell_errors.clear();
+            app.spell.enabled = false;
+            app.spell.errors.clear();
             app.set_message("Spell check OFF".to_string());
         } else if let Ok(line_num) = command.parse::<usize>() {
                 // :N — jump to line number
@@ -1679,7 +1679,7 @@ fn handle_note_search_mode(app: &mut App, key: KeyEvent) {
 
         // Enter: jump to current match and exit input mode
         KeyCode::Enter => {
-            if !app.note_search_matches.is_empty() {
+            if !app.note_search.matches.is_empty() {
                 app.jump_to_selected_match_pub();
             }
             app.mode = AppMode::Normal;
@@ -1694,18 +1694,18 @@ fn handle_note_search_mode(app: &mut App, key: KeyEvent) {
         }
 
         KeyCode::Char(c) => {
-            app.note_search_query.push(c);
+            app.note_search.query.push(c);
             app.find_note_search_matches();
             // Auto-jump to first match
-            if !app.note_search_matches.is_empty() {
+            if !app.note_search.matches.is_empty() {
                 app.jump_to_selected_match_pub();
             }
         }
 
         KeyCode::Backspace => {
-            app.note_search_query.pop();
+            app.note_search.query.pop();
             app.find_note_search_matches();
-            if !app.note_search_matches.is_empty() {
+            if !app.note_search.matches.is_empty() {
                 app.jump_to_selected_match_pub();
             }
         }
@@ -1824,19 +1824,19 @@ fn handle_template_picker_mode(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_spell_suggest_mode(app: &mut App, key: KeyEvent) {
-    let count = app.spell_suggestions.len();
+    let count = app.spell.suggestions.len();
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.mode = AppMode::Normal;
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            if app.spell_suggestions_selected > 0 {
-                app.spell_suggestions_selected -= 1;
+            if app.spell.suggestions_selected > 0 {
+                app.spell.suggestions_selected -= 1;
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            if app.spell_suggestions_selected + 1 < count {
-                app.spell_suggestions_selected += 1;
+            if app.spell.suggestions_selected + 1 < count {
+                app.spell.suggestions_selected += 1;
             }
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
@@ -1847,7 +1847,7 @@ fn handle_spell_suggest_mode(app: &mut App, key: KeyEvent) {
             if let Some(d) = c.to_digit(10) {
                 let idx = (d as usize).saturating_sub(1);
                 if idx < count {
-                    app.spell_suggestions_selected = idx;
+                    app.spell.suggestions_selected = idx;
                     app.apply_spell_suggestion();
                 }
             }
@@ -1970,6 +1970,47 @@ mod dispatch_tests {
             );
             seen.push(key);
         }
+    }
+
+    /// The help dialog is organised by topic, not by mode, and covers modes this
+    /// table does not describe — so it is hand-written on purpose and generating
+    /// it would be a downgrade. What can be enforced is that it stays complete:
+    /// every Ctrl chord and function key in the table must appear in the help text.
+    ///
+    /// The source is pulled in with `include_str!` rather than restructuring 251
+    /// lines of carefully aligned UI into data.
+    #[test]
+    fn every_ctrl_chord_and_fkey_is_documented_in_help() {
+        const UI_SRC: &str = include_str!("ui.rs");
+        let help = {
+            let start = UI_SRC.find("fn draw_help_dialog").expect("help dialog not found");
+            &UI_SRC[start..]
+        };
+        // The help text abbreviates pairs as "Ctrl+U/D"; expand so both halves
+        // count as documented.
+        let expanded = regex::Regex::new(r"Ctrl\+([A-Z])/([A-Z])")
+            .unwrap()
+            .replace_all(help, "Ctrl+$1 Ctrl+$2")
+            .to_string();
+
+        let mut undocumented = Vec::new();
+        for b in NORMAL_BINDINGS {
+            let label = match (b.code, b.mods) {
+                (KeyCode::Char(c), KeyModifiers::CONTROL) => {
+                    format!("Ctrl+{}", c.to_ascii_uppercase())
+                }
+                (KeyCode::F(n), _) => format!("F{}", n),
+                _ => continue, // plain letters are too short to match reliably
+            };
+            if !expanded.contains(&label) {
+                undocumented.push(format!("{} ({})", label, b.desc));
+            }
+        }
+        assert!(
+            undocumented.is_empty(),
+            "bindings missing from the help screen: {:?}",
+            undocumented
+        );
     }
 
     /// A binding with no label cannot be documented, so refuse to add one.

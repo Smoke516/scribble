@@ -904,6 +904,7 @@ dependencies = [
  "serde_yaml",
  "syntect",
  "textwrap",
+ "thiserror",
  "toml",
  "uuid",
  "walkdir",
