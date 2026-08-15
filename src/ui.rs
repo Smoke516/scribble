@@ -374,11 +374,11 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
         }
 
         // Highlight spell errors (red + underline)
-        if app.spell_check_enabled && !app.spell_errors.is_empty() {
+        if app.spell.enabled && !app.spell.errors.is_empty() {
             // Group errors by row
             use std::collections::HashMap;
             let mut row_errors: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
-            for &(row, col, len) in &app.spell_errors {
+            for &(row, col, len) in &app.spell.errors {
                 row_errors.entry(row).or_default().push((col, len));
             }
             for (row, mut errs) in row_errors {
@@ -412,10 +412,10 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
         }
 
         // Highlight in-note search matches
-        if app.note_search_active && !app.note_search_matches.is_empty() {
-            let query_len = app.note_search_query.len().max(1);
-            for (match_idx, &(row, col)) in app.note_search_matches.iter().enumerate() {
-                let is_current = match_idx == app.note_search_selected;
+        if app.note_search.active && !app.note_search.matches.is_empty() {
+            let query_len = app.note_search.query.len().max(1);
+            for (match_idx, &(row, col)) in app.note_search.matches.iter().enumerate() {
+                let is_current = match_idx == app.note_search.selected;
                 let hl_bg = if is_current { TokyoNightTheme::ORANGE } else { TokyoNightTheme::YELLOW };
                 if let Some(line) = styled_content.lines.get_mut(row as usize) {
                     // Rebuild line: collect plain text, re-split with highlight at match range
@@ -445,26 +445,26 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
         if app.mode == AppMode::NoteSearch {
             let bar_y = (content_rect.y + content_rect.height).saturating_sub(1);
             let bar_rect = Rect::new(content_rect.x, bar_y, content_rect.width, 1);
-            let match_info = if app.note_search_matches.is_empty() {
+            let match_info = if app.note_search.matches.is_empty() {
                 " [no matches]".to_string()
             } else {
-                format!(" [{}/{}]", app.note_search_selected + 1, app.note_search_matches.len())
+                format!(" [{}/{}]", app.note_search.selected + 1, app.note_search.matches.len())
             };
             let bar_line = Line::from(vec![
                 Span::styled("/ ", Style::default().fg(TokyoNightTheme::YELLOW).add_modifier(Modifier::BOLD)),
-                Span::styled(app.note_search_query.as_str(), Style::default().fg(TokyoNightTheme::FG)),
+                Span::styled(app.note_search.query.as_str(), Style::default().fg(TokyoNightTheme::FG)),
                 Span::styled("█", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::SLOW_BLINK)),
                 Span::styled(match_info, Style::default().fg(TokyoNightTheme::COMMENT)),
             ]);
             f.render_widget(Clear, bar_rect);
             f.render_widget(Paragraph::new(bar_line)
                 .style(Style::default().fg(TokyoNightTheme::FG).bg(TokyoNightTheme::BG_DARK)), bar_rect);
-        } else if app.note_search_active && !app.note_search_matches.is_empty() {
+        } else if app.note_search.active && !app.note_search.matches.is_empty() {
             // Still show a subtle hint when active but not typing
             let bar_y = (content_rect.y + content_rect.height).saturating_sub(1);
             let bar_rect = Rect::new(content_rect.x, bar_y, content_rect.width, 1);
             let hint = format!(" /{} [{}/{}]  n/N: next/prev  Esc to clear",
-                app.note_search_query, app.note_search_selected + 1, app.note_search_matches.len());
+                app.note_search.query, app.note_search.selected + 1, app.note_search.matches.len());
             f.render_widget(Clear, bar_rect);
             f.render_widget(Paragraph::new(Span::styled(hint, Style::default().fg(TokyoNightTheme::COMMENT)))
                 .style(Style::default().bg(TokyoNightTheme::BG_DARK)), bar_rect);
@@ -1311,9 +1311,9 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         "No external editor found (set $EDITOR)".to_string()
     };
 
-    let spell_status = if !app.aspell_available {
+    let spell_status = if !app.spell.aspell_available {
         "aspell not installed"
-    } else if app.spell_check_enabled {
+    } else if app.spell.enabled {
         "ON"
     } else {
         "OFF"
@@ -1329,7 +1329,7 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from(vec![
             Span::styled("Spell check: ", Style::default().fg(TokyoNightTheme::COMMENT)),
             Span::styled(spell_status, Style::default().fg(
-                if app.spell_check_enabled { TokyoNightTheme::GREEN } else { TokyoNightTheme::COMMENT }
+                if app.spell.enabled { TokyoNightTheme::GREEN } else { TokyoNightTheme::COMMENT }
             )),
             Span::styled("   Editor: ", Style::default().fg(TokyoNightTheme::COMMENT)),
             Span::styled(&editor_info, Style::default().fg(TokyoNightTheme::FG_DARK)),
@@ -2106,17 +2106,17 @@ fn draw_backlinks_dialog(f: &mut Frame, app: &App) {
     f.render_widget(block, area);
 
     // Reserve space for the outgoing section only when there is one.
-    let out_h = if app.outgoing_links_cache.is_empty() {
+    let out_h = if app.links.outgoing.is_empty() {
         0
     } else {
-        (app.outgoing_links_cache.len() as u16 + 2).min(8)
+        (app.links.outgoing.len() as u16 + 2).min(8)
     };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(out_h), Constraint::Length(1)])
         .split(inner);
 
-    let incoming_focused = app.backlinks_focus == crate::app::BacklinkFocus::Incoming;
+    let incoming_focused = app.links.focus == crate::app::BacklinkFocus::Incoming;
     let outgoing_focused = !incoming_focused;
     let border_for = |focused: bool| if focused {
         TokyoNightTheme::border_focused()
@@ -2127,9 +2127,9 @@ fn draw_backlinks_dialog(f: &mut Frame, app: &App) {
     // ── Incoming: notes that link to this one ──
     let in_block = Block::default()
         .borders(Borders::ALL)
-        .title(format!("Linked from ({})", app.backlinks_cache.len()))
+        .title(format!("Linked from ({})", app.links.incoming.len()))
         .border_style(border_for(incoming_focused));
-    if app.backlinks_cache.is_empty() {
+    if app.links.incoming.is_empty() {
         f.render_widget(
             Paragraph::new("No notes link here yet.")
                 .block(in_block)
@@ -2138,7 +2138,7 @@ fn draw_backlinks_dialog(f: &mut Frame, app: &App) {
             chunks[0],
         );
     } else {
-        let items: Vec<ListItem> = app.backlinks_cache
+        let items: Vec<ListItem> = app.links.incoming
             .iter()
             .map(|(_, title)| {
                 ListItem::new(Line::from(vec![
@@ -2153,13 +2153,13 @@ fn draw_backlinks_dialog(f: &mut Frame, app: &App) {
             .highlight_symbol("▶ ");
         let mut list_state = ListState::default();
         // Only show a highlighted row in the section that has focus.
-        list_state.select(incoming_focused.then_some(app.backlinks_selected));
+        list_state.select(incoming_focused.then_some(app.links.incoming_selected));
         f.render_stateful_widget(list, chunks[0], &mut list_state);
     }
 
     // ── Outgoing: notes this one links to (broken links flagged) ──
-    if !app.outgoing_links_cache.is_empty() {
-        let items: Vec<ListItem> = app.outgoing_links_cache
+    if !app.links.outgoing.is_empty() {
+        let items: Vec<ListItem> = app.links.outgoing
             .iter()
             .map(|(target_id, title)| {
                 if target_id.is_some() {
@@ -2178,18 +2178,18 @@ fn draw_backlinks_dialog(f: &mut Frame, app: &App) {
             .collect();
         let out_block = Block::default()
             .borders(Borders::ALL)
-            .title(format!("Links to ({})", app.outgoing_links_cache.len()))
+            .title(format!("Links to ({})", app.links.outgoing.len()))
             .border_style(border_for(outgoing_focused));
         let list = List::new(items)
             .block(out_block)
             .highlight_style(TokyoNightTheme::selected())
             .highlight_symbol("▶ ");
         let mut list_state = ListState::default();
-        list_state.select(outgoing_focused.then_some(app.outgoing_selected));
+        list_state.select(outgoing_focused.then_some(app.links.outgoing_selected));
         f.render_stateful_widget(list, chunks[1], &mut list_state);
     }
 
-    let hint = if app.outgoing_links_cache.is_empty() || app.backlinks_cache.is_empty() {
+    let hint = if app.links.outgoing.is_empty() || app.links.incoming.is_empty() {
         "↑↓ / j/k: Navigate  Enter: Open  Esc/q: Close"
     } else {
         "↑↓ / j/k: Navigate  Tab: Switch section  Enter: Open  Esc/q: Close"
@@ -2295,7 +2295,7 @@ fn draw_template_picker_dialog(f: &mut Frame, app: &App) {
 }
 
 fn draw_spell_suggest_dialog(f: &mut Frame, app: &App) {
-    let (row, col, wlen) = app.spell_word_range;
+    let (row, col, wlen) = app.spell.word_range;
     let word = app.editor_content
         .lines()
         .nth(row)
@@ -2314,7 +2314,7 @@ fn draw_spell_suggest_dialog(f: &mut Frame, app: &App) {
 
     let mut content: Vec<Line> = Vec::new();
 
-    if app.spell_suggestions.is_empty() {
+    if app.spell.suggestions.is_empty() {
         content.push(Line::from(""));
         content.push(Line::from(Span::styled(
             "  No suggestions found.",
@@ -2326,8 +2326,8 @@ fn draw_spell_suggest_dialog(f: &mut Frame, app: &App) {
             Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD),
         )));
         content.push(Line::from(""));
-        for (i, sug) in app.spell_suggestions.iter().enumerate() {
-            let is_sel = i == app.spell_suggestions_selected;
+        for (i, sug) in app.spell.suggestions.iter().enumerate() {
+            let is_sel = i == app.spell.suggestions_selected;
             let prefix = if is_sel { "> " } else { "  " };
             let style = if is_sel {
                 Style::default().fg(TokyoNightTheme::BG).bg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)
