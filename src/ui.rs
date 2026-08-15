@@ -1331,10 +1331,6 @@ fn draw_replace_dialog(f: &mut Frame, app: &App) {
 }
 
 
-/// The folder tree, floating. Deliberately the same renderer as the sidebar
-/// rather than a second tree widget: one tree, one set of behaviours, and it
-/// keeps working when the sidebar is not on screen.
-
 /// Paint the block cursor into the text itself instead of overlaying it at a
 /// computed screen position.
 ///
@@ -1387,6 +1383,9 @@ fn paint_cursor_in_line(line: &mut Line<'_>, col: usize, cursor_style: Style) {
     line.spans = out;
 }
 
+/// The folder tree, floating. Deliberately the same renderer as the sidebar
+/// rather than a second tree widget: one tree, one set of behaviours, and it
+/// keeps working when the sidebar is not on screen.
 fn draw_explorer_dialog(f: &mut Frame, app: &mut App) {
     let area = centered_rect(52, 74, f.area());
     f.render_widget(Clear, area);
