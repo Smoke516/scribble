@@ -49,6 +49,8 @@ pub enum AppMode {
     TemplatePicker,
     SpellSuggest,
     Outline,
+    /// The folder tree as an overlay, for when the sidebar is not on screen.
+    Explorer,
 }
 
 /// Which section of the links panel keyboard navigation currently acts on.
@@ -258,6 +260,31 @@ pub struct RecentEntry {
     pub age: String,
 }
 
+/// What activating a landing-page row does.
+///
+/// The page returns intent rather than performing it, so the row and the key
+/// that does the same thing share one code path in the dispatcher instead of
+/// drifting apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WelcomeAction {
+    OpenNote(Uuid),
+    DailyNote,
+    NewNote,
+    Search,
+    QuickJump,
+    Explorer,
+    Help,
+}
+
+/// One selectable row of the landing page.
+#[derive(Debug, Clone)]
+pub struct MenuItem {
+    pub label: String,
+    pub detail: String,
+    pub key: String,
+    pub action: WelcomeAction,
+}
+
 /// Everything the landing page shows.
 ///
 /// Computed rather than stored: it is read once per frame from state that is
@@ -265,8 +292,10 @@ pub struct RecentEntry {
 #[derive(Debug, Default)]
 pub struct Dashboard {
     pub recent: Vec<RecentEntry>,
-    pub today_title: String,
-    pub today_exists: bool,
+    /// Every selectable row, recents first, then the fixed actions.
+    pub menu: Vec<MenuItem>,
+    /// Where the recents end and the actions begin, for the separating gap.
+    pub recent_count: usize,
     pub open_tasks: usize,
     pub notes_with_tasks: usize,
     pub note_count: usize,
@@ -385,6 +414,8 @@ pub struct App {
     pub config: Config,
     /// Vault root actually in use, for the landing page. None in JSON mode.
     pub vault_path: Option<std::path::PathBuf>,
+    /// Highlighted row of the landing page menu.
+    pub welcome_selected: usize,
     pub theme_browser_selected: usize,
     
     // Help dialog
@@ -534,6 +565,7 @@ impl App {
             theme_manager: ThemeManager::new(&config.ui.theme),
             config: config.clone(),
             vault_path: None,
+            welcome_selected: 0,
             theme_browser_selected: 0,
             
             // Help dialog
@@ -937,7 +969,7 @@ impl App {
 
         let recent = by_recency
             .iter()
-            .take(5)
+            .take(8)
             .map(|n| RecentEntry {
                 id: n.id,
                 title: n.title.clone(),
@@ -970,10 +1002,48 @@ impl App {
             }
         }
 
+        let recent: Vec<RecentEntry> = recent;
+        let mut menu: Vec<MenuItem> = recent
+            .iter()
+            .enumerate()
+            .map(|(i, e)| MenuItem {
+                label: e.title.clone(),
+                detail: if e.folder.is_empty() {
+                    e.age.clone()
+                } else {
+                    format!("{} · {}", e.folder, e.age)
+                },
+                key: format!("{}", i + 1),
+                action: WelcomeAction::OpenNote(e.id),
+            })
+            .collect();
+        let recent_count = menu.len();
+
+        let today_detail = if today_exists {
+            format!("{} · open", today_title)
+        } else {
+            format!("{} · new", today_title)
+        };
+        for (label, detail, key, action) in [
+            ("Today's daily note", today_detail.as_str(), "F4", WelcomeAction::DailyNote),
+            ("Browse the vault", "", "e", WelcomeAction::Explorer),
+            ("New note", "", "n", WelcomeAction::NewNote),
+            ("Search all notes", "", "/", WelcomeAction::Search),
+            ("Jump to note", "", "Ctrl+J", WelcomeAction::QuickJump),
+            ("Help", "", "?", WelcomeAction::Help),
+        ] {
+            menu.push(MenuItem {
+                label: label.to_string(),
+                detail: detail.to_string(),
+                key: key.to_string(),
+                action,
+            });
+        }
+
         Dashboard {
+            menu,
+            recent_count,
             recent,
-            today_title,
-            today_exists,
             open_tasks,
             notes_with_tasks,
             note_count: self.notebook.notes.len(),
@@ -983,6 +1053,25 @@ impl App {
                 p.file_name().map(|n| n.to_string_lossy().to_string())
             }),
         }
+    }
+
+    /// Move the landing-page highlight, clamped rather than wrapped: running off
+    /// the end of a short list and silently landing back at the top is
+    /// disorienting on a page you are only glancing at.
+    pub fn welcome_move(&mut self, delta: isize) {
+        let len = self.dashboard().menu.len();
+        if len == 0 {
+            self.welcome_selected = 0;
+            return;
+        }
+        let next = self.welcome_selected as isize + delta;
+        self.welcome_selected = next.clamp(0, len as isize - 1) as usize;
+    }
+
+    /// What the highlighted row would do. The dispatcher performs it, so a row
+    /// and its shortcut key cannot diverge.
+    pub fn welcome_action_at_cursor(&self) -> Option<WelcomeAction> {
+        self.dashboard().menu.get(self.welcome_selected).map(|m| m.action)
     }
 
     pub fn set_welcome_message(&mut self) {
@@ -2089,16 +2178,17 @@ mod dashboard_tests {
         n
     }
 
-    /// The list answers "what was I doing", so it is newest-first and capped at
-    /// five however large the vault is.
+    /// The list answers "what was I doing", so it is newest-first and capped
+    /// however large the vault is.
     #[test]
-    fn recent_list_is_newest_first_and_capped_at_five() {
+    fn recent_list_is_newest_first_and_capped() {
         let mut app = empty_app();
-        for (i, title) in ["oldest", "e", "d", "c", "b", "newest"].iter().enumerate() {
-            app.notebook.add_note(note_at(title, (6 - i as i64) * 10, None));
+        let titles = ["oldest", "h", "g", "f", "e", "d", "c", "b", "newest"];
+        for (i, title) in titles.iter().enumerate() {
+            app.notebook.add_note(note_at(title, (titles.len() - i) as i64 * 10, None));
         }
         let d = app.dashboard();
-        assert_eq!(d.recent.len(), 5, "capped at five");
+        assert_eq!(d.recent.len(), 8, "capped at eight");
         assert_eq!(d.recent[0].title, "newest");
         assert!(
             !d.recent.iter().any(|e| e.title == "oldest"),
@@ -2155,6 +2245,64 @@ mod dashboard_tests {
         let d = empty_app().dashboard();
         assert!(d.recent.is_empty());
         assert_eq!(d.open_tasks, 0);
-        assert!(!d.today_exists);
+        assert_eq!(d.recent_count, 0, "no recents means the menu is actions only");
+        assert!(
+            d.menu.iter().any(|m| m.action == WelcomeAction::DailyNote),
+            "the daily-note action is offered even in an empty vault"
+        );
+    }
+
+    /// The menu is recents then actions, with recent_count marking the seam the
+    /// renderer puts a gap at.
+    #[test]
+    fn menu_is_recents_then_actions() {
+        let mut app = empty_app();
+        app.notebook.add_note(note_at("Alpha", 5, None));
+        app.notebook.add_note(note_at("Beta", 9, None));
+        let d = app.dashboard();
+
+        assert_eq!(d.recent_count, 2);
+        assert!(matches!(d.menu[0].action, WelcomeAction::OpenNote(_)));
+        assert!(matches!(d.menu[1].action, WelcomeAction::OpenNote(_)));
+        assert!(
+            d.menu[d.recent_count..]
+                .iter()
+                .all(|m| !matches!(m.action, WelcomeAction::OpenNote(_))),
+            "everything after the seam is a fixed action"
+        );
+        assert_eq!(d.menu[0].key, "1", "recents keep their digit shortcut");
+    }
+
+    /// Clamped, not wrapped: silently jumping from the last row back to the first
+    /// is disorienting on a page you only glance at.
+    #[test]
+    fn welcome_selection_clamps_at_both_ends() {
+        let mut app = empty_app();
+        app.notebook.add_note(note_at("Alpha", 5, None));
+        let last = app.dashboard().menu.len() - 1;
+
+        app.welcome_move(-1);
+        assert_eq!(app.welcome_selected, 0, "cannot go above the first row");
+
+        for _ in 0..50 {
+            app.welcome_move(1);
+        }
+        assert_eq!(app.welcome_selected, last, "cannot go past the last row");
+    }
+
+    /// The highlighted row and its shortcut key must resolve to the same thing.
+    #[test]
+    fn activating_a_recent_row_targets_that_note() {
+        let mut app = empty_app();
+        app.notebook.add_note(note_at("Older", 90, None));
+        let newest = note_at("Newest", 1, None);
+        let newest_id = newest.id;
+        app.notebook.add_note(newest);
+
+        app.welcome_selected = 0;
+        assert_eq!(
+            app.welcome_action_at_cursor(),
+            Some(WelcomeAction::OpenNote(newest_id))
+        );
     }
 }

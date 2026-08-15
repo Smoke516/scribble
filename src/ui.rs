@@ -34,12 +34,28 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // Draw breadcrumb
     draw_breadcrumb(f, app, chunks[0]);
-    
-    // Draw folder tree with recent files if enabled
-    draw_folder_tree_with_recent(f, app, main_chunks[0]);
-    
-    // Draw editor
-    draw_editor(f, app, main_chunks[1]);
+
+    if app.current_note.is_none() {
+        // Landing page takes the whole width. The sidebar and the landing page
+        // are both "notes you could open", and showing them side by side puts a
+        // worse-ordered list next to a better one. Press `e` for the tree as an
+        // overlay; opening a note restores the split.
+        draw_welcome_screen(
+            f,
+            app,
+            chunks[1],
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(TokyoNightTheme::border_inactive())
+                .style(TokyoNightTheme::normal()),
+        );
+    } else {
+        // Draw folder tree with recent files if enabled
+        draw_folder_tree_with_recent(f, app, main_chunks[0]);
+
+        // Draw editor
+        draw_editor(f, app, main_chunks[1]);
+    }
     
     
     // Draw status bar
@@ -54,6 +70,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         AppMode::InputNote => draw_input_note_dialog(f, app),
         AppMode::InputFolder => draw_input_folder_dialog(f, app),
         AppMode::Help => draw_help_dialog(f, app),
+        AppMode::Explorer => draw_explorer_dialog(f, app),
         AppMode::DeleteConfirm => draw_delete_confirm_dialog(f, app),
         AppMode::QuickJump => draw_quick_jump_dialog(f, app),
         AppMode::RecentFiles => draw_recent_files_dialog(f, app),
@@ -636,17 +653,34 @@ fn draw_welcome_screen(f: &mut Frame, app: &App, area: Rect, block: Block) {
     // ── Wordmark ────────────────────────────────────────────────────────────
     blank(&mut lines);
     blank(&mut lines);
-    if inner >= WORDMARK_WIDTH + 2 {
-        let logo_left = left + (col.saturating_sub(WORDMARK_WIDTH)) / 2;
+    // Double the mark when the pane is wide and tall enough to carry it. At full
+    // screen the 1x mark is lost in the width; at 1x it still fits a split pane.
+    let scale: usize = if inner >= WORDMARK_WIDTH * 2 + 8 && area.height >= 34 { 2 } else { 1 };
+    let mark_width = WORDMARK_WIDTH * scale;
+
+    if inner >= mark_width + 2 {
+        // Centred on the pane, not on the menu column: the mark is allowed to be
+        // wider than the menu without dragging the key column out to the margin.
+        let logo_left = (inner.saturating_sub(mark_width)) / 2;
         for row in 0..WORDMARK_ROWS {
-            let mut s = String::new();
+            let mut text = String::new();
             for (i, glyph) in WORDMARK.iter().enumerate() {
                 if i > 0 {
-                    s.push(' ');
+                    text.push_str(&" ".repeat(scale));
                 }
-                s.push_str(glyph[row]);
+                for ch in glyph[row].chars() {
+                    for _ in 0..scale {
+                        text.push(ch);
+                    }
+                }
             }
-            lines.push(Line::from(vec![pad(logo_left), Span::styled(s, mark)]));
+            // Repeating the row scales the stroke vertically to match.
+            for _ in 0..scale {
+                lines.push(Line::from(vec![
+                    pad(logo_left),
+                    Span::styled(text.clone(), mark),
+                ]));
+            }
         }
     } else {
         // Too narrow for the block letters; fall back rather than wrap them.
@@ -668,7 +702,7 @@ fn draw_welcome_screen(f: &mut Frame, app: &App, area: Rect, block: Block) {
     blank(&mut lines);
 
     // A menu row: label on the left, dim detail after it, key hard right.
-    let row = |lines: &mut Vec<Line>, label: &str, detail: &str, key: &str| {
+    let row = |lines: &mut Vec<Line>, label: &str, detail: &str, key: &str, selected: bool| {
         const INDENT: usize = 4;
         const GUTTER: usize = 2;
         let keylen = key.chars().count();
@@ -701,9 +735,17 @@ fn draw_welcome_screen(f: &mut Frame, app: &App, area: Rect, block: Block) {
         };
 
         let gap = col.saturating_sub(INDENT + label_w + GUTTER + detail_w + keylen);
+        // The caret is the only selection marker: a full-width highlight bar on a
+        // page this sparse reads as an error state rather than a cursor.
+        let (marker, label_style) = if selected {
+            ("▸ ", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD))
+        } else {
+            ("  ", body)
+        };
         lines.push(Line::from(vec![
-            pad(left + INDENT),
-            Span::styled(format!("{:<w$}", clip(label, label_w), w = label_w), body),
+            pad(left + INDENT - 2),
+            Span::styled(marker, Style::default().fg(TokyoNightTheme::CYAN)),
+            Span::styled(format!("{:<w$}", clip(label, label_w), w = label_w), label_style),
             pad(GUTTER),
             Span::styled(format!("{:<w$}", clip(detail, detail_w), w = detail_w), dim),
             pad(gap),
@@ -711,33 +753,26 @@ fn draw_welcome_screen(f: &mut Frame, app: &App, area: Rect, block: Block) {
         ]));
     };
 
-    // ── Where you left off ──────────────────────────────────────────────────
-    if d.recent.is_empty() {
-        row(&mut lines, "Write your first note", "", "n");
-        row(&mut lines, "Start today's daily note", "", "F4");
-        row(&mut lines, "Help", "", "?");
+    // ── Menu ────────────────────────────────────────────────────────────────
+    // Recents and actions are one list so j/k runs the whole thing, with a gap
+    // marking where "what I was doing" ends and "what I could do" begins.
+    if d.menu.is_empty() {
+        row(&mut lines, "Write your first note", "", "n", false);
+        row(&mut lines, "Start today's daily note", "", "F4", false);
+        row(&mut lines, "Help", "", "?", false);
     } else {
-        for (i, e) in d.recent.iter().enumerate() {
-            let detail = if e.folder.is_empty() {
-                e.age.clone()
-            } else {
-                format!("{} · {}", e.folder, e.age)
-            };
-            row(&mut lines, &e.title, &detail, &format!("{}", i + 1));
+        for (i, item) in d.menu.iter().enumerate() {
+            if i == d.recent_count && d.recent_count > 0 {
+                blank(&mut lines);
+            }
+            row(
+                &mut lines,
+                &item.label,
+                &item.detail,
+                &item.key,
+                i == app.welcome_selected,
+            );
         }
-        blank(&mut lines);
-
-        // ── Actions ─────────────────────────────────────────────────────────
-        let today = if d.today_exists {
-            format!("{} · open", d.today_title)
-        } else {
-            format!("{} · new", d.today_title)
-        };
-        row(&mut lines, "Today's daily note", &today, "F4");
-        row(&mut lines, "New note", "", "n");
-        row(&mut lines, "Search all notes", "", "/");
-        row(&mut lines, "Jump to note", "", "Ctrl+J");
-        row(&mut lines, "Help", "", "?");
     }
 
     blank(&mut lines);
@@ -809,6 +844,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::TemplatePicker => "TEMPLATE",
         AppMode::SpellSuggest => "SPELL",
         AppMode::Outline => "OUTLINE",
+        AppMode::Explorer => "EXPLORER",
     };
 
     let pane_text = match app.focused_pane {
@@ -818,6 +854,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let mode_style = match app.mode {
+        AppMode::Explorer => app.theme_manager.mode_command(),
         AppMode::Normal => app.theme_manager.mode_normal(),
         AppMode::Insert => app.theme_manager.mode_insert(),
         AppMode::Search | AppMode::SearchAdvanced | AppMode::SearchReplace => app.theme_manager.mode_search(),
@@ -1295,6 +1332,16 @@ fn draw_replace_dialog(f: &mut Frame, app: &App) {
         .block(block);
 
     f.render_widget(input, area);
+}
+
+
+/// The folder tree, floating. Deliberately the same renderer as the sidebar
+/// rather than a second tree widget: one tree, one set of behaviours, and it
+/// keeps working when the sidebar is not on screen.
+fn draw_explorer_dialog(f: &mut Frame, app: &mut App) {
+    let area = centered_rect(52, 74, f.area());
+    f.render_widget(Clear, area);
+    draw_folder_tree(f, app, area);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

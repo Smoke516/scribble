@@ -1,4 +1,4 @@
-use crate::app::{App, AppMode, FocusedPane, TreeItemType};
+use crate::app::{App, AppMode, FocusedPane, TreeItemType, WelcomeAction};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, Event};
 
 pub fn handle_event(app: &mut App, event: Event) -> Result<(), Box<dyn std::error::Error>> {
@@ -28,6 +28,7 @@ pub fn handle_event(app: &mut App, event: Event) -> Result<(), Box<dyn std::erro
         AppMode::TemplatePicker => handle_template_picker_mode(app, key),
         AppMode::SpellSuggest => handle_spell_suggest_mode(app, key),
         AppMode::Outline => handle_outline_mode(app, key),
+        AppMode::Explorer => handle_explorer_mode(app, key),
         }
     }
     Ok(())
@@ -153,6 +154,10 @@ enum Action {
     ScrollPageDown,
     /// Open the Nth entry of the landing page's recent list (1-based).
     OpenRecent(u8),
+    WelcomeUp,
+    WelcomeDown,
+    WelcomeActivate,
+    ShowExplorer,
     // Meta
     CommandMode,
     Help,
@@ -264,12 +269,23 @@ const NORMAL_BINDINGS: &[Binding] = &[
     k(KeyCode::PageUp, Ctx::Any, Action::ScrollPageUp, "Page up"),
     k(KeyCode::PageDown, Ctx::Any, Action::ScrollPageDown, "Page down"),
 
+    // --- landing page: it owns the whole screen, so it owns the arrow keys ---
+    k(KeyCode::Char('j'), Ctx::Welcome, Action::WelcomeDown, "Next item"),
+    k(KeyCode::Down, Ctx::Welcome, Action::WelcomeDown, "Next item"),
+    k(KeyCode::Char('k'), Ctx::Welcome, Action::WelcomeUp, "Previous item"),
+    k(KeyCode::Up, Ctx::Welcome, Action::WelcomeUp, "Previous item"),
+    k(KeyCode::Enter, Ctx::Welcome, Action::WelcomeActivate, "Activate item"),
+    k(KeyCode::Char('e'), Ctx::Welcome, Action::ShowExplorer, "Browse the vault"),
+
     // --- landing page: digits jump straight into the recent list ---
     k(KeyCode::Char('1'), Ctx::Welcome, Action::OpenRecent(1), "Open 1st recent note"),
     k(KeyCode::Char('2'), Ctx::Welcome, Action::OpenRecent(2), "Open 2nd recent note"),
     k(KeyCode::Char('3'), Ctx::Welcome, Action::OpenRecent(3), "Open 3rd recent note"),
     k(KeyCode::Char('4'), Ctx::Welcome, Action::OpenRecent(4), "Open 4th recent note"),
     k(KeyCode::Char('5'), Ctx::Welcome, Action::OpenRecent(5), "Open 5th recent note"),
+    k(KeyCode::Char('6'), Ctx::Welcome, Action::OpenRecent(6), "Open 6th recent note"),
+    k(KeyCode::Char('7'), Ctx::Welcome, Action::OpenRecent(7), "Open 7th recent note"),
+    k(KeyCode::Char('8'), Ctx::Welcome, Action::OpenRecent(8), "Open 8th recent note"),
 
     // --- meta ---
     k(KeyCode::Char(':'), Ctx::Any, Action::CommandMode, "Command"),
@@ -660,6 +676,32 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
             }
         }
 
+        Action::WelcomeUp => app.welcome_move(-1),
+        Action::WelcomeDown => app.welcome_move(1),
+        Action::WelcomeActivate => {
+            // The row hands back intent; the same arms below perform it, so a row
+            // and its shortcut key can never drift apart.
+            if let Some(w) = app.welcome_action_at_cursor() {
+                let follow = match w {
+                    WelcomeAction::OpenNote(id) => {
+                        app.select_note(id);
+                        app.focused_pane = FocusedPane::Editor;
+                        return;
+                    }
+                    WelcomeAction::DailyNote => Action::DailyNote,
+                    WelcomeAction::NewNote => Action::NewNoteOrSearchNext,
+                    WelcomeAction::Search => Action::SearchInNoteOrGlobal,
+                    WelcomeAction::QuickJump => Action::QuickJump,
+                    WelcomeAction::Explorer => Action::ShowExplorer,
+                    WelcomeAction::Help => Action::Help,
+                };
+                run_action(app, follow, false);
+            }
+        }
+        Action::ShowExplorer => {
+            app.mode = AppMode::Explorer;
+            app.focused_pane = FocusedPane::Folders;
+        }
         Action::OpenRecent(n) => {
             if let Some(entry) = app.dashboard().recent.get(n as usize - 1) {
                 let id = entry.id;
@@ -1912,6 +1954,36 @@ fn handle_rename_mode(app: &mut App, key: KeyEvent) {
     }
 }
 
+
+/// The folder tree as an overlay. Navigation mirrors the sidebar exactly — this
+/// is the same tree, just floating — so muscle memory carries over.
+fn handle_explorer_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('e') | KeyCode::Char('q') => {
+            app.mode = AppMode::Normal;
+        }
+        KeyCode::Char('j') | KeyCode::Down => app.navigate_down(),
+        KeyCode::Char('k') | KeyCode::Up => app.navigate_up(),
+        KeyCode::Char('g') => app.navigate_to_top(),
+        KeyCode::Char('G') => app.navigate_to_bottom(),
+        KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
+            if let Some(item) = app.get_selected_item() {
+                match item.item_type {
+                    TreeItemType::Note => {
+                        let id = item.id;
+                        app.select_note(id);
+                        app.mode = AppMode::Normal;
+                        app.focused_pane = FocusedPane::Editor;
+                    }
+                    // Folders expand in place; only a note dismisses the overlay.
+                    TreeItemType::Folder => app.toggle_folder_expansion(),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod dispatch_tests {
     use super::*;
@@ -2054,6 +2126,24 @@ mod dispatch_tests {
         assert_eq!(lookup(&two, false, true), Some(Action::OpenRecent(2)));
         assert_eq!(lookup(&two, false, false), None, "inert in the tree");
         assert_eq!(lookup(&two, true, false), None, "inert with the editor focused");
+    }
+
+    /// The landing page owns j/k/Enter while it is up, and gives them back the
+    /// moment a note is open — otherwise Enter in the tree would stop working.
+    #[test]
+    fn landing_page_claims_navigation_only_while_it_is_up() {
+        let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
+
+        assert_eq!(lookup(&j, false, true), Some(Action::WelcomeDown));
+        assert_eq!(lookup(&enter, false, true), Some(Action::WelcomeActivate));
+        assert_eq!(lookup(&e, false, true), Some(Action::ShowExplorer));
+
+        // With a note open the same keys revert to their normal meanings.
+        assert_eq!(lookup(&j, false, false), Some(Action::CursorDown));
+        assert_eq!(lookup(&enter, false, false), Some(Action::ActivateSelected));
+        assert_eq!(lookup(&e, false, false), Some(Action::ExternalEditor));
     }
 
     /// A binding with no label cannot be documented, so refuse to add one.
