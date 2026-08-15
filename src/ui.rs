@@ -574,174 +574,211 @@ fn draw_preview_pane(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// Block-letter wordmark, five rows tall. One entry per letter of "scribble".
+///
+/// Hand-drawn rather than pulled from a figlet font so the glyphs share a
+/// consistent 5x5 cell and the whole mark stays a predictable width — a font
+/// with variable-width glyphs would make centring drift between letters.
+const WORDMARK: [[&str; 5]; 8] = [
+    // s
+    ["█████", "█    ", "█████", "    █", "█████"],
+    // c
+    ["█████", "█    ", "█    ", "█    ", "█████"],
+    // r
+    ["█████", "█   █", "█████", "█  █ ", "█   █"],
+    // i
+    ["█████", "  █  ", "  █  ", "  █  ", "█████"],
+    // b
+    ["█    ", "█    ", "█████", "█   █", "█████"],
+    // b
+    ["█    ", "█    ", "█████", "█   █", "█████"],
+    // l
+    ["█    ", "█    ", "█    ", "█    ", "█████"],
+    // e
+    ["█████", "█    ", "█████", "█    ", "█████"],
+];
+
+const WORDMARK_ROWS: usize = 5;
+/// 8 glyphs of 5 columns, single-column gutter between them.
+const WORDMARK_WIDTH: usize = 8 * 5 + 7;
+
 /// The landing page.
 ///
-/// This answers "what was I doing, and what should I do next" — recency, today's
-/// note, outstanding tasks — rather than listing what the app can do. The feature
+/// Answers "what was I doing, and what should I do next" — recency, today's
+/// note, outstanding work — rather than listing what the app can do. The feature
 /// tour that used to live here duplicated `?`, and a landing page that is never
 /// quiet is one you stop reading.
+///
+/// Laid out as a single centred column: the wordmark is centred over it, and
+/// every row below shares a left edge with its key right-aligned against the
+/// same right edge, so the eye can run straight down either column.
 fn draw_welcome_screen(f: &mut Frame, app: &App, area: Rect, block: Block) {
     let d = app.dashboard();
 
-    // One measured column, centred as a block so every row shares a left edge.
-    // Centring each line independently would make the list ragged.
-    const W: u16 = 66;
-    let pad = if area.width > W { (area.width - W) / 2 } else { 1 } as usize;
-    let indent = |n: usize| Span::raw(" ".repeat(pad + n));
+    // Inner width, minus the block's borders.
+    let inner = area.width.saturating_sub(2) as usize;
+    // Wide enough for label + detail + key without either being clipped, but
+    // never wider than the pane. Falls back gracefully in a narrow split.
+    let col = inner.saturating_sub(8).clamp(20, 76).min(inner.saturating_sub(2));
+    let left = (inner.saturating_sub(col)) / 2;
 
     let dim = Style::default().fg(TokyoNightTheme::COMMENT);
     let body = Style::default().fg(TokyoNightTheme::FG_DARK);
-    let heading = Style::default()
-        .fg(TokyoNightTheme::PURPLE)
-        .add_modifier(Modifier::BOLD);
     let keycap = Style::default()
         .fg(TokyoNightTheme::CYAN)
         .add_modifier(Modifier::BOLD);
+    let mark = Style::default().fg(TokyoNightTheme::BLUE);
 
     let mut lines: Vec<Line> = Vec::new();
+    let pad = |n: usize| Span::raw(" ".repeat(n));
     let blank = |v: &mut Vec<Line>| v.push(Line::from(""));
 
     // ── Wordmark ────────────────────────────────────────────────────────────
-    // Kept small on purpose: Neovim's dashboard can afford a huge logo because
-    // it has no content to show. This screen does.
     blank(&mut lines);
+    blank(&mut lines);
+    if inner >= WORDMARK_WIDTH + 2 {
+        let logo_left = left + (col.saturating_sub(WORDMARK_WIDTH)) / 2;
+        for row in 0..WORDMARK_ROWS {
+            let mut s = String::new();
+            for (i, glyph) in WORDMARK.iter().enumerate() {
+                if i > 0 {
+                    s.push(' ');
+                }
+                s.push_str(glyph[row]);
+            }
+            lines.push(Line::from(vec![pad(logo_left), Span::styled(s, mark)]));
+        }
+    } else {
+        // Too narrow for the block letters; fall back rather than wrap them.
+        let text = "s c r i b b l e";
+        let l = left + (col.saturating_sub(text.len())) / 2;
+        lines.push(Line::from(vec![
+            pad(l),
+            Span::styled(text, mark.add_modifier(Modifier::BOLD)),
+        ]));
+    }
+
+    // Version, right-aligned under the mark like the reference layout.
+    let ver = format!("v{}", VERSION);
     lines.push(Line::from(vec![
-        indent(0),
-        Span::styled(
-            "s c r i b b l e",
-            Style::default()
-                .fg(TokyoNightTheme::CYAN)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-    lines.push(Line::from(vec![
-        indent(0),
-        Span::styled("───────────────", Style::default().fg(TokyoNightTheme::BLUE)),
-        Span::styled(format!("  v{}", VERSION), dim),
+        pad(left + col.saturating_sub(ver.len())),
+        Span::styled(ver, dim),
     ]));
     blank(&mut lines);
+    blank(&mut lines);
+
+    // A menu row: label on the left, dim detail after it, key hard right.
+    let row = |lines: &mut Vec<Line>, label: &str, detail: &str, key: &str| {
+        const INDENT: usize = 4;
+        const GUTTER: usize = 2;
+        let keylen = key.chars().count();
+
+        // Label takes a fixed share; detail takes what is left after the key,
+        // so the key column stays flush right whatever the labels do.
+        let label_w = 28.min(col.saturating_sub(keylen + INDENT + GUTTER + 4));
+        // A detail column too narrow to hold anything readable is worse than
+        // no column at all — give the space back to the label instead.
+        let mut detail_w = col
+            .saturating_sub(INDENT + label_w + GUTTER + keylen + 2)
+            .min(24);
+        if detail_w < 10 {
+            detail_w = 0;
+        }
+        let label_w = if detail_w == 0 {
+            col.saturating_sub(INDENT + keylen + GUTTER + 2)
+        } else {
+            label_w
+        };
+
+        let clip = |t: &str, w: usize| -> String {
+            if w == 0 {
+                String::new()
+            } else if t.chars().count() > w {
+                format!("{}…", t.chars().take(w - 1).collect::<String>())
+            } else {
+                t.to_string()
+            }
+        };
+
+        let gap = col.saturating_sub(INDENT + label_w + GUTTER + detail_w + keylen);
+        lines.push(Line::from(vec![
+            pad(left + INDENT),
+            Span::styled(format!("{:<w$}", clip(label, label_w), w = label_w), body),
+            pad(GUTTER),
+            Span::styled(format!("{:<w$}", clip(detail, detail_w), w = detail_w), dim),
+            pad(gap),
+            Span::styled(key.to_string(), keycap),
+        ]));
+    };
 
     // ── Where you left off ──────────────────────────────────────────────────
     if d.recent.is_empty() {
-        lines.push(Line::from(vec![
-            indent(0),
-            Span::styled("An empty vault.", heading),
-        ]));
-        blank(&mut lines);
-        lines.push(Line::from(vec![
-            indent(2),
-            Span::styled("n", keycap),
-            Span::styled("   write your first note", body),
-        ]));
-        lines.push(Line::from(vec![
-            indent(2),
-            Span::styled("F4", keycap),
-            Span::styled("  start today's daily note", body),
-        ]));
+        row(&mut lines, "Write your first note", "", "n");
+        row(&mut lines, "Start today's daily note", "", "F4");
+        row(&mut lines, "Help", "", "?");
     } else {
-        lines.push(Line::from(vec![
-            indent(0),
-            Span::styled("Where you left off", heading),
-        ]));
-        blank(&mut lines);
         for (i, e) in d.recent.iter().enumerate() {
-            // Truncate the title, never the columns after it.
-            let title = if e.title.chars().count() > 30 {
-                format!("{}…", e.title.chars().take(29).collect::<String>())
+            let detail = if e.folder.is_empty() {
+                e.age.clone()
             } else {
-                e.title.clone()
+                format!("{} · {}", e.folder, e.age)
             };
-            let folder = if e.folder.is_empty() { "—".to_string() } else { e.folder.clone() };
-            let folder = if folder.chars().count() > 16 {
-                format!("{}…", folder.chars().take(15).collect::<String>())
-            } else {
-                folder
-            };
-            lines.push(Line::from(vec![
-                indent(2),
-                Span::styled(format!("{}", i + 1), keycap),
-                Span::styled("  ", body),
-                Span::styled(format!("{:<31}", title), Style::default().fg(TokyoNightTheme::FG_DARK)),
-                Span::styled(format!("{:<17}", folder), Style::default().fg(TokyoNightTheme::BLUE)),
-                Span::styled(&e.age, dim),
-            ]));
+            row(&mut lines, &e.title, &detail, &format!("{}", i + 1));
         }
-    }
-    blank(&mut lines);
-
-    // ── Today ───────────────────────────────────────────────────────────────
-    lines.push(Line::from(vec![indent(0), Span::styled("Today", heading)]));
-    blank(&mut lines);
-    let (today_mark, today_note) = if d.today_exists {
-        (
-            Style::default().fg(TokyoNightTheme::GREEN),
-            "open".to_string(),
-        )
-    } else {
-        (dim, "not yet written".to_string())
-    };
-    lines.push(Line::from(vec![
-        indent(2),
-        Span::styled("F4", keycap),
-        Span::styled("  ", body),
-        Span::styled(format!("{:<31}", d.today_title), Style::default().fg(TokyoNightTheme::FG_DARK)),
-        Span::styled(today_note, today_mark),
-    ]));
-    blank(&mut lines);
-
-    // ── Outstanding work ────────────────────────────────────────────────────
-    // Only shown when there is any: an always-present "0 open tasks" is noise.
-    if d.open_tasks > 0 {
-        lines.push(Line::from(vec![
-            indent(0),
-            Span::styled("▸ ", Style::default().fg(TokyoNightTheme::ORANGE)),
-            Span::styled(
-                format!(
-                    "{} open task{} across {} note{}",
-                    d.open_tasks,
-                    if d.open_tasks == 1 { "" } else { "s" },
-                    d.notes_with_tasks,
-                    if d.notes_with_tasks == 1 { "" } else { "s" },
-                ),
-                Style::default().fg(TokyoNightTheme::ORANGE),
-            ),
-        ]));
         blank(&mut lines);
+
+        // ── Actions ─────────────────────────────────────────────────────────
+        let today = if d.today_exists {
+            format!("{} · open", d.today_title)
+        } else {
+            format!("{} · new", d.today_title)
+        };
+        row(&mut lines, "Today's daily note", &today, "F4");
+        row(&mut lines, "New note", "", "n");
+        row(&mut lines, "Search all notes", "", "/");
+        row(&mut lines, "Jump to note", "", "Ctrl+J");
+        row(&mut lines, "Help", "", "?");
     }
 
-    // ── Actions ─────────────────────────────────────────────────────────────
-    // Four, not thirty. The full reference is `?`.
-    let actions: &[(&str, &str)] = &[
-        ("n", "New note"),
-        ("/", "Search"),
-        ("Ctrl+J", "Jump"),
-        ("?", "Help"),
-    ];
-    let mut action_line: Vec<Span> = vec![indent(2)];
-    for (i, (k, label)) in actions.iter().enumerate() {
-        if i > 0 {
-            action_line.push(Span::styled("     ", body));
-        }
-        action_line.push(Span::styled(*k, keycap));
-        action_line.push(Span::styled(format!("  {}", label), body));
-    }
-    lines.push(Line::from(action_line));
+    blank(&mut lines);
     blank(&mut lines);
 
     // ── Footer ──────────────────────────────────────────────────────────────
-    let mut footer = format!(
-        "{} note{} · {} folder{} · {} tag{}",
-        d.note_count,
-        if d.note_count == 1 { "" } else { "s" },
-        d.folder_count,
-        if d.folder_count == 1 { "" } else { "s" },
-        d.tag_count,
-        if d.tag_count == 1 { "" } else { "s" },
-    );
-    if let Some(v) = &d.vault_label {
-        footer.push_str(&format!(" · {}", v));
+    // Centred and dim, in the spirit of the reference's plugin-count line.
+    // Outstanding work gets its own accent line — it is the one thing here that
+    // is a prompt rather than a statistic. Hidden entirely when there is none.
+    if d.open_tasks > 0 {
+        let text = format!(
+            "{} open task{} across {} note{}",
+            d.open_tasks,
+            if d.open_tasks == 1 { "" } else { "s" },
+            d.notes_with_tasks,
+            if d.notes_with_tasks == 1 { "" } else { "s" }
+        );
+        let len = text.chars().count() + 2;
+        lines.push(Line::from(vec![
+            pad(left + (col.saturating_sub(len)) / 2),
+            Span::styled("▸ ", Style::default().fg(TokyoNightTheme::ORANGE)),
+            Span::styled(text, Style::default().fg(TokyoNightTheme::ORANGE)),
+        ]));
+        blank(&mut lines);
     }
-    lines.push(Line::from(vec![indent(0), Span::styled(footer, dim)]));
+
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(format!("{} notes", d.note_count));
+    parts.push(format!("{} folders", d.folder_count));
+    if d.tag_count > 0 {
+        parts.push(format!("{} tags", d.tag_count));
+    }
+    if let Some(v) = &d.vault_label {
+        parts.push(v.clone());
+    }
+    let footer = parts.join(" · ");
+    let flen = footer.chars().count();
+    lines.push(Line::from(vec![
+        pad(left + (col.saturating_sub(flen)) / 2),
+        Span::styled(footer, dim),
+    ]));
 
     f.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
 }
