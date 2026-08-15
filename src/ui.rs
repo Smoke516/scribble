@@ -455,6 +455,21 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
             }
         }
 
+        // Block cursor for the non-insert modes, drawn into the text so that soft
+        // wrapping cannot separate it from the line the highlight marks.
+        if app.mode != AppMode::Insert && is_focused && app.current_note.is_some() {
+            let row = app.editor_cursor.0 as usize;
+            if let Some(line) = styled_content.lines.get_mut(row) {
+                paint_cursor_in_line(
+                    line,
+                    app.editor_cursor.1 as usize,
+                    Style::default()
+                        .fg(TokyoNightTheme::BG)
+                        .bg(TokyoNightTheme::CYAN),
+                );
+            }
+        }
+
         let paragraph = Paragraph::new(styled_content)
             .style(TokyoNightTheme::normal())
             .wrap(Wrap { trim: false })
@@ -489,29 +504,6 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
             f.render_widget(Clear, bar_rect);
             f.render_widget(Paragraph::new(Span::styled(hint, Style::default().fg(TokyoNightTheme::COMMENT)))
                 .style(Style::default().bg(TokyoNightTheme::BG_DARK)), bar_rect);
-        }
-
-        // Normal/Visual mode block cursor overlay
-        if app.mode != AppMode::Insert && is_focused && app.current_note.is_some() {
-            let cursor_row = app.editor_cursor.0.saturating_sub(app.editor_scroll);
-            let cursor_col = app.editor_cursor.1;
-            if cursor_row < content_rect.height {
-                let cx = content_rect.x + cursor_col;
-                let cy = content_rect.y + cursor_row;
-                if cx < content_rect.x + content_rect.width {
-                    let lines: Vec<&str> = content.lines().collect();
-                    let cursor_char = lines.get(app.editor_cursor.0 as usize)
-                        .and_then(|l| l.chars().nth(app.editor_cursor.1 as usize))
-                        .unwrap_or(' ');
-                    f.render_widget(
-                        Paragraph::new(Span::styled(
-                            cursor_char.to_string(),
-                            Style::default().fg(TokyoNightTheme::BG).bg(TokyoNightTheme::CYAN),
-                        )),
-                        Rect::new(cx, cy, 1, 1),
-                    );
-                }
-            }
         }
 
         // Show cursor if in insert mode
@@ -1342,6 +1334,59 @@ fn draw_replace_dialog(f: &mut Frame, app: &App) {
 /// The folder tree, floating. Deliberately the same renderer as the sidebar
 /// rather than a second tree widget: one tree, one set of behaviours, and it
 /// keeps working when the sidebar is not on screen.
+
+/// Paint the block cursor into the text itself instead of overlaying it at a
+/// computed screen position.
+///
+/// The editor soft-wraps, so one logical line can occupy several screen rows and
+/// `cursor_row - scroll` is simply not where the character is: the cursor drifted
+/// upward by one row for every wrapped row above it, landing off the very line
+/// the highlight had marked. Styling the character in place hands the positioning
+/// to ratatui's own wrapping — which is why the current-line highlight, done the
+/// same way, was always correct.
+///
+/// Only the span containing the cursor is split, so markdown colouring either
+/// side of it survives.
+fn paint_cursor_in_line(line: &mut Line<'_>, col: usize, cursor_style: Style) {
+    let mut out: Vec<Span> = Vec::new();
+    let mut seen = 0usize;
+    let mut placed = false;
+
+    for span in std::mem::take(&mut line.spans) {
+        let text = span.content.to_string();
+        let len = text.chars().count();
+        if !placed && col >= seen && col < seen + len {
+            let k = col - seen;
+            let before: String = text.chars().take(k).collect();
+            let at: String = text.chars().skip(k).take(1).collect();
+            let after: String = text.chars().skip(k + 1).collect();
+            if !before.is_empty() {
+                out.push(Span::styled(before, span.style));
+            }
+            out.push(Span::styled(at, cursor_style));
+            if !after.is_empty() {
+                out.push(Span::styled(after, span.style));
+            }
+            placed = true;
+        } else {
+            out.push(Span::styled(text, span.style));
+        }
+        seen += len;
+    }
+
+    if !placed {
+        // Past the end of the line: an empty line, or resting on the newline in
+        // Normal mode. Show the cursor on a trailing space.
+        let gap = col.saturating_sub(seen);
+        if gap > 0 {
+            out.push(Span::raw(" ".repeat(gap)));
+        }
+        out.push(Span::styled(" ".to_string(), cursor_style));
+    }
+
+    line.spans = out;
+}
+
 fn draw_explorer_dialog(f: &mut Frame, app: &mut App) {
     let area = centered_rect(52, 74, f.area());
     f.render_widget(Clear, area);
@@ -2542,5 +2587,75 @@ mod preview_tests {
             assert!(w <= width, "preview line {:?} is {} cols, exceeds pane width {}",
                 line.spans.iter().map(|s| s.content.as_ref()).collect::<String>(), w, width);
         }
+    }
+}
+
+#[cfg(test)]
+mod cursor_paint_tests {
+    use super::*;
+
+    fn plain(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn cursor_char(line: &Line) -> Option<String> {
+        line.spans
+            .iter()
+            .find(|s| s.style.bg == Some(TokyoNightTheme::CYAN))
+            .map(|s| s.content.to_string())
+    }
+
+    fn cur() -> Style {
+        Style::default().fg(TokyoNightTheme::BG).bg(TokyoNightTheme::CYAN)
+    }
+
+    #[test]
+    fn marks_the_character_under_the_cursor_without_changing_the_text() {
+        let mut line = Line::from("hello world");
+        paint_cursor_in_line(&mut line, 6, cur());
+        assert_eq!(plain(&line), "hello world", "text must be untouched");
+        assert_eq!(cursor_char(&line).as_deref(), Some("w"));
+    }
+
+    /// Splitting must not flatten the markdown colouring either side of it.
+    #[test]
+    fn surrounding_styles_survive_the_split() {
+        let red = Style::default().fg(TokyoNightTheme::RED);
+        let mut line = Line::from(vec![Span::styled("abcdef", red)]);
+        paint_cursor_in_line(&mut line, 3, cur());
+
+        assert_eq!(plain(&line), "abcdef");
+        assert_eq!(cursor_char(&line).as_deref(), Some("d"));
+        let kept: Vec<&str> = line
+            .spans
+            .iter()
+            .filter(|s| s.style.fg == Some(TokyoNightTheme::RED))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(kept, vec!["abc", "ef"], "colour preserved on both sides");
+    }
+
+    /// Normal mode rests the cursor past the last character on empty lines.
+    #[test]
+    fn empty_line_still_shows_a_cursor() {
+        let mut line = Line::from("");
+        paint_cursor_in_line(&mut line, 0, cur());
+        assert_eq!(cursor_char(&line).as_deref(), Some(" "));
+    }
+
+    #[test]
+    fn cursor_past_end_of_line_pads_out_to_it() {
+        let mut line = Line::from("ab");
+        paint_cursor_in_line(&mut line, 5, cur());
+        assert_eq!(plain(&line), "ab    ", "padded to the cursor column");
+        assert_eq!(cursor_char(&line).as_deref(), Some(" "));
+    }
+
+    #[test]
+    fn cursor_on_the_first_character_works() {
+        let mut line = Line::from("xyz");
+        paint_cursor_in_line(&mut line, 0, cur());
+        assert_eq!(plain(&line), "xyz");
+        assert_eq!(cursor_char(&line).as_deref(), Some("x"));
     }
 }
