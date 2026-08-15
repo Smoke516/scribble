@@ -312,9 +312,43 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
         // Tell app how tall the editor viewport is (used for scroll clamping)
         app.editor_viewport_height = inner_rect.height;
 
+        // Lay the note out once, up front: the gutter, the scroll offset and the
+        // cursor all read from this same layout, which is what stops them
+        // disagreeing about where the wrapped lines fall.
+        let gutter_w: u16 = if app.config.ui.show_line_numbers {
+            if is_split_view { 4 } else { 6 }
+        } else {
+            0
+        };
+        let wrap_width = inner_rect.width.saturating_sub(gutter_w).max(1) as usize;
+        let (screen_rows, line_start) = layout_note(content, wrap_width);
+
+        // editor_scroll is a logical line; the viewport scrolls in screen rows.
+        let top_logical = (app.editor_scroll as usize).min(line_start.len().saturating_sub(1));
+        let mut screen_scroll = line_start.get(top_logical).copied().unwrap_or(0);
+
+        // Keep the cursor on screen. The renderer is the only place that knows
+        // how far the note actually wrapped, so the correction belongs here.
+        let cursor_screen_row = screen_row_of(
+            &screen_rows,
+            &line_start,
+            app.editor_cursor.0 as usize,
+            app.editor_cursor.1 as usize,
+        );
+        let view_h = inner_rect.height.max(1) as usize;
+        if cursor_screen_row < screen_scroll {
+            screen_scroll = cursor_screen_row;
+        } else if cursor_screen_row >= screen_scroll + view_h {
+            screen_scroll = cursor_screen_row + 1 - view_h;
+        }
+        if let Some(r) = screen_rows.get(screen_scroll) {
+            app.editor_scroll = r.logical as u16;
+        }
+        let screen_scroll_u16 = screen_scroll.min(u16::MAX as usize) as u16;
+
         // Optionally render line numbers; returns the rect for the content area
         let content_rect = if app.config.ui.show_line_numbers {
-            let line_number_width = if is_split_view { 4 } else { 6 };
+            let line_number_width = gutter_w;
             let editor_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
@@ -323,11 +357,17 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
                 ])
                 .split(inner_rect);
 
-            let line_count = content.lines().count().max(1);
             let cursor_row = (app.editor_cursor.0 + 1) as usize;
             let rel = app.config.ui.relative_line_numbers;
-            let line_numbers: Vec<Line> = (1..=line_count)
-                .map(|i| {
+            // One entry per SCREEN row. Continuation rows are blank, so a number
+            // always sits beside the line it belongs to.
+            let line_numbers: Vec<Line> = screen_rows
+                .iter()
+                .map(|r| {
+                    if r.start != 0 {
+                        return Line::from(Span::raw(" ".repeat(line_number_width as usize)));
+                    }
+                    let i = r.logical + 1;
                     let is_current = i == cursor_row && is_focused;
                     let style = if is_current {
                         Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)
@@ -350,7 +390,7 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
 
             let line_numbers_widget = Paragraph::new(line_numbers)
                 .style(TokyoNightTheme::normal())
-                .scroll((app.editor_scroll, 0));
+                .scroll((screen_scroll_u16, 0));
             f.render_widget(line_numbers_widget, editor_chunks[0]);
             editor_chunks[1]
         } else {
@@ -455,14 +495,31 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
             }
         }
 
-        // Block cursor for the non-insert modes, drawn into the text so that soft
-        // wrapping cannot separate it from the line the highlight marks.
+        // Every highlight above works in logical lines. Wrap only now, by slicing
+        // those styled lines into the screen rows computed up front — so the text,
+        // the gutter and the scroll all derive from one layout. Rendered with
+        // ratatui's wrap OFF, since the wrapping has already happened.
+        let mut wrapped: Vec<Line> = screen_rows
+            .iter()
+            .map(|r| match styled_content.lines.get(r.logical) {
+                Some(line) => slice_line(line, r.start, r.end),
+                None => Line::from(String::new()),
+            })
+            .collect();
+
+        // Block cursor for the non-insert modes, painted AFTER wrapping and into
+        // the screen row it actually occupies. Painting it before would let a
+        // cursor resting past end-of-line pad a logical line beyond the slice it
+        // belongs to, and the cursor would simply vanish.
         if app.mode != AppMode::Insert && is_focused && app.current_note.is_some() {
-            let row = app.editor_cursor.0 as usize;
-            if let Some(line) = styled_content.lines.get_mut(row) {
+            if let Some(line) = wrapped.get_mut(cursor_screen_row) {
+                let col = screen_rows
+                    .get(cursor_screen_row)
+                    .map(|r| (app.editor_cursor.1 as usize).saturating_sub(r.start))
+                    .unwrap_or(0);
                 paint_cursor_in_line(
                     line,
-                    app.editor_cursor.1 as usize,
+                    col,
                     Style::default()
                         .fg(TokyoNightTheme::BG)
                         .bg(TokyoNightTheme::CYAN),
@@ -470,10 +527,9 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
             }
         }
 
-        let paragraph = Paragraph::new(styled_content)
+        let paragraph = Paragraph::new(Text::from(wrapped))
             .style(TokyoNightTheme::normal())
-            .wrap(Wrap { trim: false })
-            .scroll((app.editor_scroll, 0));
+            .scroll((screen_scroll_u16, 0));
 
         f.render_widget(paragraph, content_rect);
 
@@ -508,13 +564,19 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
 
         // Show cursor if in insert mode
         if app.mode == AppMode::Insert && is_focused {
-            let cursor_area = Rect::new(
-                content_rect.x + app.editor_cursor.1,
-                content_rect.y + app.editor_cursor.0 - app.editor_scroll,
-                1,
-                1,
-            );
-            f.set_cursor_position((cursor_area.x, cursor_area.y));
+            // Same layout as everything else: the terminal cursor has to land on
+            // the wrapped row, not on `line - scroll`.
+            let row = cursor_screen_row.saturating_sub(screen_scroll);
+            let col = screen_rows
+                .get(cursor_screen_row)
+                .map(|r| (app.editor_cursor.1 as usize).saturating_sub(r.start))
+                .unwrap_or(0);
+            if row < content_rect.height as usize && col < content_rect.width as usize {
+                f.set_cursor_position((
+                    content_rect.x + col as u16,
+                    content_rect.y + row as u16,
+                ));
+            }
         }
 
         // Draw autocompletion popup if active
@@ -1330,6 +1392,108 @@ fn draw_replace_dialog(f: &mut Frame, app: &App) {
     f.render_widget(input, area);
 }
 
+
+
+/// One screen row of the wrapped note: which logical line it came from, and the
+/// half-open character range of that line it shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScreenRow {
+    logical: usize,
+    start: usize,
+    end: usize,
+}
+
+/// Lay the note out exactly as it will be drawn.
+///
+/// ratatui's own `Wrap` is deliberately not used here. It wraps at render time,
+/// so the gutter, the scroll offset and the cursor each had to guess where the
+/// breaks would fall — and each guessed differently: the gutter numbered screen
+/// rows instead of lines, and the scroll counted lines while ratatui counted
+/// rows. Wrapping here and rendering with wrap off makes this the single
+/// authority, so there is no second algorithm left to disagree with.
+///
+/// Rows tile their line with no gaps, so every character — including the space a
+/// break lands on — belongs to exactly one row and the cursor always maps.
+fn layout_note(content: &str, width: usize) -> (Vec<ScreenRow>, Vec<usize>) {
+    let width = width.max(1);
+    let mut rows: Vec<ScreenRow> = Vec::new();
+    let mut line_start: Vec<usize> = Vec::new();
+
+    for (logical, line) in content.lines().enumerate() {
+        line_start.push(rows.len());
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() {
+            rows.push(ScreenRow { logical, start: 0, end: 0 });
+            continue;
+        }
+        let mut pos = 0usize;
+        while pos < chars.len() {
+            let hard = (pos + width).min(chars.len());
+            let mut brk = hard;
+            if hard < chars.len() {
+                // Prefer the last space that fits; a word longer than the pane
+                // still has to be broken mid-word.
+                let mut b = hard;
+                while b > pos && !chars[b - 1].is_whitespace() {
+                    b -= 1;
+                }
+                if b > pos {
+                    brk = b;
+                }
+            }
+            rows.push(ScreenRow { logical, start: pos, end: brk });
+            pos = brk;
+        }
+    }
+
+    if rows.is_empty() {
+        line_start.push(0);
+        rows.push(ScreenRow { logical: 0, start: 0, end: 0 });
+    }
+    (rows, line_start)
+}
+
+/// Take the characters `[start, end)` of a styled line, keeping each span's own
+/// style so wrapping does not flatten the markdown colouring.
+fn slice_line(line: &Line<'_>, start: usize, end: usize) -> Line<'static> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut seen = 0usize;
+    for span in &line.spans {
+        let chars: Vec<char> = span.content.chars().collect();
+        let n = chars.len();
+        let from = seen.max(start);
+        let to = (seen + n).min(end);
+        if from < to {
+            let text: String = chars[(from - seen)..(to - seen)].iter().collect();
+            out.push(Span::styled(text, span.style));
+        }
+        seen += n;
+        if seen >= end {
+            break;
+        }
+    }
+    if out.is_empty() {
+        out.push(Span::raw(String::new()));
+    }
+    Line::from(out)
+}
+
+/// Which screen row holds a given cursor position.
+fn screen_row_of(rows: &[ScreenRow], line_start: &[usize], logical: usize, col: usize) -> usize {
+    let first = line_start.get(logical).copied().unwrap_or(0);
+    let mut last = first;
+    for (i, r) in rows.iter().enumerate().skip(first) {
+        if r.logical != logical {
+            break;
+        }
+        last = i;
+        if col >= r.start && col < r.end {
+            return i;
+        }
+    }
+    // Resting past the final character of the line.
+    last
+}
 
 /// Paint the block cursor into the text itself instead of overlaying it at a
 /// computed screen position.
@@ -2656,5 +2820,119 @@ mod cursor_paint_tests {
         paint_cursor_in_line(&mut line, 0, cur());
         assert_eq!(plain(&line), "xyz");
         assert_eq!(cursor_char(&line).as_deref(), Some("x"));
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn text_of(content: &str, rows: &[ScreenRow]) -> Vec<String> {
+        let lines: Vec<&str> = content.lines().collect();
+        rows.iter()
+            .map(|r| {
+                lines
+                    .get(r.logical)
+                    .map(|l| l.chars().skip(r.start).take(r.end - r.start).collect())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn short_lines_are_one_row_each() {
+        let (rows, starts) = layout_note("one\ntwo\nthree", 40);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(starts, vec![0, 1, 2]);
+        assert!(rows.iter().all(|r| r.start == 0));
+    }
+
+    #[test]
+    fn a_long_line_breaks_on_a_space() {
+        let (rows, starts) = layout_note("aaa bbb ccc ddd", 8);
+        assert_eq!(starts, vec![0], "still one logical line");
+        assert!(rows.len() > 1, "but several screen rows");
+        let shown = text_of("aaa bbb ccc ddd", &rows);
+        assert!(
+            shown.iter().all(|r| r.chars().count() <= 8),
+            "no row exceeds the width: {:?}",
+            shown
+        );
+        assert_eq!(shown.concat(), "aaa bbb ccc ddd", "no character is lost");
+    }
+
+    /// A word longer than the pane has to be broken mid-word rather than
+    /// overflowing or being dropped.
+    #[test]
+    fn an_over_long_word_is_hard_broken() {
+        let content = "supercalifragilistic";
+        let (rows, _) = layout_note(content, 6);
+        let shown = text_of(content, &rows);
+        assert!(shown.iter().all(|r| r.chars().count() <= 6), "{:?}", shown);
+        assert_eq!(shown.concat(), content);
+    }
+
+    /// Rows must tile their line with no gaps, or a cursor resting on the space a
+    /// break landed on would belong to no row at all.
+    #[test]
+    fn rows_tile_their_line_without_gaps() {
+        let content = "the quick brown fox jumps over the lazy dog";
+        let (rows, _) = layout_note(content, 11);
+        let mut expected = 0usize;
+        for r in &rows {
+            assert_eq!(r.start, expected, "gap or overlap at {:?}", r);
+            expected = r.end;
+        }
+        assert_eq!(expected, content.chars().count());
+    }
+
+    #[test]
+    fn empty_lines_still_occupy_a_row() {
+        let (rows, starts) = layout_note("a\n\nb", 10);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(starts, vec![0, 1, 2]);
+        assert_eq!(rows[1].start, rows[1].end, "the blank line is a zero-width row");
+    }
+
+    #[test]
+    fn empty_content_still_yields_one_row() {
+        let (rows, starts) = layout_note("", 10);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(starts, vec![0]);
+    }
+
+    #[test]
+    fn cursor_maps_to_the_row_holding_its_column() {
+        let content = "aaa bbb ccc ddd";
+        let (rows, starts) = layout_note(content, 8);
+        // column 0 is on the first row; a column past the first break is not
+        assert_eq!(screen_row_of(&rows, &starts, 0, 0), 0);
+        let later = screen_row_of(&rows, &starts, 0, 12);
+        assert!(later > 0, "a column past the wrap is on a continuation row");
+        assert!(rows[later].start <= 12 && 12 < rows[later].end);
+    }
+
+    /// Resting past the last character (Normal mode at end of line) still lands
+    /// on that line's final row rather than falling through to the next line.
+    #[test]
+    fn cursor_past_end_of_line_stays_on_that_line() {
+        let content = "short\nnext";
+        let (rows, starts) = layout_note(content, 20);
+        let r = screen_row_of(&rows, &starts, 0, 99);
+        assert_eq!(rows[r].logical, 0);
+    }
+
+    #[test]
+    fn slicing_preserves_span_styles() {
+        let red = Style::default().fg(TokyoNightTheme::RED);
+        let line = Line::from(vec![
+            Span::styled("abcd", red),
+            Span::raw("efgh"),
+        ]);
+        let cut = slice_line(&line, 2, 6);
+        let plain: String = cut.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(plain, "cdef");
+        assert_eq!(cut.spans[0].style.fg, Some(TokyoNightTheme::RED));
+        assert_eq!(cut.spans[1].style.fg, None, "the unstyled half stays unstyled");
     }
 }
