@@ -71,6 +71,242 @@ pub fn handle_paste(app: &mut App, text: &str) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
+/// Where a binding applies. Keys that only mean something while a note is open
+/// and the editor pane has focus are `Editor`; everything else is `Any`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ctx {
+    Any,
+    Editor,
+}
+
+/// What a key does, named independently of which key triggers it.
+///
+/// Splitting the name from the binding is the point of this table: several keys
+/// can share one action (`j` and `Down`), the help screen can be generated from
+/// the same data the dispatcher uses, and bindings become loadable from config
+/// later without touching any of the behaviour below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    // Navigation
+    CursorDown,
+    CursorUp,
+    GoToTop,
+    GoToBottom,
+    CursorLeft,
+    CursorRight,
+    CyclePane,
+    ActivateSelected,
+    // Editor motions
+    AppendAtLineEnd,
+    OpenLineBelow,
+    OpenLineAbove,
+    CursorLineStart,
+    CursorLineEnd,
+    WordForward,
+    WordBackward,
+    DeleteCharAtCursor,
+    ToggleTaskCheckbox,
+    PasteBelow,
+    PasteClipboardBelow,
+    YankLineSequence,
+    DeleteLineOrConfirm,
+    EnterInsert,
+    EnterVisual,
+    UndoText,
+    RedoText,
+    UndoLastDelete,
+    PendingSpellPrefix,
+    SpellSuggestions,
+    // Items
+    NewNoteOrSearchNext,
+    NewFolderAtRoot,
+    NewSubfolder,
+    MoveItem,
+    RenameItem,
+    SaveNote,
+    ExternalEditor,
+    TagInput,
+    // Panels and search
+    QuickJump,
+    ShowOutline,
+    Backlinks,
+    RecentFiles,
+    VaultSwitcher,
+    TagBrowser,
+    ThemeBrowser,
+    DailyNote,
+    TogglePreview,
+    FollowLink,
+    SearchInNoteOrGlobal,
+    SearchPrevOrTemplates,
+    FuzzySearch,
+    AdvancedSearch,
+    SearchReplace,
+    ClearNoteSearch,
+    // Scrolling
+    ScrollHalfUp,
+    ScrollHalfDown,
+    ScrollPageUp,
+    ScrollPageDown,
+    // Meta
+    CommandMode,
+    Help,
+    Quit,
+}
+
+struct Binding {
+    code: KeyCode,
+    mods: KeyModifiers,
+    ctx: Ctx,
+    action: Action,
+    /// Human-readable label for this binding.
+    ///
+    /// Not rendered yet: `draw_help_dialog` is still a hand-curated two-column
+    /// layout covering modes this table does not describe, and flattening it into
+    /// a generated list would be a downgrade. The text lives here so that when the
+    /// help screen is generated, the binding and its description cannot drift
+    /// apart. Asserted non-empty by `every_binding_is_described`.
+    #[allow(dead_code)]
+    desc: &'static str,
+}
+
+const fn k(code: KeyCode, ctx: Ctx, action: Action, desc: &'static str) -> Binding {
+    Binding { code, mods: KeyModifiers::NONE, ctx, action, desc }
+}
+
+const fn ctrl(code: KeyCode, ctx: Ctx, action: Action, desc: &'static str) -> Binding {
+    Binding { code, mods: KeyModifiers::CONTROL, ctx, action, desc }
+}
+
+/// Every Normal-mode binding, as data.
+///
+/// Order carries no meaning: lookup matches exactly on code + modifiers, and
+/// prefers an `Editor` entry only when the editor actually has focus. That is
+/// what stops a plain-letter motion from swallowing the Ctrl chord that shares
+/// its letter -- which is exactly what used to happen to Ctrl+B, Ctrl+O, Ctrl+P,
+/// Ctrl+L and Ctrl+Y whenever the editor was focused.
+const NORMAL_BINDINGS: &[Binding] = &[
+    // --- navigation (pane-aware inside the action) ---
+    k(KeyCode::Char('j'), Ctx::Any, Action::CursorDown, "Move down"),
+    k(KeyCode::Down, Ctx::Any, Action::CursorDown, "Move down"),
+    k(KeyCode::Char('k'), Ctx::Any, Action::CursorUp, "Move up"),
+    k(KeyCode::Up, Ctx::Any, Action::CursorUp, "Move up"),
+    k(KeyCode::Char('g'), Ctx::Any, Action::GoToTop, "Go to top"),
+    k(KeyCode::Char('G'), Ctx::Any, Action::GoToBottom, "Go to bottom"),
+    k(KeyCode::Char('h'), Ctx::Editor, Action::CursorLeft, "Move cursor left"),
+    k(KeyCode::Left, Ctx::Editor, Action::CursorLeft, "Move cursor left"),
+    k(KeyCode::Char('l'), Ctx::Editor, Action::CursorRight, "Move cursor right"),
+    k(KeyCode::Right, Ctx::Editor, Action::CursorRight, "Move cursor right"),
+    k(KeyCode::Tab, Ctx::Any, Action::CyclePane, "Switch pane"),
+    k(KeyCode::Enter, Ctx::Any, Action::ActivateSelected, "Open note / expand folder"),
+
+    // --- editor motions and edits ---
+    k(KeyCode::Char('A'), Ctx::Editor, Action::AppendAtLineEnd, "Append at end of line"),
+    k(KeyCode::Char('o'), Ctx::Editor, Action::OpenLineBelow, "Open line below"),
+    k(KeyCode::Char('O'), Ctx::Editor, Action::OpenLineAbove, "Open line above"),
+    k(KeyCode::Char('0'), Ctx::Editor, Action::CursorLineStart, "Start of line"),
+    k(KeyCode::Char('$'), Ctx::Editor, Action::CursorLineEnd, "End of line"),
+    k(KeyCode::Char('w'), Ctx::Editor, Action::WordForward, "Word forward"),
+    k(KeyCode::Char('b'), Ctx::Editor, Action::WordBackward, "Word backward"),
+    k(KeyCode::Char('x'), Ctx::Editor, Action::DeleteCharAtCursor, "Delete character"),
+    k(KeyCode::Char(' '), Ctx::Editor, Action::ToggleTaskCheckbox, "Toggle task checkbox"),
+    k(KeyCode::Char('p'), Ctx::Editor, Action::PasteBelow, "Paste line below"),
+    k(KeyCode::Char('P'), Ctx::Editor, Action::PasteClipboardBelow, "Paste clipboard below"),
+    k(KeyCode::Char('y'), Ctx::Editor, Action::YankLineSequence, "yy: yank line"),
+    k(KeyCode::Char('v'), Ctx::Editor, Action::EnterVisual, "Visual selection"),
+    k(KeyCode::Char('z'), Ctx::Editor, Action::PendingSpellPrefix, "z=: spelling prefix"),
+    k(KeyCode::Char('='), Ctx::Editor, Action::SpellSuggestions, "z=: spelling suggestions"),
+    ctrl(KeyCode::Char('z'), Ctx::Editor, Action::UndoText, "Undo edit"),
+    ctrl(KeyCode::Char('y'), Ctx::Editor, Action::RedoText, "Redo edit"),
+    k(KeyCode::Char('d'), Ctx::Any, Action::DeleteLineOrConfirm, "dd: delete line / delete item"),
+    k(KeyCode::Char('i'), Ctx::Any, Action::EnterInsert, "Insert mode"),
+    k(KeyCode::Char('u'), Ctx::Any, Action::UndoLastDelete, "Undo last delete"),
+
+    // --- items ---
+    k(KeyCode::Char('n'), Ctx::Any, Action::NewNoteOrSearchNext, "New note / next match"),
+    k(KeyCode::Char('f'), Ctx::Any, Action::NewFolderAtRoot, "New folder at root"),
+    k(KeyCode::Char('F'), Ctx::Any, Action::NewSubfolder, "New subfolder"),
+    k(KeyCode::Char('m'), Ctx::Any, Action::MoveItem, "Move item"),
+    k(KeyCode::Char('r'), Ctx::Any, Action::RenameItem, "Rename item"),
+    k(KeyCode::Char('e'), Ctx::Any, Action::ExternalEditor, "Open in external editor"),
+    k(KeyCode::Char('t'), Ctx::Any, Action::TagInput, "Edit tags"),
+    ctrl(KeyCode::Char('s'), Ctx::Any, Action::SaveNote, "Save note"),
+
+    // --- panels ---
+    ctrl(KeyCode::Char('j'), Ctx::Any, Action::QuickJump, "Quick jump to note"),
+    ctrl(KeyCode::Char('g'), Ctx::Any, Action::ShowOutline, "Outline panel"),
+    ctrl(KeyCode::Char('b'), Ctx::Any, Action::Backlinks, "Backlinks panel"),
+    ctrl(KeyCode::Char('o'), Ctx::Any, Action::RecentFiles, "Recent files"),
+    ctrl(KeyCode::Char('v'), Ctx::Any, Action::VaultSwitcher, "Switch vault"),
+    ctrl(KeyCode::Char('t'), Ctx::Any, Action::TagBrowser, "Tag browser"),
+    ctrl(KeyCode::Char('l'), Ctx::Any, Action::FollowLink, "Follow link at cursor"),
+    ctrl(KeyCode::Char('p'), Ctx::Any, Action::TogglePreview, "Toggle preview"),
+    k(KeyCode::F(2), Ctx::Any, Action::TogglePreview, "Toggle preview"),
+    k(KeyCode::F(3), Ctx::Any, Action::ThemeBrowser, "Theme browser"),
+    k(KeyCode::F(4), Ctx::Any, Action::DailyNote, "Today's daily note"),
+
+    // --- search ---
+    k(KeyCode::Char('/'), Ctx::Any, Action::SearchInNoteOrGlobal, "Search in note / all notes"),
+    k(KeyCode::Char('N'), Ctx::Any, Action::SearchPrevOrTemplates, "Previous match / templates"),
+    k(KeyCode::Esc, Ctx::Any, Action::ClearNoteSearch, "Clear search highlights"),
+    ctrl(KeyCode::Char('f'), Ctx::Any, Action::FuzzySearch, "Fuzzy search"),
+    ctrl(KeyCode::Char('a'), Ctx::Any, Action::AdvancedSearch, "Advanced search"),
+    ctrl(KeyCode::Char('r'), Ctx::Any, Action::SearchReplace, "Search and replace"),
+
+    // --- scrolling ---
+    ctrl(KeyCode::Char('u'), Ctx::Any, Action::ScrollHalfUp, "Half page up"),
+    ctrl(KeyCode::Char('d'), Ctx::Any, Action::ScrollHalfDown, "Half page down"),
+    k(KeyCode::PageUp, Ctx::Any, Action::ScrollPageUp, "Page up"),
+    k(KeyCode::PageDown, Ctx::Any, Action::ScrollPageDown, "Page down"),
+
+    // --- meta ---
+    k(KeyCode::Char(':'), Ctx::Any, Action::CommandMode, "Command"),
+    k(KeyCode::Char('?'), Ctx::Any, Action::Help, "Help"),
+    k(KeyCode::Char('q'), Ctx::Any, Action::Quit, "Quit"),
+];
+
+/// SHIFT is already baked into the character an uppercase key produces, and
+/// terminals disagree about whether they also report the modifier, so it must
+/// not take part in matching.
+fn effective_mods(key: &KeyEvent) -> KeyModifiers {
+    key.modifiers & (KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
+/// Exact match on code + modifiers. Editor bindings are consulted first, and only
+/// while the editor is focused; everything else falls through to the global set.
+fn lookup_exact(code: KeyCode, mods: KeyModifiers, editor_focused: bool) -> Option<Action> {
+    let matches = |b: &&Binding, ctx: Ctx| b.ctx == ctx && b.code == code && b.mods == mods;
+
+    if editor_focused {
+        if let Some(b) = NORMAL_BINDINGS.iter().find(|b| matches(b, Ctx::Editor)) {
+            return Some(b.action);
+        }
+    }
+    NORMAL_BINDINGS
+        .iter()
+        .find(|b| matches(b, Ctx::Any))
+        .map(|b| b.action)
+}
+
+/// Resolve a key to an action.
+fn lookup(key: &KeyEvent, editor_focused: bool) -> Option<Action> {
+    let mods = effective_mods(key);
+    if let Some(action) = lookup_exact(key.code, mods, editor_focused) {
+        return Some(action);
+    }
+
+    // Terminals deliver "Esc, then x" as Alt+x, and users press Esc before a
+    // command all the time. Nothing binds Alt today, so an Alt-modified key with
+    // no binding of its own falls back to the plain key -- otherwise Esc followed
+    // by `q` would silently do nothing, which is what the old unguarded match arms
+    // (which ignored modifiers entirely) happened to get right. An explicit Alt
+    // binding added later still wins, because the exact pass runs first.
+    if mods.contains(KeyModifiers::ALT) {
+        return lookup_exact(key.code, mods & !KeyModifiers::ALT, editor_focused);
+    }
+    None
+}
+
 fn handle_normal_mode(app: &mut App, key: KeyEvent) {
     // Clear pending vim key if current key doesn't continue the sequence
     let continues_sequence = matches!(
@@ -83,65 +319,67 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
 
     let editor_focused = app.focused_pane == FocusedPane::Editor && app.current_note.is_some();
 
-    match key.code {
-        // Esc: clear in-note search highlights if active
-        KeyCode::Esc if app.note_search_active => {
-            app.clear_note_search();
-        }
-        // Quick jump (Ctrl+J) - check this BEFORE basic j navigation
-        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.start_quick_jump();
-        }
-        // Outline panel (Ctrl+G) - check BEFORE basic g (go-to-top)
-        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.show_outline();
-        }
+    if let Some(action) = lookup(&key, editor_focused) {
+        run_action(app, action, editor_focused);
+    }
+}
 
-        // Navigation / cursor movement
-        KeyCode::Char('j') | KeyCode::Down => {
+fn run_action(app: &mut App, action: Action, editor_focused: bool) {
+    let preview_focused = app.focused_pane == FocusedPane::Preview;
+
+    match action {
+        // --- navigation ---
+        Action::CursorDown => {
             if editor_focused {
                 app.cursor_down_normal();
-            } else if app.focused_pane == FocusedPane::Preview {
+            } else if preview_focused {
                 app.preview_scroll_down();
             } else {
                 app.navigate_down();
             }
-        },
-        KeyCode::Char('k') | KeyCode::Up => {
+        }
+        Action::CursorUp => {
             if editor_focused {
                 app.cursor_up_normal();
-            } else if app.focused_pane == FocusedPane::Preview {
+            } else if preview_focused {
                 app.preview_scroll_up();
             } else {
                 app.navigate_up();
             }
-        },
-        KeyCode::Char('g') => {
+        }
+        Action::GoToTop => {
             if editor_focused {
                 app.editor_cursor = (0, 0);
                 app.scroll_to_top();
-            } else if app.focused_pane == FocusedPane::Preview {
+            } else if preview_focused {
                 app.preview_scroll = 0;
             } else {
                 app.navigate_to_top();
             }
-        },
-        KeyCode::Char('G') => {
+        }
+        Action::GoToBottom => {
             if editor_focused {
                 let line_count = app.editor_content.lines().count() as u16;
                 app.editor_cursor.0 = line_count.saturating_sub(1);
                 app.editor_cursor.1 = app.editor_content.lines()
                     .last().map(|l| l.len() as u16).unwrap_or(0);
                 app.scroll_to_bottom();
-            } else if app.focused_pane == FocusedPane::Preview {
+            } else if preview_focused {
                 app.preview_scroll_to_bottom();
             } else {
                 app.navigate_to_bottom();
             }
-        },
-        
-        // Pane switching
-        KeyCode::Tab => {
+        }
+        Action::CursorLeft => {
+            if app.editor_cursor.1 > 0 { app.editor_cursor.1 -= 1; }
+        }
+        Action::CursorRight => {
+            let line_len = app.editor_content.lines()
+                .nth(app.editor_cursor.0 as usize)
+                .map(|l| l.len() as u16).unwrap_or(0);
+            if app.editor_cursor.1 < line_len { app.editor_cursor.1 += 1; }
+        }
+        Action::CyclePane => {
             app.focused_pane = if app.preview_enabled {
                 match app.focused_pane {
                     FocusedPane::Folders => FocusedPane::Editor,
@@ -156,9 +394,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
                 }
             };
         }
-        
-        // Actions
-        KeyCode::Enter => {
+        Action::ActivateSelected => {
             if let Some(item) = app.get_selected_item() {
                 match item.item_type {
                     TreeItemType::Note => {
@@ -170,9 +406,104 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        
-        // Create new items / in-note search next
-        KeyCode::Char('n') => {
+
+        // --- editor motions and edits ---
+        Action::AppendAtLineEnd => {
+            app.push_undo_snapshot();
+            app.cursor_to_line_end();
+            app.mode = AppMode::Insert;
+        }
+        Action::OpenLineBelow => {
+            app.push_undo_snapshot();
+            app.open_line_below();
+            app.mode = AppMode::Insert;
+        }
+        Action::OpenLineAbove => {
+            app.push_undo_snapshot();
+            app.open_line_above();
+            app.mode = AppMode::Insert;
+        }
+        Action::CursorLineStart => app.cursor_to_line_start(),
+        Action::CursorLineEnd => app.cursor_to_line_end(),
+        Action::WordForward => app.cursor_word_forward(),
+        Action::WordBackward => app.cursor_word_backward(),
+        Action::DeleteCharAtCursor => {
+            app.push_undo_snapshot();
+            app.delete_char_at_cursor();
+            app.mark_modified();
+        }
+        Action::ToggleTaskCheckbox => app.toggle_task_checkbox(),
+        Action::PasteBelow => {
+            app.push_undo_snapshot();
+            app.paste_below();
+            app.mark_modified();
+        }
+        Action::PasteClipboardBelow => app.paste_clipboard_below(),
+        Action::YankLineSequence => {
+            if app.pending_key == Some('y') {
+                app.pending_key = None;
+                app.yank_current_line();
+                app.set_message("Line yanked".to_string());
+            } else {
+                app.pending_key = Some('y');
+            }
+        }
+        Action::DeleteLineOrConfirm => {
+            if editor_focused {
+                if app.pending_key == Some('d') {
+                    app.pending_key = None;
+                    app.push_undo_snapshot();
+                    app.delete_current_line();
+                    app.mark_modified();
+                } else {
+                    app.pending_key = Some('d');
+                }
+            } else if let Err(e) = app.start_delete_confirmation() {
+                app.set_message(e);
+            }
+        }
+        Action::EnterInsert => {
+            if app.current_note.is_some() {
+                app.push_undo_snapshot();
+                app.mode = AppMode::Insert;
+                app.focused_pane = FocusedPane::Editor;
+            } else {
+                app.set_message("No note selected".to_string());
+            }
+        }
+        Action::EnterVisual => app.enter_visual_mode(),
+        Action::UndoText => {
+            if app.undo_text() {
+                app.set_operation_info("Undo".to_string(), Some("↩".to_string()));
+            } else {
+                app.set_message("Nothing to undo".to_string());
+            }
+        }
+        Action::RedoText => {
+            if app.redo_text() {
+                app.set_operation_info("Redo".to_string(), Some("↪".to_string()));
+            } else {
+                app.set_message("Nothing to redo".to_string());
+            }
+        }
+        Action::UndoLastDelete => {
+            if let Err(e) = app.undo_last_delete() {
+                app.set_message(e);
+            }
+        }
+        Action::PendingSpellPrefix => {
+            app.pending_key = Some('z');
+        }
+        Action::SpellSuggestions => {
+            // Only the tail of the `z=` sequence does anything; a bare `=` is inert.
+            if app.pending_key == Some('z') {
+                app.pending_key = None;
+                app.show_spell_suggestions();
+            }
+        }
+
+        // --- items ---
+        Action::NewNoteOrSearchNext => {
             if editor_focused && app.note_search_active {
                 app.note_search_next();
             } else {
@@ -189,197 +520,57 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
                 app.start_new_note_input(folder_id);
             }
         }
-        
-        KeyCode::Char('f') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+        Action::NewFolderAtRoot => {
             // Default behavior: create folder at root level
             // Use Shift+F to create subfolder in selected folder
-            let parent_id = None; // Always create at root by default
-            app.start_new_folder_input(parent_id);
+            app.start_new_folder_input(None);
         }
-        
-        // Create subfolder (Shift+F)
-        KeyCode::Char('F') => {
+        Action::NewSubfolder => {
             let parent_id = if let Some(item) = app.get_selected_item() {
                 match item.item_type {
                     TreeItemType::Folder => Some(item.id),
                     TreeItemType::Note => {
                         // Find the parent folder of the selected note
-                        if let Some(note) = app.notebook.notes.get(&item.id) {
-                            note.folder_id
-                        } else {
-                            None
-                        }
-                    },
+                        app.notebook.notes.get(&item.id).and_then(|note| note.folder_id)
+                    }
                 }
             } else {
                 None
             };
-            
             app.start_new_folder_input(parent_id);
         }
-        
-        // Vim motions (only when editor focused)
-        KeyCode::Char('A') if editor_focused => {
-            app.push_undo_snapshot();
-            app.cursor_to_line_end();
-            app.mode = AppMode::Insert;
-        }
-        KeyCode::Char('o') if editor_focused => {
-            app.push_undo_snapshot();
-            app.open_line_below();
-            app.mode = AppMode::Insert;
-        }
-        KeyCode::Char('O') if editor_focused => {
-            app.push_undo_snapshot();
-            app.open_line_above();
-            app.mode = AppMode::Insert;
-        }
-        KeyCode::Char('0') if editor_focused => {
-            app.cursor_to_line_start();
-        }
-        KeyCode::Char('$') if editor_focused => {
-            app.cursor_to_line_end();
-        }
-        KeyCode::Char('w') if editor_focused => {
-            app.cursor_word_forward();
-        }
-        KeyCode::Char('b') if editor_focused => {
-            app.cursor_word_backward();
-        }
-        KeyCode::Char('x') if editor_focused => {
-            app.push_undo_snapshot();
-            app.delete_char_at_cursor();
-            app.mark_modified();
-        }
-        // Space: toggle a task checkbox [ ] <-> [x] on the current line
-        KeyCode::Char(' ') if editor_focused => {
-            app.toggle_task_checkbox();
-        }
-        KeyCode::Char('p') if editor_focused => {
-            app.push_undo_snapshot();
-            app.paste_below();
-            app.mark_modified();
-        }
-        KeyCode::Char('P') if editor_focused => {
-            app.paste_clipboard_below();
-        }
-
-        // Edit mode
-        KeyCode::Char('i') => {
-            if app.current_note.is_some() {
-                app.push_undo_snapshot();
-                app.mode = AppMode::Insert;
-                app.focused_pane = FocusedPane::Editor;
-            } else {
-                app.set_message("No note selected".to_string());
+        Action::MoveItem => app.start_move_item(),
+        Action::RenameItem => app.start_rename_item(),
+        Action::SaveNote => {
+            if let Err(e) = app.save_current_note() {
+                app.set_message(e);
             }
         }
-        
-        // External editor
-        KeyCode::Char('e') => {
+        Action::ExternalEditor => {
             if let Err(e) = app.open_in_external_editor() {
                 app.set_message(e);
             }
         }
-        
-        // Delete: 'dd' to delete line when editor focused, else start delete confirmation
-        KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if editor_focused {
-                if app.pending_key == Some('d') {
-                    app.pending_key = None;
-                    app.push_undo_snapshot();
-                    app.delete_current_line();
-                    app.mark_modified();
-                } else {
-                    app.pending_key = Some('d');
-                }
-            } else {
-                if let Err(e) = app.start_delete_confirmation() {
-                    app.set_message(e);
-                }
+        Action::TagInput => app.start_tag_input(),
+
+        // --- panels ---
+        Action::QuickJump => app.start_quick_jump(),
+        Action::ShowOutline => app.show_outline(),
+        Action::Backlinks => app.show_backlinks_panel(),
+        Action::RecentFiles => app.toggle_recent_files(),
+        Action::VaultSwitcher => app.show_vault_switcher(),
+        Action::TagBrowser => app.show_tag_browser(),
+        Action::ThemeBrowser => app.show_theme_browser(),
+        Action::DailyNote => app.open_daily_note(),
+        Action::TogglePreview => app.toggle_preview(),
+        Action::FollowLink => {
+            if let Err(e) = app.follow_link_at_cursor() {
+                app.set_message(e);
             }
         }
 
-        // Yank line: 'yy' when editor focused
-        KeyCode::Char('y') if editor_focused => {
-            if app.pending_key == Some('y') {
-                app.pending_key = None;
-                app.yank_current_line();
-                app.set_message("Line yanked".to_string());
-            } else {
-                app.pending_key = Some('y');
-            }
-        }
-
-        // Ctrl+Z undo (editor focused)
-        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) && editor_focused => {
-            if app.undo_text() {
-                app.set_operation_info("Undo".to_string(), Some("↩".to_string()));
-            } else {
-                app.set_message("Nothing to undo".to_string());
-            }
-        }
-
-        // Ctrl+Y redo (editor focused)
-        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) && editor_focused => {
-            if app.redo_text() {
-                app.set_operation_info("Redo".to_string(), Some("↪".to_string()));
-            } else {
-                app.set_message("Nothing to redo".to_string());
-            }
-        }
-
-        // N: in-note search prev (editor) or template picker (tree)
-        KeyCode::Char('N') => {
-            if editor_focused && app.note_search_active {
-                app.note_search_prev();
-            } else if !editor_focused {
-                app.show_template_picker();
-            }
-        }
-
-        // z= spell suggestions  /  z (sets pending key)
-        KeyCode::Char('=') if editor_focused && app.pending_key == Some('z') => {
-            app.pending_key = None;
-            app.show_spell_suggestions();
-        }
-        KeyCode::Char('z') if editor_focused && !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.pending_key = Some('z');
-        }
-
-        // v: enter visual selection mode (editor focused)
-        KeyCode::Char('v') if editor_focused && !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.enter_visual_mode();
-        }
-
-        // h/l: horizontal cursor movement in Normal mode (editor focused)
-        KeyCode::Char('h') | KeyCode::Left if editor_focused => {
-            if app.editor_cursor.1 > 0 { app.editor_cursor.1 -= 1; }
-        }
-        KeyCode::Char('l') | KeyCode::Right if editor_focused => {
-            let line_len = app.editor_content.lines()
-                .nth(app.editor_cursor.0 as usize)
-                .map(|l| l.len() as u16).unwrap_or(0);
-            if app.editor_cursor.1 < line_len { app.editor_cursor.1 += 1; }
-        }
-
-        // Backlinks panel (Ctrl+B)
-        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.show_backlinks_panel();
-        }
-        
-        // Move (only if not Ctrl+M)
-        KeyCode::Char('m') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.start_move_item();
-        }
-        
-        // Rename (only if not Ctrl+R)
-        KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.start_rename_item();
-        }
-        
-        // In-note search when editor focused; global note search otherwise
-        KeyCode::Char('/') => {
+        // --- search ---
+        Action::SearchInNoteOrGlobal => {
             if editor_focused {
                 app.note_search_query.clear();
                 app.note_search_matches.clear();
@@ -393,23 +584,22 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
                 app.search_dialog_selected = 0;
             }
         }
-
-        // Fuzzy search (Ctrl+F)
-        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        Action::SearchPrevOrTemplates => {
+            if editor_focused && app.note_search_active {
+                app.note_search_prev();
+            } else if !editor_focused {
+                app.show_template_picker();
+            }
+        }
+        Action::FuzzySearch => {
             app.mode = AppMode::Search;
             app.is_fuzzy_search = true;
             app.input_buffer.clear();
             app.search_dialog_note_ids.clear();
             app.search_dialog_selected = 0;
         }
-
-        // Advanced search — regex:/case:/folder: over note content (Ctrl+A)
-        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.start_advanced_search();
-        }
-        
-        // Search and replace (Ctrl+R)
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        Action::AdvancedSearch => app.start_advanced_search(),
+        Action::SearchReplace => {
             if app.current_note.is_some() {
                 app.mode = AppMode::SearchReplace;
                 app.input_buffer.clear();
@@ -417,105 +607,45 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
                 app.set_message("No note selected for replace".to_string());
             }
         }
-        
-        // Commands
-        KeyCode::Char(':') => {
-            app.mode = AppMode::Command;
-            app.command_buffer.clear();
-        }
-        
-        // Save (Ctrl+S)
-        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Err(e) = app.save_current_note() {
-                app.set_message(e);
+        Action::ClearNoteSearch => {
+            // Inert unless an in-note search is actually highlighted.
+            if app.note_search_active {
+                app.clear_note_search();
             }
         }
-        
-        // Toggle markdown preview (Ctrl+P or F2)
-        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.toggle_preview();
-        }
-        KeyCode::F(2) => {
-            app.toggle_preview();
-        }
-        
-        // Scrolling controls (Ctrl+U for half page up, Ctrl+D for half page down)
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if (app.focused_pane == FocusedPane::Editor || app.focused_pane == FocusedPane::Preview) && app.current_note.is_some() {
+
+        // --- scrolling ---
+        Action::ScrollHalfUp => {
+            if (editor_focused || preview_focused) && app.current_note.is_some() {
                 app.scroll_half_page_up();
             }
         }
-        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if (app.focused_pane == FocusedPane::Editor || app.focused_pane == FocusedPane::Preview) && app.current_note.is_some() {
+        Action::ScrollHalfDown => {
+            if (editor_focused || preview_focused) && app.current_note.is_some() {
                 app.scroll_half_page_down();
             }
         }
-        
-        // Page Up/Down for scrolling
-        KeyCode::PageUp => {
-            if (app.focused_pane == FocusedPane::Editor || app.focused_pane == FocusedPane::Preview) && app.current_note.is_some() {
+        Action::ScrollPageUp => {
+            if (editor_focused || preview_focused) && app.current_note.is_some() {
                 app.scroll_page_up();
             }
         }
-        KeyCode::PageDown => {
-            if (app.focused_pane == FocusedPane::Editor || app.focused_pane == FocusedPane::Preview) && app.current_note.is_some() {
+        Action::ScrollPageDown => {
+            if (editor_focused || preview_focused) && app.current_note.is_some() {
                 app.scroll_page_down();
             }
         }
-        
-        // Quit
-        KeyCode::Char('q') => app.quit(),
-        
-        // Undo last delete (u) / redo text (Ctrl+Y already handled above)
-        KeyCode::Char('u') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Err(e) = app.undo_last_delete() {
-                app.set_message(e);
-            }
-        }
-        
-        // Follow link at cursor (Ctrl+L or Enter on a link)
-        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Err(e) = app.follow_link_at_cursor() {
-                app.set_message(e);
-            }
-        }
-        
-        // Recent files (Ctrl+O)
-        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.toggle_recent_files();
-        }
-        
-        // Vault switcher (Ctrl+V)
-        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.show_vault_switcher();
-        }
-        
-        // Tag browser (Ctrl+T)
-        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.show_tag_browser();
-        }
-        // Edit the current note's tags (plain 't')
-        KeyCode::Char('t') => {
-            app.start_tag_input();
-        }
 
-        // Theme browser (F3)
-        KeyCode::F(3) => {
-            app.show_theme_browser();
+        // --- meta ---
+        Action::CommandMode => {
+            app.mode = AppMode::Command;
+            app.command_buffer.clear();
         }
-
-        // Daily note (F4) — open or create today's YYYY-MM-DD note
-        KeyCode::F(4) => {
-            app.open_daily_note();
-        }
-        
-        // Help
-        KeyCode::Char('?') => {
+        Action::Help => {
             app.mode = AppMode::Help;
             app.reset_help_scroll();
         }
-        
-        _ => {}
+        Action::Quit => app.quit(),
     }
 }
 
@@ -1747,5 +1877,170 @@ fn handle_rename_mode(app: &mut App, key: KeyEvent) {
         }
         
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use crate::models::Note;
+
+    /// An app with a note open and the editor pane focused.
+    fn editor_focused_app() -> App {
+        let mut app = App::default();
+        let mut note = Note::new("Test".to_string(), None);
+        note.content = "alpha beta gamma".to_string();
+        app.notebook.add_note(note.clone());
+        app.current_note = Some(note);
+        app.editor_content = "alpha beta gamma".to_string();
+        app.editor_cursor = (0, 10);
+        app.focused_pane = FocusedPane::Editor;
+        app.mode = AppMode::Normal;
+        app
+    }
+
+    fn press(app: &mut App, c: char, mods: KeyModifiers) {
+        handle_normal_mode(app, KeyEvent::new(KeyCode::Char(c), mods));
+    }
+
+    /// Global Ctrl-shortcuts must keep working while the editor pane is focused.
+    /// They share a letter with an editor motion, and the motion arms do not check
+    /// modifiers, so a first-match-wins `match` lets the motion swallow the Ctrl key.
+    #[test]
+    fn ctrl_p_toggles_preview_even_when_editor_focused() {
+        let mut app = editor_focused_app();
+        let before = app.preview_enabled;
+        press(&mut app, 'p', KeyModifiers::CONTROL);
+        assert_ne!(app.preview_enabled, before, "Ctrl+P was swallowed by the 'p' paste motion");
+    }
+
+    #[test]
+    fn ctrl_o_opens_recent_files_even_when_editor_focused() {
+        let mut app = editor_focused_app();
+        press(&mut app, 'o', KeyModifiers::CONTROL);
+        assert_eq!(app.mode, AppMode::RecentFiles, "Ctrl+O was swallowed by the 'o' open-line motion");
+    }
+
+    #[test]
+    fn ctrl_b_opens_backlinks_even_when_editor_focused() {
+        let mut app = editor_focused_app();
+        let col_before = app.editor_cursor.1;
+        press(&mut app, 'b', KeyModifiers::CONTROL);
+        assert_eq!(
+            app.editor_cursor.1, col_before,
+            "Ctrl+B moved the cursor: it was swallowed by the 'b' word-back motion"
+        );
+    }
+
+    #[test]
+    fn ctrl_y_is_not_swallowed_by_the_yank_pending_key() {
+        let mut app = editor_focused_app();
+        press(&mut app, 'y', KeyModifiers::CONTROL);
+        assert_ne!(app.pending_key, Some('y'), "Ctrl+Y set the 'yy' pending key instead of redoing");
+    }
+
+    // --- the plain motions these share a letter with must still work ---
+
+    #[test]
+    fn plain_b_still_moves_a_word_back() {
+        let mut app = editor_focused_app();
+        press(&mut app, 'b', KeyModifiers::NONE);
+        assert!(app.editor_cursor.1 < 10, "plain 'b' should move the cursor back a word");
+    }
+
+    #[test]
+    fn plain_y_still_arms_the_yank_sequence() {
+        let mut app = editor_focused_app();
+        press(&mut app, 'y', KeyModifiers::NONE);
+        assert_eq!(app.pending_key, Some('y'), "plain 'y' should arm the 'yy' sequence");
+    }
+
+    /// The structural guarantee the table exists to provide: no two bindings can
+    /// claim the same key in the same context. This is what a `match` could not
+    /// enforce, and what let five Ctrl chords be silently shadowed.
+    #[test]
+    fn no_two_bindings_claim_the_same_key_and_context() {
+        let mut seen: Vec<(KeyCode, KeyModifiers, Ctx)> = Vec::new();
+        for b in NORMAL_BINDINGS {
+            let key = (b.code, b.mods, b.ctx);
+            assert!(
+                !seen.contains(&key),
+                "duplicate binding for {:?} with {:?} in {:?} ({})",
+                b.code, b.mods, b.ctx, b.desc
+            );
+            seen.push(key);
+        }
+    }
+
+    /// A binding with no label cannot be documented, so refuse to add one.
+    #[test]
+    fn every_binding_is_described() {
+        for b in NORMAL_BINDINGS {
+            assert!(!b.desc.trim().is_empty(), "binding {:?} has no description", b.code);
+        }
+    }
+
+    /// An `Editor` binding is inert unless the editor pane actually has focus,
+    /// and must not fall through to a global binding on the same key.
+    #[test]
+    fn editor_bindings_do_not_fire_outside_the_editor() {
+        assert_eq!(
+            lookup(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE), false),
+            None,
+            "'w' is an editor motion and has no meaning in the tree"
+        );
+        assert_eq!(
+            lookup(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE), true),
+            Some(Action::WordForward)
+        );
+    }
+
+    /// Every Ctrl chord resolves to its own action regardless of focus.
+    #[test]
+    fn ctrl_chords_resolve_identically_in_both_contexts() {
+        for (c, expected) in [
+            ('b', Action::Backlinks),
+            ('o', Action::RecentFiles),
+            ('p', Action::TogglePreview),
+            ('l', Action::FollowLink),
+        ] {
+            let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+            assert_eq!(lookup(&key, false), Some(expected), "Ctrl+{} in tree", c);
+            assert_eq!(lookup(&key, true), Some(expected), "Ctrl+{} with editor focused", c);
+        }
+    }
+
+    /// Pressing Esc and then a command key arrives as Alt+key. Nothing binds Alt,
+    /// so it must still reach the plain binding. Caught by a pty run where `Esc q`
+    /// quit on the old code but hung on the first version of this table.
+    #[test]
+    fn alt_modified_key_falls_back_to_the_plain_binding() {
+        let alt_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT);
+        assert_eq!(lookup(&alt_q, false), Some(Action::Quit), "Esc-then-q must still quit");
+
+        // The fallback must not paper over Ctrl: Ctrl+Alt+P is not Ctrl+P.
+        let ctrl_alt_p = KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert_eq!(lookup(&ctrl_alt_p, false), Some(Action::TogglePreview));
+    }
+
+    /// Terminals disagree about whether SHIFT is reported alongside an uppercase
+    /// character, so matching must not depend on it.
+    #[test]
+    fn uppercase_binding_matches_with_and_without_shift_reported() {
+        let mut a = editor_focused_app();
+        a.focused_pane = FocusedPane::Folders;
+        handle_normal_mode(&mut a, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+
+        let mut b = editor_focused_app();
+        b.focused_pane = FocusedPane::Folders;
+        handle_normal_mode(&mut b, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
+
+        assert_eq!(
+            a.selected_folder_index, b.selected_folder_index,
+            "SHIFT must not change how 'G' dispatches"
+        );
     }
 }
