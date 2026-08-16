@@ -165,14 +165,6 @@ pub struct TrashBin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NoteLink {
-    pub source_note_id: Uuid,
-    pub target_note_title: String,
-    pub target_note_id: Option<Uuid>, // None if target doesn't exist yet
-    pub position: usize, // Position in source note content
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentFile {
     pub note_id: Uuid,
     pub last_accessed: DateTime<Utc>,
@@ -185,7 +177,6 @@ pub struct NotebookData {
     pub notes: HashMap<Uuid, Note>,
     pub root_folder_ids: Vec<Uuid>,
     pub trash_bin: TrashBin,
-    pub links: Vec<NoteLink>,
     pub recent_files: Vec<RecentFile>,
 }
 
@@ -231,7 +222,6 @@ impl NotebookData {
             notes: HashMap::new(),
             root_folder_ids: Vec::new(),
             trash_bin: TrashBin::new(),
-            links: Vec::new(),
             recent_files: Vec::new(),
         }
     }
@@ -280,11 +270,6 @@ impl NotebookData {
             // Add to trash bin
             self.trash_bin.add_item(DeletedItemType::Note(note.clone()), note.folder_id);
             
-            // Remove any links involving this note
-            self.links.retain(|link| {
-                link.source_note_id != note_id && 
-                link.target_note_id != Some(note_id)
-            });
         }
     }
 
@@ -294,7 +279,6 @@ impl NotebookData {
                 DeletedItemType::Note(note) => {
                     let title = note.title.clone();
                     self.notes.insert(note.id, note);
-                    self.rebuild_links(); // Rebuild links after restoration
                     Ok(format!("Restored note: {}", title))
                 }
                 DeletedItemType::Folder(folder) => {
@@ -405,30 +389,6 @@ impl NotebookData {
         results
     }
 
-    pub fn parse_links_in_note(&mut self, note_id: Uuid) {
-        // Remove existing links for this note
-        self.links.retain(|link| link.source_note_id != note_id);
-        
-        if let Some(note) = self.notes.get(&note_id) {
-            let link_regex = regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
-            
-            for cap in link_regex.captures_iter(&note.content) {
-                if let Some(title_match) = cap.get(1) {
-                    let target_title = title_match.as_str().to_string();
-                    let target_id = self.find_note_by_title(&target_title);
-                    
-                    let link = NoteLink {
-                        source_note_id: note_id,
-                        target_note_title: target_title,
-                        target_note_id: target_id,
-                        position: title_match.start(),
-                    };
-                    
-                    self.links.push(link);
-                }
-            }
-        }
-    }
 
     pub fn find_note_by_title(&self, title: &str) -> Option<Uuid> {
         self.notes.values()
@@ -444,25 +404,8 @@ impl NotebookData {
             .map(|folder| folder.id)
     }
 
-    pub fn get_backlinks(&self, note_id: Uuid) -> Vec<&NoteLink> {
-        self.links.iter()
-            .filter(|link| link.target_note_id == Some(note_id))
-            .collect()
-    }
 
-    /// Links originating from `note_id` (used by the links panel's outgoing section).
-    pub fn get_outgoing_links(&self, note_id: Uuid) -> Vec<&NoteLink> {
-        self.links.iter()
-            .filter(|link| link.source_note_id == note_id)
-            .collect()
-    }
 
-    pub fn rebuild_links(&mut self) {
-        let note_ids: Vec<Uuid> = self.notes.keys().cloned().collect();
-        for note_id in note_ids {
-            self.parse_links_in_note(note_id);
-        }
-    }
 
     pub fn add_recent_file(&mut self, note_id: Uuid) {
         let now = Utc::now();
@@ -492,5 +435,37 @@ impl NotebookData {
 impl Default for NotebookData {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A notebook saved before wiki links were retired still carries a `links`
+    /// array. Serde ignores unknown fields, so it must load rather than error —
+    /// otherwise upgrading would look like the whole notebook had been lost.
+    #[test]
+    fn a_notebook_saved_with_links_still_loads() {
+        let old = r#"{
+            "folders": {},
+            "notes": {},
+            "root_folder_ids": [],
+            "trash_bin": { "items": [], "max_items": 100, "retention_days": 30 },
+            "links": [
+                {
+                    "source_note_id": "6f1c9b3e-51a0-4a5f-9d2e-8c7b4a1f0e33",
+                    "target_note_title": "Somewhere",
+                    "target_note_id": null,
+                    "position": 12
+                }
+            ],
+            "recent_files": []
+        }"#;
+
+        let notebook: NotebookData =
+            serde_json::from_str(old).expect("a notebook with links must still deserialize");
+        assert!(notebook.notes.is_empty());
+        assert!(notebook.recent_files.is_empty());
     }
 }

@@ -2,17 +2,7 @@ use super::*;
 
 impl App {
     pub fn update_autocompletion(&mut self) {
-        // Wiki-link completion takes priority over markdown snippets
-        let note_titles: Vec<String> = self.notebook.notes.values()
-            .map(|n| n.title.clone()).collect();
-        if let Some(completions) = crate::autocomplete::MarkdownAutocomplete::check_for_wiki_completions(
-            &self.editor_content,
-            self.editor_cursor.0 as usize,
-            self.editor_cursor.1 as usize,
-            &note_titles,
-        ) {
-            self.autocomplete_state.activate(completions.0, completions.1);
-        } else if let Some(completions) = self.markdown_autocomplete.check_for_completions(
+        if let Some(completions) = self.markdown_autocomplete.check_for_completions(
             &self.editor_content,
             self.editor_cursor.0 as usize,
             self.editor_cursor.1 as usize,
