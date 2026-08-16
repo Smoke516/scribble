@@ -85,6 +85,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         AppMode::ThemeBrowser => draw_theme_browser_dialog(f, app),
         AppMode::Rename => draw_rename_dialog(f, app),
         AppMode::Outline => draw_outline_dialog(f, app),
+        AppMode::Tasks => draw_tasks_dialog(f, app),
         AppMode::TemplatePicker => draw_template_picker_dialog(f, app),
         AppMode::SpellSuggest => draw_spell_suggest_dialog(f, app),
         _ => {}
@@ -901,6 +902,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::TemplatePicker => "TEMPLATE",
         AppMode::SpellSuggest => "SPELL",
         AppMode::Outline => "OUTLINE",
+        AppMode::Tasks => "TASKS",
         AppMode::Explorer => "EXPLORER",
     };
 
@@ -932,6 +934,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::TemplatePicker => app.theme_manager.mode_input(),
         AppMode::SpellSuggest => Style::default().fg(TokyoNightTheme::BG).bg(TokyoNightTheme::RED).add_modifier(Modifier::BOLD),
         AppMode::Outline => app.theme_manager.mode_command(),
+        AppMode::Tasks => app.theme_manager.mode_command(),
     };
     
     // Create enhanced message display with operation result feedback
@@ -1735,6 +1738,7 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from("  v          Enter Visual select mode"),
         Line::from("  Space      Toggle task checkbox [ ] <-> [x] on current line"),
         Line::from("  Ctrl+G     Outline: jump to a heading    F4      Open today's daily note"),
+        Line::from("  Ctrl+K     Tasks: every open task in the vault"),
         Line::from("  z=         Suggest spelling fix for word at cursor"),
         Line::from("  e          Open note in external editor"),
         Line::from(""),
@@ -2496,6 +2500,94 @@ fn draw_outline_dialog(f: &mut Frame, app: &App) {
 
     f.render_widget(
         Paragraph::new("↑↓ / j/k: Navigate  Enter: Jump  Esc/q: Close")
+            .style(Style::default().fg(TokyoNightTheme::COMMENT))
+            .alignment(Alignment::Center),
+        chunks[1],
+    );
+}
+
+/// Every open task in the vault, grouped under the note it came from.
+///
+/// Grouped rather than flat because the note is most of what tells you what a
+/// bare "- [ ] follow up" actually means, and repeating the title on every row
+/// would crowd out the task text it is there to explain.
+fn draw_tasks_dialog(f: &mut Frame, app: &App) {
+    let shown = app.task_items.len();
+    let notes = crate::tasks::notes_covered(&app.task_items);
+    let scope = if app.tasks_show_done { "All tasks" } else { "Open tasks" };
+    let area = centered_rect(64, 70, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(format!(
+            "☑  {} — {} across {} note{}",
+            scope,
+            shown,
+            notes,
+            if notes == 1 { "" } else { "s" }
+        ))
+        .borders(Borders::ALL)
+        .border_style(TokyoNightTheme::border_focused())
+        .style(TokyoNightTheme::popup());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(inner);
+
+    let mut last_note: Option<&str> = None;
+    let items: Vec<ListItem> = app
+        .task_items
+        .iter()
+        .map(|task| {
+            // A header row would need its own index and break the selection, so the
+            // note name is carried on the first task of each group instead.
+            let heading = if last_note != Some(task.note_title.as_str()) {
+                last_note = Some(task.note_title.as_str());
+                Some(task.note_title.as_str())
+            } else {
+                None
+            };
+
+            let mut spans = Vec::new();
+            match heading {
+                Some(title) => spans.push(Span::styled(
+                    format!("{:<22.22} ", title),
+                    Style::default().fg(TokyoNightTheme::BLUE),
+                )),
+                None => spans.push(Span::raw(" ".repeat(23))),
+            }
+            spans.push(Span::styled(
+                if task.done { "[x] " } else { "[ ] " },
+                Style::default().fg(if task.done {
+                    TokyoNightTheme::GREEN
+                } else {
+                    TokyoNightTheme::YELLOW
+                }),
+            ));
+            spans.push(Span::styled(
+                task.text.as_str(),
+                Style::default().fg(if task.done {
+                    TokyoNightTheme::COMMENT
+                } else {
+                    TokyoNightTheme::FG
+                }),
+            ));
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .highlight_style(TokyoNightTheme::selected())
+        .highlight_symbol("▶ ");
+    let mut list_state = ListState::default();
+    list_state.select(Some(app.task_selected));
+    f.render_stateful_widget(list, chunks[0], &mut list_state);
+
+    f.render_widget(
+        Paragraph::new("↑↓ / j/k: Navigate  Space: Toggle  Enter: Open  a: Show done  Esc/q: Close")
             .style(Style::default().fg(TokyoNightTheme::COMMENT))
             .alignment(Alignment::Center),
         chunks[1],

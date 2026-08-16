@@ -48,6 +48,8 @@ pub enum AppMode {
     TemplatePicker,
     SpellSuggest,
     Outline,
+    /// Every open task in the vault, in one list.
+    Tasks,
     /// The folder tree as an overlay, for when the sidebar is not on screen.
     Explorer,
 }
@@ -277,6 +279,24 @@ pub struct Dashboard {
 
 /// Render a duration as the coarsest unit that is still true. Deliberately
 /// approximate: the column exists to be scanned, not to be precise.
+/// Flip a checkbox on a line, returning the rewritten line.
+///
+/// `None` when the line has no checkbox, which the task panel treats as "the note
+/// changed under us" rather than editing whatever now sits on that line.
+fn flip_checkbox(line: &str) -> Option<String> {
+    let open = line.find("[ ]").map(|pos| (pos, "[x]"));
+    let shut = crate::tasks::parse_task_line(line)
+        .filter(|(done, _)| *done)
+        .and_then(|_| line.find('[').map(|pos| (pos, "[ ]")));
+
+    let (col, new) = open.or(shut)?;
+    let mut out = line.to_string();
+    // Every mark is one character and the brackets are ASCII, so the replacement is
+    // always the same three bytes.
+    out.replace_range(col..col + 3, new);
+    Some(out)
+}
+
 fn humanize_age(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let mins = (now - then).num_minutes();
     if mins < 1 {
@@ -443,6 +463,13 @@ pub struct App {
     pub outline_headings: Vec<(usize, u8, String)>, // (line_index, level, text)
     pub outline_selected: usize,
 
+    /// Every task in the vault, as of the last time the panel was opened.
+    pub task_items: Vec<crate::tasks::Task>,
+    pub task_selected: usize,
+    /// Whether the panel is also listing completed tasks. Off by default: the
+    /// question the panel answers is what is still outstanding.
+    pub tasks_show_done: bool,
+
     // Per-note cursor memory: restore position when revisiting a note
     pub note_cursor_map: HashMap<Uuid, (u16, u16)>,
 
@@ -589,6 +616,9 @@ impl App {
 
             outline_headings: Vec::new(),
             outline_selected: 0,
+            task_items: Vec::new(),
+            task_selected: 0,
+            tasks_show_done: false,
 
             // Per-note cursor memory
             note_cursor_map: HashMap::new(),
@@ -973,22 +1003,12 @@ impl App {
         let today_title = chrono::Local::now().format("%Y-%m-%d").to_string();
         let today_exists = self.notebook.find_note_by_title(&today_title).is_some();
 
-        let mut open_tasks = 0usize;
-        let mut notes_with_tasks = 0usize;
-        for note in self.notebook.notes.values() {
-            let n = note
-                .content
-                .lines()
-                .filter(|l| {
-                    let t = l.trim_start();
-                    t.starts_with("- [ ]") || t.starts_with("* [ ]")
-                })
-                .count();
-            if n > 0 {
-                open_tasks += n;
-                notes_with_tasks += 1;
-            }
-        }
+        // Shared with the task panel, so the landing page's count and the panel's
+        // list can never disagree about what a task is. The inline version this
+        // replaces also counted checkboxes inside fenced code blocks.
+        let open = crate::tasks::collect(&self.notebook, false);
+        let open_tasks = open.len();
+        let notes_with_tasks = crate::tasks::notes_covered(&open);
 
         let recent: Vec<RecentEntry> = recent;
         let mut menu: Vec<MenuItem> = recent
@@ -1550,6 +1570,118 @@ impl App {
     }
 
     // -------------------------------------------------------------------------
+    // Task panel
+    // -------------------------------------------------------------------------
+
+    /// Collect every open task in the vault and enter Tasks mode.
+    ///
+    /// Vault-wide rather than per-note on purpose: the point is seeing what is
+    /// outstanding without having to remember which note you wrote it in.
+    pub fn show_task_panel(&mut self) {
+        self.task_items = crate::tasks::collect(&self.notebook, self.tasks_show_done);
+        if self.task_items.is_empty() {
+            let what = if self.tasks_show_done { "tasks" } else { "open tasks" };
+            self.set_message(format!("No {} in the vault", what));
+            return;
+        }
+        self.task_selected = self.task_selected.min(self.task_items.len() - 1);
+        self.mode = AppMode::Tasks;
+    }
+
+    pub fn task_navigate_up(&mut self) {
+        self.task_selected = self.task_selected.saturating_sub(1);
+    }
+
+    pub fn task_navigate_down(&mut self) {
+        if self.task_selected < self.task_items.len().saturating_sub(1) {
+            self.task_selected += 1;
+        }
+    }
+
+    pub fn cancel_task_panel(&mut self) {
+        self.mode = AppMode::Normal;
+    }
+
+    /// Show or hide completed tasks, keeping the panel open.
+    pub fn toggle_task_panel_done(&mut self) {
+        self.tasks_show_done = !self.tasks_show_done;
+        self.task_items = crate::tasks::collect(&self.notebook, self.tasks_show_done);
+        if self.task_items.is_empty() {
+            self.task_selected = 0;
+        } else {
+            self.task_selected = self.task_selected.min(self.task_items.len() - 1);
+        }
+    }
+
+    /// Open the note the selected task lives in, with the cursor on that line.
+    pub fn task_select(&mut self) {
+        let Some(task) = self.task_items.get(self.task_selected).cloned() else {
+            return;
+        };
+        self.mode = AppMode::Normal;
+        self.open_note_by_id(task.note_id);
+        self.focused_pane = FocusedPane::Editor;
+        self.jump_to_line(task.line + 1); // jump_to_line is 1-based
+    }
+
+    /// Tick or untick the selected task where it lives, without leaving the panel.
+    ///
+    /// This is what makes the panel somewhere you work rather than just an index:
+    /// clearing the morning's list should not mean opening five notes.
+    pub fn task_toggle_selected(&mut self) {
+        let Some(task) = self.task_items.get(self.task_selected).cloned() else {
+            return;
+        };
+        let Some(note) = self.notebook.notes.get_mut(&task.note_id) else {
+            return;
+        };
+
+        let mut lines: Vec<String> = note.content.lines().map(|l| l.to_string()).collect();
+        let Some(line) = lines.get_mut(task.line) else {
+            return;
+        };
+        let Some(flipped) = flip_checkbox(line) else {
+            // The note changed under us since the list was built; rebuild rather
+            // than editing whatever now happens to sit on that line.
+            self.task_items = crate::tasks::collect(&self.notebook, self.tasks_show_done);
+            self.set_message("Task list was out of date; refreshed".to_string());
+            return;
+        };
+        *line = flipped;
+
+        let trailing_newline = note.content.ends_with('\n');
+        let mut rebuilt = lines.join("\n");
+        if trailing_newline {
+            rebuilt.push('\n');
+        }
+        note.update_content(rebuilt.clone());
+        let note_id = task.note_id;
+
+        // Keep the open editor in step if this is the note on screen.
+        if self.current_note.as_ref().map(|n| n.id) == Some(note_id) {
+            self.editor_content = rebuilt;
+            if let Some(cn) = self.current_note.as_mut() {
+                cn.content = self.editor_content.clone();
+            }
+            self.clamp_cursor_to_content();
+        }
+
+        // mark_note_dirty also sets the pending-write flag.
+        self.mark_note_dirty(note_id);
+        self.mark_modified();
+
+        // Rebuild so a ticked task leaves the list when done items are hidden, and
+        // hold the selection at the same position rather than snapping to the top.
+        let previous = self.task_selected;
+        self.task_items = crate::tasks::collect(&self.notebook, self.tasks_show_done);
+        self.task_selected = previous.min(self.task_items.len().saturating_sub(1));
+        if self.task_items.is_empty() {
+            self.mode = AppMode::Normal;
+            self.set_message("All tasks done".to_string());
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Task checkboxes & daily notes
     // -------------------------------------------------------------------------
 
@@ -2100,6 +2232,137 @@ intro text
         assert_eq!(app.mode, AppMode::Normal);
         assert_eq!(app.editor_cursor.0, 3); // jumped to "## B"
     }
+
+    /// An app whose vault holds exactly the given `(title, content)` notes.
+    ///
+    /// `App::new` seeds a sample note, and `notes` is a HashMap with no order of
+    /// its own — so leaving it in place makes any "the first note" lookup a coin
+    /// flip, and lets a stray sample task into the panel's list.
+    fn app_with_notes(notes: &[(&str, &str)]) -> App {
+        let mut app = App::default();
+        app.notebook.notes.clear();
+        app.notebook.folders.clear();
+        for (title, content) in notes {
+            let mut note = Note::new(title.to_string(), None);
+            note.content = content.to_string();
+            app.notebook.add_note(note);
+        }
+        app
+    }
+
+    #[test]
+    fn the_task_panel_lists_open_tasks_from_every_note() {
+        let mut app = app_with_notes(&[
+            ("Alpha", "- [ ] one\n- [x] done\n"),
+            ("Beta", "- [ ] two\n"),
+        ]);
+        app.show_task_panel();
+
+        assert_eq!(app.mode, AppMode::Tasks);
+        let texts: Vec<&str> = app.task_items.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, vec!["one", "two"], "completed task should be hidden");
+    }
+
+    /// Opening a panel with nothing in it would be a dead end, so it says so and
+    /// stays put instead.
+    #[test]
+    fn an_empty_task_panel_does_not_open() {
+        let mut app = app_with_notes(&[("Alpha", "no tasks here\n")]);
+        app.show_task_panel();
+        assert_eq!(app.mode, AppMode::Normal, "opened an empty panel");
+    }
+
+    #[test]
+    fn selecting_a_task_opens_its_note_at_that_line() {
+        let mut app = app_with_notes(&[("Alpha", "intro\n\n- [ ] find me\n")]);
+        app.show_task_panel();
+        app.task_select();
+
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(
+            app.current_note.as_ref().map(|n| n.title.as_str()),
+            Some("Alpha")
+        );
+        assert_eq!(app.editor_cursor.0, 2, "cursor did not land on the task line");
+    }
+
+    /// Ticking from the panel is what makes it somewhere to work rather than just
+    /// an index — clearing the morning's list should not mean opening five notes.
+    #[test]
+    fn toggling_from_the_panel_edits_the_note_it_lives_in() {
+        let mut app = app_with_notes(&[("Alpha", "- [ ] one\n- [ ] two\n")]);
+        app.show_task_panel();
+        app.task_toggle_selected();
+
+        let id = app.notebook.find_note_by_title("Alpha").unwrap();
+        let content = app.notebook.notes.get(&id).unwrap().content.clone();
+        assert!(content.starts_with("- [x] one"), "checkbox not ticked: {:?}", content);
+        assert!(content.contains("- [ ] two"), "the other task was disturbed: {:?}", content);
+        assert!(app.disk.dirty_note_ids.contains(&id), "edit was not queued for saving");
+    }
+
+    /// A ticked task leaves the list when completed ones are hidden, and the
+    /// selection holds its position rather than snapping back to the top.
+    #[test]
+    fn a_ticked_task_leaves_the_list_and_the_selection_holds() {
+        let mut app = app_with_notes(&[("Alpha", "- [ ] one\n- [ ] two\n- [ ] three\n")]);
+        app.show_task_panel();
+        app.task_navigate_down();
+        assert_eq!(app.task_items[app.task_selected].text, "two");
+
+        app.task_toggle_selected();
+
+        let texts: Vec<&str> = app.task_items.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, vec!["one", "three"]);
+        assert_eq!(app.task_selected, 1, "selection jumped away from where it was");
+    }
+
+    #[test]
+    fn showing_done_tasks_includes_them_without_closing_the_panel() {
+        let mut app = app_with_notes(&[("Alpha", "- [ ] open\n- [x] closed\n")]);
+        app.show_task_panel();
+        assert_eq!(app.task_items.len(), 1);
+
+        app.toggle_task_panel_done();
+        assert_eq!(app.task_items.len(), 2);
+        assert!(app.tasks_show_done);
+    }
+
+    /// The editor must not keep showing the old text when the panel edits the note
+    /// currently on screen.
+    #[test]
+    fn toggling_the_open_note_updates_the_editor_too() {
+        let mut app = app_with_notes(&[("Alpha", "- [ ] one\n")]);
+        let id = app.notebook.find_note_by_title("Alpha").unwrap();
+        app.open_note_by_id(id);
+        app.show_task_panel();
+        app.task_toggle_selected();
+
+        assert!(
+            app.editor_content.starts_with("- [x] one"),
+            "editor kept the stale text: {:?}",
+            app.editor_content
+        );
+    }
+
+    /// Ticking the last open task empties the panel, which should close rather than
+    /// leave an empty box on screen.
+    #[test]
+    fn clearing_the_last_task_closes_the_panel() {
+        let mut app = app_with_notes(&[("Alpha", "- [ ] only one\n")]);
+        app.show_task_panel();
+        app.task_toggle_selected();
+        assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn flip_checkbox_handles_both_directions_and_leaves_prose_alone() {
+        assert_eq!(flip_checkbox("- [ ] a").as_deref(), Some("- [x] a"));
+        assert_eq!(flip_checkbox("- [x] a").as_deref(), Some("- [ ] a"));
+        assert_eq!(flip_checkbox("  - [X] indented").as_deref(), Some("  - [ ] indented"));
+        assert_eq!(flip_checkbox("just prose"), None);
+    }
+
 
     #[test]
     fn toggle_task_checkbox_flips_both_ways() {
