@@ -101,6 +101,54 @@ pub trait NotebookStorage {
     }
 }
 
+/// Whether a filename is a sync client's conflict artefact rather than a note the
+/// user made. Nextcloud writes `Note (conflicted copy 2026-08-16 120000).md`;
+/// Syncthing writes `Note.sync-conflict-20260816-120000-ABCDEFG.md`.
+fn looks_like_a_sync_conflict(path: &Path) -> bool {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    name.contains("(conflicted copy") || name.contains(".sync-conflict-")
+}
+
+/// Keep two files that claim the same `scribble_id` as two separate notes.
+///
+/// A sync client's conflicted copy is a byte-for-byte copy, frontmatter included,
+/// so it arrives carrying the *same* id as the note it forked from. `notes` is
+/// keyed by id, so the second file to load used to evict the first and the pair
+/// silently collapsed into one — and walk order decided the winner. `(` sorts
+/// before `.`, so `Meeting (conflicted copy).md` consistently beat `Meeting.md`:
+/// the real note disappeared from scribble altogether and the user carried on
+/// editing the conflict without being told.
+///
+/// Nothing here tries to merge or resolve the conflict — that is the user's call.
+/// It only guarantees that no note vanishes. The incoming note is re-minted, except
+/// when the id is currently held by a conflict artefact and the incoming file is
+/// the genuine note, in which case they swap so the original id stays with the
+/// original note and its links and history keep resolving.
+fn resolve_id_collision(notebook: &mut NotebookData, incoming: &mut Note) {
+    let Some(existing) = notebook.notes.get(&incoming.id) else {
+        return;
+    };
+
+    let existing_is_artefact = existing
+        .file_path
+        .as_deref()
+        .is_some_and(looks_like_a_sync_conflict);
+    let incoming_is_artefact = incoming
+        .file_path
+        .as_deref()
+        .is_some_and(looks_like_a_sync_conflict);
+
+    if existing_is_artefact && !incoming_is_artefact {
+        // The artefact got here first only because of walk order. Hand the id back.
+        let contested = incoming.id;
+        let mut displaced = notebook.notes.remove(&contested).expect("just borrowed");
+        displaced.id = Uuid::new_v4();
+        notebook.add_note(displaced);
+    } else {
+        incoming.id = Uuid::new_v4();
+    }
+}
+
 // Vault-based storage for Obsidian compatibility
 #[derive(Debug)]
 pub struct VaultStorage {
@@ -395,11 +443,12 @@ impl NotebookStorage for VaultStorage {
                         }
                     }
                     
+                    resolve_id_collision(&mut notebook, &mut note);
                     notebook.add_note(note);
                 }
             }
         }
-        
+
         // Rebuild note links after loading all notes
         notebook.rebuild_links();
         
@@ -818,6 +867,126 @@ mod tests {
 
         assert_eq!(recorded_year, "2020", "frontmatter modified_at was overwritten");
         assert_eq!(bare_year, now_year, "note without frontmatter should use file mtime");
+    }
+
+    /// Write a vault of `(filename, body)` notes that all share one scribble_id,
+    /// load it, and return `(filename, body)` for each note that survived.
+    fn load_sharing_one_id(tag: &str, files: &[(&str, &str)]) -> Vec<(String, String)> {
+        let dir = std::env::temp_dir().join(format!("scribble_{}_{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let fm = "---\nscribble_id: 6f1c9b3e-51a0-4a5f-9d2e-8c7b4a1f0e33\ntitle: Meeting\n---\n";
+        for (name, body) in files {
+            fs::write(dir.join(name), format!("{}{}", fm, body)).unwrap();
+        }
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        let nb = storage.load_notebook().unwrap();
+        let mut survivors: Vec<(String, String)> = nb
+            .notes
+            .values()
+            .map(|n| {
+                let name = n
+                    .file_path
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
+                (name, n.content.clone())
+            })
+            .collect();
+        survivors.sort();
+
+        let _ = fs::remove_dir_all(&dir);
+        survivors
+    }
+
+    /// A sync client's conflicted copy carries the original's frontmatter verbatim,
+    /// so both files claim one scribble_id. Regression: `notes` is keyed by id, so
+    /// the pair collapsed to a single note and walk order picked the winner — `(`
+    /// sorts before `.`, so the conflicted copy consistently evicted the real note,
+    /// which then vanished from scribble entirely.
+    #[test]
+    fn conflicted_copy_does_not_evict_the_real_note() {
+        let survivors = load_sharing_one_id(
+            "conflict",
+            &[
+                ("Meeting.md", "the original\n"),
+                ("Meeting (conflicted copy 2026-08-16).md", "the conflicted copy\n"),
+            ],
+        );
+
+        assert_eq!(survivors.len(), 2, "a note was silently dropped: {:?}", survivors);
+        assert!(
+            survivors.iter().any(|(n, b)| n == "Meeting.md" && b == "the original\n"),
+            "the real note did not survive: {:?}",
+            survivors
+        );
+    }
+
+    /// Syncthing names its artefacts differently, and sorts the other way round —
+    /// `.sync-conflict-` lands after `Meeting.md`, so here the real note loads
+    /// first and the artefact is the one that must yield.
+    #[test]
+    fn syncthing_conflict_does_not_evict_the_real_note() {
+        let survivors = load_sharing_one_id(
+            "syncthing",
+            &[
+                ("Meeting.md", "the original\n"),
+                ("Meeting.sync-conflict-20260816-120000-ABCDEFG.md", "the fork\n"),
+            ],
+        );
+
+        assert_eq!(survivors.len(), 2, "a note was silently dropped: {:?}", survivors);
+        assert!(
+            survivors.iter().any(|(n, b)| n == "Meeting.md" && b == "the original\n"),
+            "the real note did not survive: {:?}",
+            survivors
+        );
+    }
+
+    /// The real note must keep the contested id whichever order the two files load
+    /// in, so links and history carry on resolving to it rather than to the artefact.
+    #[test]
+    fn the_real_note_keeps_the_contested_id() {
+        let contested: Uuid = "6f1c9b3e-51a0-4a5f-9d2e-8c7b4a1f0e33".parse().unwrap();
+        let dir = std::env::temp_dir().join(format!("scribble_keepid_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let fm = "---\nscribble_id: 6f1c9b3e-51a0-4a5f-9d2e-8c7b4a1f0e33\ntitle: Meeting\n---\n";
+        fs::write(dir.join("Meeting.md"), format!("{}the original\n", fm)).unwrap();
+        fs::write(
+            dir.join("Meeting (conflicted copy 2026-08-16).md"),
+            format!("{}the conflicted copy\n", fm),
+        )
+        .unwrap();
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        let nb = storage.load_notebook().unwrap();
+        let holder = nb.notes.get(&contested).map(|n| n.content.clone());
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            holder.as_deref(),
+            Some("the original\n"),
+            "the contested id ended up on the conflict artefact"
+        );
+    }
+
+    /// Two ordinary notes that share an id — a copy-pasted file, a restored backup —
+    /// must both survive too. Neither is an artefact, so the rule is simply that the
+    /// one already loaded keeps the id.
+    #[test]
+    fn two_ordinary_notes_sharing_an_id_both_survive() {
+        let survivors = load_sharing_one_id(
+            "dupe",
+            &[("Meeting.md", "first\n"), ("Meeting copy.md", "second\n")],
+        );
+
+        assert_eq!(survivors.len(), 2, "a note was silently dropped: {:?}", survivors);
     }
 
     /// Frontmatter must not embed absolute paths: they pin a note to one machine
