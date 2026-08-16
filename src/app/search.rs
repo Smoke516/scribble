@@ -120,107 +120,10 @@ impl App {
         }
     }
 
-    // Note linking functionality
-    pub fn parse_current_note_links(&mut self) {
-        if let Some(ref note) = self.current_note {
-            let note_id = note.id;
-            self.notebook.parse_links_in_note(note_id);
-        }
-    }
 
-    pub fn follow_link_at_cursor(&mut self) -> Result<(), String> {
-        if let Some(ref _note) = self.current_note {
-            // Calculate the actual byte position of the cursor
-            let cursor_pos = self.calculate_cursor_byte_position();
-            
-            if let Some(link_title) = self.extract_link_at_position(cursor_pos) {
-                if let Some(target_id) = self.notebook.find_note_by_title(&link_title) {
-                    self.open_note_by_id(target_id);
-                    self.set_operation_success(
-                        format!("Followed link to: {}", link_title),
-                        Some("🔗".to_string())
-                    );
-                    Ok(())
-                } else {
-                    // Offer to create the note
-                    self.set_operation_error(
-                        format!("Note '{}' not found. Press n to create a new note with this title.", link_title),
-                        Some("🔍".to_string())
-                    );
-                    Err(format!("Note '{}' not found", link_title))
-                }
-            } else {
-                Err("No [[wiki link]] found at cursor position".to_string())
-            }
-        } else {
-            Err("No note currently open".to_string())
-        }
-    }
 
-    pub(crate) fn calculate_cursor_byte_position(&self) -> usize {
-        let lines: Vec<&str> = self.editor_content.lines().collect();
-        let mut byte_position = 0;
-        
-        // Add bytes from all lines before the cursor line
-        for i in 0..(self.editor_cursor.0 as usize) {
-            if let Some(line) = lines.get(i) {
-                byte_position += line.len() + 1; // +1 for newline character
-            }
-        }
-        
-        // Add bytes from the cursor column position within the current line
-        byte_position += self.editor_cursor.1 as usize;
-        
-        // Make sure we don't exceed content length
-        byte_position.min(self.editor_content.len())
-    }
     
-    pub(crate) fn extract_link_at_position(&self, pos: usize) -> Option<String> {
-        use regex::Regex;
-        
-        let link_regex = Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
-        
-        // First, try to find a link that contains the cursor position
-        for captures in link_regex.captures_iter(&self.editor_content) {
-            if let Some(full_match) = captures.get(0) {
-                // Check if cursor is within the link
-                if pos >= full_match.start() && pos <= full_match.end() {
-                    if let Some(title) = captures.get(1) {
-                        return Some(title.as_str().trim().to_string());
-                    }
-                }
-            }
-        }
-        
-        // If no direct match, try to find the closest link within the current line
-        let lines: Vec<&str> = self.editor_content.lines().collect();
-        let current_line_index = self.editor_cursor.0 as usize;
-        
-        if let Some(current_line) = lines.get(current_line_index) {
-            // Look for links in the current line
-            for captures in link_regex.captures_iter(current_line) {
-                if let Some(title) = captures.get(1) {
-                    return Some(title.as_str().trim().to_string());
-                }
-            }
-        }
-        
-        None
-    }
 
-    pub fn get_backlinks_for_current_note(&self) -> Vec<String> {
-        if let Some(ref note) = self.current_note {
-            self.notebook.get_backlinks(note.id)
-                .iter()
-                .filter_map(|link| {
-                    self.notebook.notes.get(&link.source_note_id)
-                        .map(|source_note| source_note.title.clone())
-                })
-                .collect()
-        } else {
-            Vec::new()
-        }
-    }
 
     /// Enter advanced search (regex:/case: prefixes over note content).
     pub fn start_advanced_search(&mut self) {
@@ -228,18 +131,4 @@ impl App {
         self.input_buffer.clear();
     }
 
-    /// Outgoing links for the current note as `(target_id_if_exists, title)`,
-    /// de-duplicated by title so a note linked twice shows once.
-    pub fn get_outgoing_links_for_current_note(&self) -> Vec<(Option<uuid::Uuid>, String)> {
-        if let Some(ref note) = self.current_note {
-            let mut seen = std::collections::HashSet::new();
-            self.notebook.get_outgoing_links(note.id)
-                .iter()
-                .filter(|link| seen.insert(link.target_note_title.to_lowercase()))
-                .map(|link| (link.target_note_id, link.target_note_title.clone()))
-                .collect()
-        } else {
-            Vec::new()
-        }
-    }
 }

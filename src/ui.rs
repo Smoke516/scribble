@@ -84,9 +84,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         AppMode::TagInput => draw_tag_input_dialog(f, app),
         AppMode::ThemeBrowser => draw_theme_browser_dialog(f, app),
         AppMode::Rename => draw_rename_dialog(f, app),
-        AppMode::Backlinks => draw_backlinks_dialog(f, app),
         AppMode::Outline => draw_outline_dialog(f, app),
         AppMode::Palette => draw_palette_dialog(f, app),
+        AppMode::Tasks => draw_tasks_dialog(f, app),
         AppMode::TemplatePicker => draw_template_picker_dialog(f, app),
         AppMode::SpellSuggest => draw_spell_suggest_dialog(f, app),
         _ => {}
@@ -899,12 +899,12 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::ThemeBrowser => "THEMES",
         AppMode::Rename => "RENAME",
         AppMode::NoteSearch => "NOTE SEARCH",
-        AppMode::Backlinks => "BACKLINKS",
         AppMode::Visual => "VISUAL",
         AppMode::TemplatePicker => "TEMPLATE",
         AppMode::SpellSuggest => "SPELL",
         AppMode::Outline => "OUTLINE",
         AppMode::Palette => "PALETTE",
+        AppMode::Tasks => "TASKS",
         AppMode::Explorer => "EXPLORER",
     };
 
@@ -932,12 +932,12 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::ThemeBrowser => app.theme_manager.mode_command(), // Use command style for theme browser
         AppMode::Rename => app.theme_manager.mode_input(),
         AppMode::NoteSearch => app.theme_manager.mode_search(),
-        AppMode::Backlinks => app.theme_manager.mode_command(),
         AppMode::Visual => Style::default().fg(TokyoNightTheme::BG).bg(TokyoNightTheme::ORANGE).add_modifier(Modifier::BOLD),
         AppMode::TemplatePicker => app.theme_manager.mode_input(),
         AppMode::SpellSuggest => Style::default().fg(TokyoNightTheme::BG).bg(TokyoNightTheme::RED).add_modifier(Modifier::BOLD),
         AppMode::Outline => app.theme_manager.mode_command(),
         AppMode::Palette => app.theme_manager.mode_command(),
+        AppMode::Tasks => app.theme_manager.mode_command(),
     };
     
     // Create enhanced message display with operation result feedback
@@ -1743,6 +1743,7 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from("  Ctrl+P     Go to: notes, tags, headings, commands (one door for all of them)"),
         Line::from("             > commands   # tags   ? full text   @ headings"),
         Line::from("  Ctrl+G     Outline: jump to a heading    F4      Open today's daily note"),
+        Line::from("  Ctrl+K     Tasks: every open task in the vault"),
         Line::from("  z=         Suggest spelling fix for word at cursor"),
         Line::from("  e          Open note in external editor"),
         Line::from(""),
@@ -1764,11 +1765,10 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
             Span::styled("Insert Mode", Style::default().fg(TokyoNightTheme::GREEN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
         ]),
         Line::from(""),
-        Line::from("  [[         Wiki-link autocomplete (note titles)"),
         Line::from("  Tab        Accept autocomplete suggestion  ↑/↓   Navigate suggestions"),
         Line::from("  Ctrl+Z     Undo                           Ctrl+Y  Redo"),
         Line::from("  Ctrl+S     Save                           F2      Toggle preview"),
-        Line::from("  Ctrl+V     Paste system clipboard         Ctrl+L  Follow [[wiki link]] at cursor"),
+        Line::from("  Ctrl+V     Paste system clipboard"),
         Line::from("  Ctrl+U/D   Half-page scroll up / down"),
         Line::from("  Esc        Exit Insert mode (auto-saves + spell check)"),
         Line::from(""),
@@ -1783,7 +1783,6 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from("  / (editor) In-note search (highlighted)   n/N    Next / prev match"),
         Line::from("  Esc        Clear in-note highlights"),
         Line::from("  Ctrl+J     Quick Jump (fuzzy)              Ctrl+O  Recent files"),
-        Line::from("  Ctrl+L     Follow [[wiki link]] at cursor   Ctrl+B  Links panel (in + out)"),
         Line::from(""),
 
         // ── Spell Check ───────────────────────────────────────────────────────
@@ -1829,8 +1828,6 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         ]),
         Line::from(""),
         Line::from("  Ctrl+V     Vault switcher                  :vault  Command mode"),
-        Line::from("  [[link]]   Wiki-style note links           Ctrl+L  Follow link"),
-        Line::from("  Ctrl+B     Links panel: incoming + outgoing (Tab switches)"),
         Line::from("  Live file-watch sync, YAML frontmatter, #tag support"),
         Line::from(""),
 
@@ -1877,7 +1874,6 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
             Span::styled("Tips", Style::default().fg(TokyoNightTheme::GREEN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
         ]),
         Line::from(""),
-        Line::from("  • Type [[ in Insert mode to get wiki-link autocomplete for note titles"),
         Line::from("  • Cursor position is remembered per-note when you switch between notes"),
         Line::from("  • :spell on + z= gives Vim-style spell correction with aspell suggestions"),
         Line::from("  • N (outside the editor) picks a template: Blank/Daily/Meeting/Project"),
@@ -2468,115 +2464,6 @@ fn draw_tag_browser_dialog(f: &mut Frame, app: &App) {
     f.render_widget(help_paragraph, chunks[1]);
 }
 
-fn draw_backlinks_dialog(f: &mut Frame, app: &App) {
-    let note_title = app.current_note.as_ref().map(|n| n.title.as_str()).unwrap_or("?");
-    let area = centered_rect(60, 60, f.area());
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .title(format!("🔗 Links — '{}'", note_title))
-        .borders(Borders::ALL)
-        .border_style(TokyoNightTheme::border_focused())
-        .style(TokyoNightTheme::popup());
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    // Reserve space for the outgoing section only when there is one.
-    let out_h = if app.links.outgoing.is_empty() {
-        0
-    } else {
-        (app.links.outgoing.len() as u16 + 2).min(8)
-    };
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(out_h), Constraint::Length(1)])
-        .split(inner);
-
-    let incoming_focused = app.links.focus == crate::app::BacklinkFocus::Incoming;
-    let outgoing_focused = !incoming_focused;
-    let border_for = |focused: bool| if focused {
-        TokyoNightTheme::border_focused()
-    } else {
-        TokyoNightTheme::border_inactive()
-    };
-
-    // ── Incoming: notes that link to this one ──
-    let in_block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!("Linked from ({})", app.links.incoming.len()))
-        .border_style(border_for(incoming_focused));
-    if app.links.incoming.is_empty() {
-        f.render_widget(
-            Paragraph::new("No notes link here yet.")
-                .block(in_block)
-                .style(Style::default().fg(TokyoNightTheme::COMMENT))
-                .alignment(Alignment::Center),
-            chunks[0],
-        );
-    } else {
-        let items: Vec<ListItem> = app.links.incoming
-            .iter()
-            .map(|(_, title)| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{} ", Icons::NOTE), TokyoNightTheme::note_icon()),
-                    Span::styled(title.as_str(), Style::default().fg(TokyoNightTheme::FG)),
-                ]))
-            })
-            .collect();
-        let list = List::new(items)
-            .block(in_block)
-            .highlight_style(TokyoNightTheme::selected())
-            .highlight_symbol("▶ ");
-        let mut list_state = ListState::default();
-        // Only show a highlighted row in the section that has focus.
-        list_state.select(incoming_focused.then_some(app.links.incoming_selected));
-        f.render_stateful_widget(list, chunks[0], &mut list_state);
-    }
-
-    // ── Outgoing: notes this one links to (broken links flagged) ──
-    if !app.links.outgoing.is_empty() {
-        let items: Vec<ListItem> = app.links.outgoing
-            .iter()
-            .map(|(target_id, title)| {
-                if target_id.is_some() {
-                    ListItem::new(Line::from(vec![
-                        Span::styled("→ ", Style::default().fg(TokyoNightTheme::COMMENT)),
-                        Span::styled(title.as_str(), Style::default().fg(TokyoNightTheme::FG)),
-                    ]))
-                } else {
-                    ListItem::new(Line::from(vec![
-                        Span::styled("→ ", Style::default().fg(TokyoNightTheme::COMMENT)),
-                        Span::styled(title.as_str(), Style::default().fg(TokyoNightTheme::RED)),
-                        Span::styled("  (missing — Enter to create)", Style::default().fg(TokyoNightTheme::COMMENT)),
-                    ]))
-                }
-            })
-            .collect();
-        let out_block = Block::default()
-            .borders(Borders::ALL)
-            .title(format!("Links to ({})", app.links.outgoing.len()))
-            .border_style(border_for(outgoing_focused));
-        let list = List::new(items)
-            .block(out_block)
-            .highlight_style(TokyoNightTheme::selected())
-            .highlight_symbol("▶ ");
-        let mut list_state = ListState::default();
-        list_state.select(outgoing_focused.then_some(app.links.outgoing_selected));
-        f.render_stateful_widget(list, chunks[1], &mut list_state);
-    }
-
-    let hint = if app.links.outgoing.is_empty() || app.links.incoming.is_empty() {
-        "↑↓ / j/k: Navigate  Enter: Open  Esc/q: Close"
-    } else {
-        "↑↓ / j/k: Navigate  Tab: Switch section  Enter: Open  Esc/q: Close"
-    };
-    f.render_widget(
-        Paragraph::new(hint)
-            .style(Style::default().fg(TokyoNightTheme::COMMENT))
-            .alignment(Alignment::Center),
-        chunks[2],
-    );
-}
 
 fn draw_outline_dialog(f: &mut Frame, app: &App) {
     let note_title = app.current_note.as_ref().map(|n| n.title.as_str()).unwrap_or("?");
@@ -2718,6 +2605,94 @@ fn draw_palette_dialog(f: &mut Frame, app: &App) {
             .style(Style::default().fg(TokyoNightTheme::COMMENT))
             .alignment(Alignment::Center),
         chunks[3],
+    );
+}
+
+/// Every open task in the vault, grouped under the note it came from.
+///
+/// Grouped rather than flat because the note is most of what tells you what a
+/// bare "- [ ] follow up" actually means, and repeating the title on every row
+/// would crowd out the task text it is there to explain.
+fn draw_tasks_dialog(f: &mut Frame, app: &App) {
+    let shown = app.task_items.len();
+    let notes = crate::tasks::notes_covered(&app.task_items);
+    let scope = if app.tasks_show_done { "All tasks" } else { "Open tasks" };
+    let area = centered_rect(64, 70, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(format!(
+            "☑  {} — {} across {} note{}",
+            scope,
+            shown,
+            notes,
+            if notes == 1 { "" } else { "s" }
+        ))
+        .borders(Borders::ALL)
+        .border_style(TokyoNightTheme::border_focused())
+        .style(TokyoNightTheme::popup());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(inner);
+
+    let mut last_note: Option<&str> = None;
+    let items: Vec<ListItem> = app
+        .task_items
+        .iter()
+        .map(|task| {
+            // A header row would need its own index and break the selection, so the
+            // note name is carried on the first task of each group instead.
+            let heading = if last_note != Some(task.note_title.as_str()) {
+                last_note = Some(task.note_title.as_str());
+                Some(task.note_title.as_str())
+            } else {
+                None
+            };
+
+            let mut spans = Vec::new();
+            match heading {
+                Some(title) => spans.push(Span::styled(
+                    format!("{:<22.22} ", title),
+                    Style::default().fg(TokyoNightTheme::BLUE),
+                )),
+                None => spans.push(Span::raw(" ".repeat(23))),
+            }
+            spans.push(Span::styled(
+                if task.done { "[x] " } else { "[ ] " },
+                Style::default().fg(if task.done {
+                    TokyoNightTheme::GREEN
+                } else {
+                    TokyoNightTheme::YELLOW
+                }),
+            ));
+            spans.push(Span::styled(
+                task.text.as_str(),
+                Style::default().fg(if task.done {
+                    TokyoNightTheme::COMMENT
+                } else {
+                    TokyoNightTheme::FG
+                }),
+            ));
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .highlight_style(TokyoNightTheme::selected())
+        .highlight_symbol("▶ ");
+    let mut list_state = ListState::default();
+    list_state.select(Some(app.task_selected));
+    f.render_stateful_widget(list, chunks[0], &mut list_state);
+
+    f.render_widget(
+        Paragraph::new("↑↓ / j/k: Navigate  Space: Toggle  Enter: Open  a: Show done  Esc/q: Close")
+            .style(Style::default().fg(TokyoNightTheme::COMMENT))
+            .alignment(Alignment::Center),
+        chunks[1],
     );
 }
 

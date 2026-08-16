@@ -33,14 +33,12 @@ A powerful terminal-based note-taking app with advanced tag management, Obsidian
 - **🔍 Fuzzy Search** - Intelligent search that finds matches even with typos (`Ctrl+F`)
 - **⚡ Quick Jump** - Instant note navigation with `Ctrl+J` - like VS Code's quick open
 - **🗂️ Outline Panel** - Jump to any heading in the current note (`Ctrl+G`)
-- **☑️ Task Checkboxes** - Toggle `- [ ]`/`- [x]` on the current line with `Space`
+- **☑️ Task Panel** - Every open task in the vault in one list, jump to it with `Enter` or tick it in place with `Space` (`Ctrl+K`); toggle a checkbox in the editor with `Space`
 - **📅 Daily Notes** - One-key open-or-create of today's dated note (`F4` or `:daily`)
 - **📋 Recent Files** - Quick access to recently opened notes (`Ctrl+O`)
 - **🔦 Go to** - One door for finding anything: notes, tags, headings and commands, ranked together (`Ctrl+P`)
 - **👁️ Live Preview** - Real-time markdown preview in split-screen mode (`F2`)
 - **↩️ Undo/Delete Safety** - Safely delete with full undo capability (`u` to undo)
-- **🔗 Note Linking** - Wiki-style `[[Note Title]]` links between notes (`Ctrl+L` to follow)
-- **🔙 Backlinks Panel** - See which notes link *to* the current note and where it links *out*; `Tab` switches sections, `Enter` opens either, and opening a broken outgoing link creates the missing note (`Ctrl+B`)
 - **🔎 Advanced Search** - Regex and scoped search like `case:`/`folder:Name` (`Ctrl+A`), plus in-note search with `/` and `n`/`N` to step through matches
 - **🔁 Search & Replace** - Find-and-replace across notes (`Ctrl+R`)
 - **📑 Templates** - Create notes from Blank/Daily/Meeting/Project templates (`N`)
@@ -218,7 +216,6 @@ FEATURES:
   • 📝 Rich markdown editing with live preview
   • 🗂️  Hierarchical folder organization
   • 🔍 Fuzzy search and quick jump navigation
-  • 🔗 Wiki-style [[note linking]]
   • ⚡ Auto-save and intelligent autocompletion
   • 🎨 Beautiful Tokyo Night theme
   • 🚀 Vim-inspired keybindings
@@ -270,10 +267,6 @@ Once started, press '?' for in-app help.
 ### 📅 Daily Notes (`F4` or `:daily`)
 - Open or create today's `YYYY-MM-DD` note in one step (no duplicates)
 
-### 🔗 Backlinks: navigable outgoing links (`Ctrl+B`)
-- `Tab` switches between the incoming and outgoing sections; `Enter` opens either
-- Broken outgoing links are flagged, and opening one creates the missing note
-
 ### 🔎 Folder-scoped search (`Ctrl+A` → `folder:Name term`)
 - Restrict advanced search to a folder; an empty term lists the whole folder
 
@@ -315,7 +308,6 @@ Once started, press '?' for in-app help.
 - **Auto-detection:** Automatically finds Obsidian vaults in current/parent directories
 - **Full Compatibility:** Seamlessly work with existing Obsidian vaults
 - **YAML Support:** Preserves all metadata and frontmatter
-- **Wiki Links:** Complete `[[note linking]]` support
 
 ### 🔄 Real-time File Watching
 - **Live Sync:** External file changes appear instantly
@@ -358,8 +350,6 @@ Once started, press '?' for in-app help.
 | `Tab` (in search) | Switch between regular and fuzzy search |
 | `Ctrl+J` | Quick Jump - instant fuzzy search across all notes |
 | `Ctrl+O` | Recent files - quick access to recently opened notes |
-| `Ctrl+L` | Follow [[wiki-style]] link at cursor |
-| `Ctrl+B` | Links panel - backlinks (in) and outgoing links (out) |
 | `Ctrl+G` | Outline panel - jump to any heading in the current note |
 | `F4` | Open (or create) today's daily note (`YYYY-MM-DD`) |
 | `u` | Undo last delete operation (restore from trash) |
@@ -484,9 +474,13 @@ Either way, changes are written to disk continuously — on edit, on a periodic 
 - `Space` - Toggle task checkbox `[ ]`/`[x]` on the current line (editor)
 - `e` - Open in external editor
 - `/` - Search
+<<<<<<< HEAD
 - `Ctrl+B` - Links panel (backlinks + outgoing)
 - `Ctrl+P` - Go to: notes, tags, headings, commands
+=======
+>>>>>>> master
 - `Ctrl+G` - Outline panel (jump to heading)
+- `Ctrl+K` - Task panel: every open task in the vault
 - `F4` - Open today's daily note
 - `:` - Command mode
 - `Ctrl+S` - Save
@@ -546,9 +540,8 @@ already answered to.
 - `Ctrl+S` - Save
 - `F2` - Toggle live preview
 - `Ctrl+V` - Paste from the system clipboard
-- `Ctrl+L` - Follow `[[wiki link]]` at cursor
 - `Ctrl+Z` / `Ctrl+Y` - Undo / redo
-- `[[` - Wiki-link autocomplete; `Tab` accepts a suggestion (or inserts 4 spaces)
+- `Tab` - Accept an autocomplete suggestion (or insert 4 spaces)
 - Regular typing for content; arrow keys for navigation
 - `Backspace` - Delete character
 

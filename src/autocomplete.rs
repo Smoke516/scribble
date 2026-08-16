@@ -210,56 +210,6 @@ impl MarkdownAutocomplete {
             .push(suggestion);
     }
 
-    /// Check for [[wiki-link]] completions based on available note titles.
-    /// Returns (suggestions, trigger_start) or None.
-    pub fn check_for_wiki_completions(
-        content: &str,
-        line: usize,
-        col: usize,
-        note_titles: &[String],
-    ) -> Option<(Vec<AutocompleteSuggestion>, usize)> {
-        let lines: Vec<&str> = content.lines().collect();
-        let current_line = lines.get(line)?;
-        let col = col.min(current_line.len());
-        let before = &current_line[..col];
-        // Find last [[ in the text before cursor
-        if let Some(bracket_pos) = before.rfind("[[") {
-            let query = &before[bracket_pos + 2..];
-            // Only suggest if there's no closing ]] yet on this line after the [[
-            let after = &current_line[col..];
-            if after.contains("]]" ) { return None; }
-            let query_lower = query.to_lowercase();
-            let mut suggestions: Vec<AutocompleteSuggestion> = note_titles
-                .iter()
-                .filter(|t| t.to_lowercase().contains(&query_lower))
-                .map(|title| {
-                    // Completion replaces from [[ to end of typed query
-                    let completion = format!("[[{}]]", title);
-                    AutocompleteSuggestion {
-                        trigger: "[[".to_string(),
-                        completion,
-                        description: format!("🔗 {}", title),
-                        cursor_offset: 0,
-                    }
-                })
-                .take(8)
-                .collect();
-            if suggestions.is_empty() && !query.is_empty() { return None; }
-            if suggestions.is_empty() {
-                // Show all notes when query is empty
-                suggestions = note_titles.iter().take(8).map(|title| AutocompleteSuggestion {
-                    trigger: "[[".to_string(),
-                    completion: format!("[[{}]]", title),
-                    description: format!("🔗 {}", title),
-                    cursor_offset: 0,
-                }).collect();
-            }
-            if !suggestions.is_empty() {
-                return Some((suggestions, bracket_pos));
-            }
-        }
-        None
-    }
 
     /// Check if the current cursor position should trigger autocompletion
     pub fn check_for_completions(

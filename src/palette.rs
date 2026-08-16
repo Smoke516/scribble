@@ -37,6 +37,7 @@ pub enum PaletteAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     DailyNote,
+    Tasks,
     Outline,
     Explorer,
     RecentFiles,
@@ -53,8 +54,9 @@ pub enum Command {
 impl Command {
     /// Every command, in the order they appear when the palette is opened with `>`
     /// and nothing typed.
-    pub const ALL: [Command; 12] = [
+    pub const ALL: [Command; 13] = [
         Command::DailyNote,
+        Command::Tasks,
         Command::Outline,
         Command::Explorer,
         Command::RecentFiles,
@@ -72,6 +74,7 @@ impl Command {
     pub fn label(self) -> &'static str {
         match self {
             Command::DailyNote => "Open today's daily note",
+            Command::Tasks => "Show open tasks",
             Command::Outline => "Jump to a heading in this note",
             Command::Explorer => "Browse the vault",
             Command::RecentFiles => "Open a recent note",
@@ -91,6 +94,7 @@ impl Command {
     pub fn chord(self) -> &'static str {
         match self {
             Command::DailyNote => "F4",
+            Command::Tasks => "Ctrl+K",
             Command::Outline => "Ctrl+G",
             Command::Explorer => "Ctrl+E",
             Command::RecentFiles => "Ctrl+O",

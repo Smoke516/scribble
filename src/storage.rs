@@ -608,9 +608,6 @@ impl NotebookStorage for VaultStorage {
             }
         }
 
-        // Rebuild note links after loading all notes
-        notebook.rebuild_links();
-        
         Ok(notebook)
     }
     
