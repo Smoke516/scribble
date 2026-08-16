@@ -201,8 +201,32 @@ impl App {
 
         match rename_type {
             TreeItemType::Note => {
+                // Read the old path before renaming, because rename_note can fail
+                // on a duplicate name and nothing should have moved by then.
+                let old_path = self
+                    .notebook
+                    .notes
+                    .get(&rename_id)
+                    .and_then(|n| n.file_path.clone());
+
                 self.rename_note(rename_id, new_name.clone())?;
-                // Rewrite the note so its frontmatter title is updated on disk.
+
+                // Let the file follow the title, the same way a move does.
+                // Renaming a folder already relocated its directory, but renaming
+                // a note left the file under its old name — so the filename and
+                // the title diverged permanently, which anything else reading the
+                // vault (Obsidian, git, ls) sees and scribble does not.
+                if let Some(note) = self.notebook.notes.get_mut(&rename_id) {
+                    note.file_path = None;
+                }
+                if self.current_note.as_ref().map(|n| n.id) == Some(rename_id) {
+                    if let Some(updated) = self.notebook.notes.get(&rename_id).cloned() {
+                        self.current_note = Some(updated);
+                    }
+                }
+                if let Some(path) = old_path {
+                    self.mark_note_deleted(path);
+                }
                 self.mark_note_dirty(rename_id);
             },
             TreeItemType::Folder => {

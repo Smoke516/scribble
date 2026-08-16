@@ -1521,16 +1521,24 @@ fn handle_replace_mode(app: &mut App, key: KeyEvent) {
                 let find = app.input_buffer[..pos].to_string();
                 let replace = app.input_buffer[pos + 1..].to_string();
                 
-                if let Some(ref mut note) = app.current_note {
+                if let Some(mut note) = app.current_note.clone() {
                     let is_regex = app.command_buffer.contains("regex");
                     let case_sensitive = app.command_buffer.contains("case");
-                    
-                    match app.enhanced_search.replace_in_note(note, &find, &replace, is_regex, case_sensitive) {
+
+                    match app.enhanced_search.replace_in_note(&mut note, &find, &replace, is_regex, case_sensitive) {
                         Ok(count) => {
                             if count > 0 {
+                                let id = note.id;
                                 app.editor_content = note.content.clone();
                                 // Update the note in the notebook
-                                app.notebook.notes.insert(note.id, note.clone());
+                                app.notebook.notes.insert(id, note.clone());
+                                app.current_note = Some(note);
+                                // Queue the write. Without this the replacement lived
+                                // in memory only: the message said it had happened,
+                                // and quitting threw it away unless something else
+                                // had happened to mark the note dirty first.
+                                app.mark_note_dirty(id);
+                                app.mark_modified();
                                 app.set_message(format!("Replaced {} occurrences", count));
                             } else {
                                 app.set_message("No matches found to replace".to_string());
@@ -2341,6 +2349,51 @@ mod dispatch_tests {
         for c in keys.chars() {
             press(app, c, KeyModifiers::NONE);
         }
+    }
+
+
+    /// Replace edited the note in memory and told you it had, but queued no disk
+    /// write — so quitting threw the replacement away unless something else had
+    /// happened to mark the note dirty first. It persisted by luck.
+    #[test]
+    fn replacing_text_queues_the_write() {
+        let mut app = editor_focused_app();
+        let id = app.current_note.as_ref().unwrap().id;
+        for target in [
+            app.notebook.notes.get_mut(&id).unwrap(),
+            app.current_note.as_mut().unwrap(),
+        ] {
+            target.content = "alpha beta alpha".to_string();
+        }
+        app.editor_content = "alpha beta alpha".to_string();
+
+        // Nothing owed to the disk, so anything queued came from the replace.
+        app.disk = crate::app::DiskState::default();
+        app.save_status = crate::app::SaveStatus::Saved;
+
+        app.mode = AppMode::SearchReplace;
+        app.input_buffer = "alpha|OMEGA".to_string();
+        handle_replace_mode(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.editor_content, "OMEGA beta OMEGA");
+        assert_eq!(
+            app.notebook.notes.get(&id).unwrap().content,
+            "OMEGA beta OMEGA",
+            "the notebook kept the old text"
+        );
+        assert!(app.disk.dirty_note_ids.contains(&id), "the replacement was never queued");
+        assert!(app.disk.pending_disk_save, "no disk write was requested");
+    }
+
+    /// A replace that matches nothing must not dirty the note.
+    #[test]
+    fn a_replace_with_no_matches_queues_nothing() {
+        let mut app = editor_focused_app();
+        app.disk = crate::app::DiskState::default();
+        app.mode = AppMode::SearchReplace;
+        app.input_buffer = "zzzznotpresent|x".to_string();
+        handle_replace_mode(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.disk.dirty_note_ids.is_empty(), "a no-op replace dirtied the note");
     }
 
     #[test]

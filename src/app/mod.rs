@@ -2281,6 +2281,65 @@ mod persistence_tests {
         assert_eq!(app.save_status, SaveStatus::Error);
     }
 
+    /// Renaming a folder relocated its directory, but renaming a note left the
+    /// file under its old name — so the filename and the title diverged
+    /// permanently, which everything outside scribble sees and scribble does not.
+    #[test]
+    fn renaming_a_note_renames_its_file() {
+        let mut app = App::default();
+        app.notebook.notes.clear();
+        let mut note = Note::new("Reading List".to_string(), None);
+        note.file_path = Some(std::path::PathBuf::from("/vault/Reading List.md"));
+        let id = note.id;
+        app.notebook.add_note(note);
+        app.refresh_tree_view();
+
+        app.rename_item_id = Some(id);
+        app.rename_item_type = Some(TreeItemType::Note);
+        app.rename_item_name = "Reading List".to_string();
+        app.input_buffer = "Bookshelf".to_string();
+        app.execute_rename().unwrap();
+
+        let renamed = app.notebook.notes.get(&id).unwrap();
+        assert_eq!(renamed.title, "Bookshelf");
+        assert!(
+            renamed.file_path.is_none(),
+            "the note kept its old path, so the file cannot follow the title"
+        );
+        assert!(
+            app.disk.deleted_note_paths.iter().any(|p| p.ends_with("Reading List.md")),
+            "the file under the old name was never queued for removal"
+        );
+        assert!(app.disk.dirty_note_ids.contains(&id), "no write was queued");
+    }
+
+    /// A rename that collides must change nothing — including the path, or the
+    /// note would be written to a new file for a rename that never happened.
+    #[test]
+    fn a_rejected_rename_leaves_the_path_alone() {
+        let mut app = App::default();
+        app.notebook.notes.clear();
+        let mut a = Note::new("Taken".to_string(), None);
+        a.file_path = Some(std::path::PathBuf::from("/vault/Taken.md"));
+        let mut b = Note::new("Mine".to_string(), None);
+        b.file_path = Some(std::path::PathBuf::from("/vault/Mine.md"));
+        let id = b.id;
+        app.notebook.add_note(a);
+        app.notebook.add_note(b);
+        app.refresh_tree_view();
+
+        app.rename_item_id = Some(id);
+        app.rename_item_type = Some(TreeItemType::Note);
+        app.rename_item_name = "Mine".to_string();
+        app.input_buffer = "Taken".to_string();
+        assert!(app.execute_rename().is_err(), "a duplicate name was accepted");
+
+        let unchanged = app.notebook.notes.get(&id).unwrap();
+        assert_eq!(unchanged.title, "Mine");
+        assert!(unchanged.file_path.is_some(), "a failed rename cleared the path");
+        assert!(app.disk.deleted_note_paths.is_empty(), "a failed rename queued a deletion");
+    }
+
     #[test]
     fn moving_a_note_relocates_its_file() {
         use crate::models::Folder;
