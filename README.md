@@ -1,8 +1,8 @@
-# Scribble ✏️ v3.0.0
+# Scribble ✏️ v3.0.1
 
 A terminal note-taking app for Obsidian-style markdown vaults. Fast to open, quick to capture into, vim-like to edit, and careful never to overwrite work it did not write.
 
-![Version](https://img.shields.io/badge/version-3.0.0-brightgreen)
+![Version](https://img.shields.io/badge/version-3.0.1-brightgreen)
 ![Terminal Interface](https://img.shields.io/badge/interface-terminal-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)
@@ -145,7 +145,7 @@ cargo install --path .
 ```bash
 # Check version
 scribble --version
-# Output: scribble 3.0.0
+# Output: scribble 3.0.1
 
 # View help
 scribble --help
@@ -213,7 +213,7 @@ timestamp_entries = true    # prefix each entry with HH:MM
 
 ### Command Line Help Output
 ```
-scribble v3.0.0
+scribble v3.0.1
 
 A powerful terminal-based note-taking app with folder organization,
 markdown support, and syntax highlighting.
