@@ -8,6 +8,25 @@ A terminal note-taking app for Obsidian-style markdown vaults. Fast to open, qui
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)
 ![Language](https://img.shields.io/badge/language-Rust-orange)
 
+![Editing a note in Scribble, with live markdown preview](docs/editor.svg)
+
+<details>
+<summary>More screens</summary>
+
+**The landing page — recent notes, open tasks, and today's note**
+
+![Scribble's landing page](docs/landing.svg)
+
+**Go to — notes, tags, headings and commands in one ranked list (`Ctrl+P`)**
+
+![The Go to palette](docs/palette.svg)
+
+**Every open task in the vault (`Ctrl+K`)**
+
+![The task panel](docs/tasks.svg)
+
+</details>
+
 ## Features
 
 ### Core Features

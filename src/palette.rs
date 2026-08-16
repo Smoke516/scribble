@@ -101,7 +101,7 @@ impl Command {
             Command::TagBrowser => "Ctrl+T",
             Command::ThemeBrowser => "F3",
             Command::VaultSwitcher => "Ctrl+V",
-            Command::TogglePreview => "Ctrl+P",
+            Command::TogglePreview => "F2",
             Command::NewNote => "n",
             Command::SaveNote => "Ctrl+S",
             Command::Help => "?",
