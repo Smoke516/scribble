@@ -36,7 +36,8 @@ A powerful terminal-based note-taking app with advanced tag management, Obsidian
 - **☑️ Task Panel** - Every open task in the vault in one list, jump to it with `Enter` or tick it in place with `Space` (`Ctrl+K`); toggle a checkbox in the editor with `Space`
 - **📅 Daily Notes** - One-key open-or-create of today's dated note (`F4` or `:daily`)
 - **📋 Recent Files** - Quick access to recently opened notes (`Ctrl+O`)
-- **👁️ Live Preview** - Real-time markdown preview in split-screen mode (`Ctrl+P`)
+- **🔦 Go to** - One door for finding anything: notes, tags, headings and commands, ranked together (`Ctrl+P`)
+- **👁️ Live Preview** - Real-time markdown preview in split-screen mode (`F2`)
 - **↩️ Undo/Delete Safety** - Safely delete with full undo capability (`u` to undo)
 - **🔎 Advanced Search** - Regex and scoped search like `case:`/`folder:Name` (`Ctrl+A`), plus in-note search with `/` and `n`/`N` to step through matches
 - **🔁 Search & Replace** - Find-and-replace across notes (`Ctrl+R`)
@@ -234,13 +235,13 @@ Once started, press '?' for in-app help.
    - The welcome screen provides organized quick-start categories:
      - 📝 **Creating Content**: `n` (new note), `f` (folder), `i` (edit)
      - 🧭 **Navigation**: `Tab` (switch panes), `j/k` (move), `Enter` (open)
-     - 🔍 **Essential Tools**: `/` (search), `Ctrl+P` (preview), `?` (help)
+     - 🔍 **Essential Tools**: `Ctrl+P` (go to anything), `/` (search), `?` (help)
    - Use `j/k` or arrow keys to navigate the folder tree
 
 3. **Create your first note:**
    - Press `n` to create a new note
    - Enter insert mode automatically and start writing in markdown
-   - Press `Ctrl+P` to see live preview while editing
+   - Press `F2` to see live preview while editing
 
 4. **Navigate and organize:**
    - Press `f` to create a new folder
@@ -357,7 +358,7 @@ Once started, press '?' for in-app help.
 ### Live Preview
 | Key | Action |
 |-----|--------|
-| `Ctrl+P` / `F2` | Toggle live markdown preview (split-screen) |
+| `F2` | Toggle live markdown preview (split-screen) |
 
 ### File Operations & Commands
 | Key | Action |
@@ -473,6 +474,11 @@ Either way, changes are written to disk continuously — on edit, on a periodic 
 - `Space` - Toggle task checkbox `[ ]`/`[x]` on the current line (editor)
 - `e` - Open in external editor
 - `/` - Search
+<<<<<<< HEAD
+- `Ctrl+B` - Links panel (backlinks + outgoing)
+- `Ctrl+P` - Go to: notes, tags, headings, commands
+=======
+>>>>>>> master
 - `Ctrl+G` - Outline panel (jump to heading)
 - `Ctrl+K` - Task panel: every open task in the vault
 - `F4` - Open today's daily note
@@ -506,10 +512,33 @@ inline.
 One deviation: `e` is a motion only *after* an operator. Plain `e` keeps its
 existing meaning of opening the note in your external editor.
 
+### Go to — one door for finding anything (`Ctrl+P`)
+
+There were six ways to find a note. This is one door in front of all of them:
+press `Ctrl+P` and start typing, and it works out whether you meant a note, a
+tag, a heading or a command. Prefixes narrow it:
+
+| Prefix | Searches |
+|---|---|
+| *(none)* | note titles and commands; recent notes before you type |
+| `>` | commands, each showing the chord it already has |
+| `#` | tags — pick one, then keep typing to filter within it |
+| `?` | the full text of every note, jumping to the matching line |
+| `@` | headings in the note you have open |
+
+`↑↓` or `Ctrl+N`/`Ctrl+P` move, `Enter` goes, `Esc` closes.
+
+The six original finders are untouched and still work as direct shortcuts:
+`Ctrl+J`, `/`, `Ctrl+O`, `Ctrl+T`, `Ctrl+E`, `Ctrl+G`. The palette sits in front
+of them rather than replacing them.
+
+**Note:** live preview moved off `Ctrl+P` to make room; it keeps `F2`, which it
+already answered to.
+
 ### Insert Mode
 - `Esc` - Return to normal mode (auto-saves and runs spell check)
 - `Ctrl+S` - Save
-- `Ctrl+P` - Toggle live preview
+- `F2` - Toggle live preview
 - `Ctrl+V` - Paste from the system clipboard
 - `Ctrl+Z` / `Ctrl+Y` - Undo / redo
 - `Tab` - Accept an autocomplete suggestion (or insert 4 spaces)

@@ -48,6 +48,8 @@ pub enum AppMode {
     TemplatePicker,
     SpellSuggest,
     Outline,
+    /// One door in front of the six finders.
+    Palette,
     /// Every open task in the vault, in one list.
     Tasks,
     /// The folder tree as an overlay, for when the sidebar is not on screen.
@@ -463,6 +465,10 @@ pub struct App {
     pub outline_headings: Vec<(usize, u8, String)>, // (line_index, level, text)
     pub outline_selected: usize,
 
+    // Command palette
+    pub palette_query: String,
+    pub palette_items: Vec<crate::palette::Item>,
+    pub palette_selected: usize,
     /// Every task in the vault, as of the last time the panel was opened.
     pub task_items: Vec<crate::tasks::Task>,
     pub task_selected: usize,
@@ -616,6 +622,9 @@ impl App {
 
             outline_headings: Vec::new(),
             outline_selected: 0,
+            palette_query: String::new(),
+            palette_items: Vec::new(),
+            palette_selected: 0,
             task_items: Vec::new(),
             task_selected: 0,
             tasks_show_done: false,
@@ -1570,6 +1579,108 @@ impl App {
     }
 
     // -------------------------------------------------------------------------
+    // Command palette
+    // -------------------------------------------------------------------------
+
+    /// Open the palette with an empty query, showing recent notes.
+    pub fn show_palette(&mut self) {
+        self.palette_query.clear();
+        self.palette_selected = 0;
+        self.refresh_palette();
+        self.mode = AppMode::Palette;
+    }
+
+    pub fn cancel_palette(&mut self) {
+        self.mode = AppMode::Normal;
+        self.palette_query.clear();
+        self.palette_items.clear();
+        self.palette_selected = 0;
+    }
+
+    /// Re-rank against the current query.
+    ///
+    /// Cheap enough to run on every keystroke at this vault size, and doing so is
+    /// what makes the palette feel like one thing rather than a search you submit.
+    pub fn refresh_palette(&mut self) {
+        let recent: Vec<Uuid> = self
+            .notebook
+            .get_recent_files()
+            .iter()
+            .map(|r| r.note_id)
+            .collect();
+        let current_content = self.editor_content.clone();
+        let ctx = crate::palette::Context {
+            notebook: &self.notebook,
+            tags: &self.tag_manager,
+            recent: &recent,
+            current_note: self.current_note.as_ref().map(|n| n.id),
+            current_content: &current_content,
+        };
+        self.palette_items = crate::palette::resolve(&self.palette_query, &ctx);
+        // The old selection means nothing against a new list; anchoring to the top
+        // keeps Enter landing on the best match rather than wherever the cursor was.
+        self.palette_selected = 0;
+    }
+
+    pub fn palette_type(&mut self, c: char) {
+        self.palette_query.push(c);
+        self.refresh_palette();
+    }
+
+    pub fn palette_backspace(&mut self) {
+        self.palette_query.pop();
+        self.refresh_palette();
+    }
+
+    pub fn palette_navigate_up(&mut self) {
+        self.palette_selected = self.palette_selected.saturating_sub(1);
+    }
+
+    pub fn palette_navigate_down(&mut self) {
+        if self.palette_selected < self.palette_items.len().saturating_sub(1) {
+            self.palette_selected += 1;
+        }
+    }
+
+    /// Act on the selected row.
+    ///
+    /// Returns the command to run, if the row was one — the caller dispatches it,
+    /// because commands map onto key actions that live in the event layer.
+    pub fn palette_select(&mut self) -> Option<crate::palette::Command> {
+        use crate::palette::PaletteAction;
+
+        let item = self.palette_items.get(self.palette_selected).cloned()?;
+
+        match item.action {
+            PaletteAction::OpenNote(id) => {
+                self.cancel_palette();
+                self.open_note_by_id(id);
+                None
+            }
+            PaletteAction::JumpTo(id, line) => {
+                self.cancel_palette();
+                self.open_note_by_id(id);
+                self.focused_pane = FocusedPane::Editor;
+                self.jump_to_line(line + 1); // jump_to_line is 1-based
+                None
+            }
+            // Narrows the palette rather than closing it: picking a tag is choosing
+            // where to look, not what to open. The trailing space is what the
+            // resolver reads as "within this tag", so the state stays entirely in
+            // the query and typing more keeps narrowing.
+            PaletteAction::FilterTag(tag) => {
+                self.palette_query = format!("#{} ", tag);
+                self.refresh_palette();
+                None
+            }
+            PaletteAction::Run(cmd) => {
+                self.cancel_palette();
+                Some(cmd)
+            }
+        }
+    }
+
+
     // Task panel
     // -------------------------------------------------------------------------
 

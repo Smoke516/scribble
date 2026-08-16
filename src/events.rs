@@ -27,6 +27,7 @@ pub fn handle_event(app: &mut App, event: Event) -> Result<(), Box<dyn std::erro
         AppMode::TemplatePicker => handle_template_picker_mode(app, key),
         AppMode::SpellSuggest => handle_spell_suggest_mode(app, key),
         AppMode::Outline => handle_outline_mode(app, key),
+        AppMode::Palette => handle_palette_mode(app, key),
         AppMode::Tasks => handle_tasks_mode(app, key),
         AppMode::Explorer => handle_explorer_mode(app, key),
         }
@@ -112,6 +113,7 @@ enum Action {
     ToggleTaskCheckbox,
     PasteBelow,
     PasteClipboardBelow,
+    ShowPalette,
     ShowTasks,
     DeleteToLineEnd,
     ChangeToLineEnd,
@@ -254,7 +256,9 @@ const NORMAL_BINDINGS: &[Binding] = &[
     ctrl(KeyCode::Char('o'), Ctx::Any, Action::RecentFiles, "Recent files"),
     ctrl(KeyCode::Char('v'), Ctx::Any, Action::VaultSwitcher, "Switch vault"),
     ctrl(KeyCode::Char('t'), Ctx::Any, Action::TagBrowser, "Tag browser"),
-    ctrl(KeyCode::Char('p'), Ctx::Any, Action::TogglePreview, "Toggle preview"),
+    // The palette takes Ctrl+P, the near-universal chord for "open anything by
+    // typing". Preview keeps F2, which it already answered to, so nothing is lost.
+    ctrl(KeyCode::Char('p'), Ctx::Any, Action::ShowPalette, "Go to: notes, tags, headings, commands"),
     k(KeyCode::F(2), Ctx::Any, Action::TogglePreview, "Toggle preview"),
     k(KeyCode::F(3), Ctx::Any, Action::ThemeBrowser, "Theme browser"),
     k(KeyCode::F(4), Ctx::Any, Action::DailyNote, "Today's daily note"),
@@ -740,6 +744,7 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
         // --- panels ---
         Action::QuickJump => app.start_quick_jump(),
         Action::ShowOutline => app.show_outline(),
+        Action::ShowPalette => app.show_palette(),
         Action::ShowTasks => app.show_task_panel(),
         Action::RecentFiles => app.toggle_recent_files(),
         Action::VaultSwitcher => app.show_vault_switcher(),
@@ -1961,6 +1966,67 @@ fn handle_note_search_mode(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// The palette is a text field with a list under it, so it takes characters
+/// directly rather than going through the normal-mode keymap.
+fn handle_palette_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.cancel_palette(),
+        KeyCode::Enter => {
+            if let Some(cmd) = app.palette_select() {
+                run_palette_command(app, cmd);
+            }
+        }
+        KeyCode::Up => app.palette_navigate_up(),
+        KeyCode::Down => app.palette_navigate_down(),
+        KeyCode::Backspace => app.palette_backspace(),
+        // Ctrl+N / Ctrl+P move the selection, so the hands never leave the keys —
+        // and plain n/p stay available as text, which they have to be when the
+        // query is a note title.
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.palette_navigate_down()
+        }
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.palette_navigate_up()
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => app.palette_type(c),
+        _ => {}
+    }
+}
+
+/// Run a command chosen by name. Each one is the same thing its chord does.
+fn run_palette_command(app: &mut App, cmd: crate::palette::Command) {
+    use crate::palette::Command;
+    match cmd {
+        Command::DailyNote => app.open_daily_note(),
+        Command::Tasks => app.show_task_panel(),
+        Command::Outline => app.show_outline(),
+        Command::Explorer => {
+            app.mode = AppMode::Explorer;
+            app.focused_pane = FocusedPane::Folders;
+        }
+        Command::RecentFiles => app.toggle_recent_files(),
+        Command::TagBrowser => app.show_tag_browser(),
+        Command::ThemeBrowser => app.show_theme_browser(),
+        Command::VaultSwitcher => app.show_vault_switcher(),
+        Command::TogglePreview => app.toggle_preview(),
+        // Same folder rule as `n`: whatever the tree selection is sitting in.
+        Command::NewNote => {
+            let folder_id = app.get_selected_item().and_then(|item| match item.item_type {
+                TreeItemType::Folder => Some(item.id),
+                TreeItemType::Note => app.notebook.notes.get(&item.id).and_then(|n| n.folder_id),
+            });
+            app.start_new_note_input(folder_id);
+        }
+        Command::SaveNote => {
+            if let Err(e) = app.save_current_note() {
+                app.set_message(e);
+            }
+        }
+        Command::Help => app.mode = AppMode::Help,
+        Command::Quit => app.should_quit = true,
+    }
+}
+
 fn handle_outline_mode(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => app.cancel_outline(),
@@ -2209,11 +2275,24 @@ mod dispatch_tests {
     /// They share a letter with an editor motion, and the motion arms do not check
     /// modifiers, so a first-match-wins `match` lets the motion swallow the Ctrl key.
     #[test]
-    fn ctrl_p_toggles_preview_even_when_editor_focused() {
+    fn ctrl_p_opens_the_palette_even_when_editor_focused() {
+        let mut app = editor_focused_app();
+        press(&mut app, 'p', KeyModifiers::CONTROL);
+        assert_eq!(
+            app.mode,
+            AppMode::Palette,
+            "Ctrl+P was swallowed by the 'p' paste motion"
+        );
+    }
+
+    /// Preview kept F2 when the palette took Ctrl+P, so the feature is still
+    /// reachable by a single key.
+    #[test]
+    fn f2_still_toggles_preview() {
         let mut app = editor_focused_app();
         let before = app.preview_enabled;
-        press(&mut app, 'p', KeyModifiers::CONTROL);
-        assert_ne!(app.preview_enabled, before, "Ctrl+P was swallowed by the 'p' paste motion");
+        handle_normal_mode(&mut app, KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert_ne!(app.preview_enabled, before, "F2 no longer toggles preview");
     }
 
     #[test]
@@ -2445,6 +2524,151 @@ mod dispatch_tests {
         assert_eq!(app.editor_content, "alpha beta gamma\n");
     }
 
+    // --- the palette, driven the way a user types into it ---
+
+    fn palette_app() -> App {
+        let mut app = App::default();
+        app.notebook.notes.clear();
+        app.notebook.folders.clear();
+        for (title, content, tags) in [
+            ("Meeting Notes", "# Agenda\nbudget forecast\n", vec!["work"]),
+            ("Grocery List", "milk\n", vec!["home"]),
+        ] {
+            let mut n = Note::new(title.to_string(), None);
+            n.content = content.to_string();
+            n.tags = tags.into_iter().map(String::from).collect();
+            app.notebook.add_note(n);
+        }
+        app.focused_pane = FocusedPane::Editor;
+        app
+    }
+
+    fn type_into_palette(app: &mut App, text: &str) {
+        for c in text.chars() {
+            handle_palette_mode(app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+    }
+
+    #[test]
+    fn typing_narrows_the_palette_and_enter_opens_the_note() {
+        let mut app = palette_app();
+        app.show_palette();
+        type_into_palette(&mut app, "grocery");
+        assert_eq!(app.palette_items[0].label, "Grocery List");
+
+        handle_palette_mode(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::Normal, "palette stayed open after opening a note");
+        assert_eq!(
+            app.current_note.as_ref().map(|n| n.title.as_str()),
+            Some("Grocery List")
+        );
+    }
+
+    #[test]
+    fn backspace_widens_the_search_again() {
+        let mut app = palette_app();
+        app.show_palette();
+        type_into_palette(&mut app, "grocery");
+        let narrow = app.palette_items.len();
+        for _ in 0..7 {
+            handle_palette_mode(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        assert!(app.palette_query.is_empty());
+        assert!(app.palette_items.len() > narrow, "backspace did not widen the list");
+    }
+
+    /// A new query invalidates the old selection, so Enter must land on the best
+    /// match rather than on whatever row the cursor happened to be sitting at.
+    #[test]
+    fn the_selection_returns_to_the_top_as_the_query_changes() {
+        let mut app = palette_app();
+        app.show_palette();
+        handle_palette_mode(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.palette_selected, 1);
+        type_into_palette(&mut app, "m");
+        assert_eq!(app.palette_selected, 0, "stale selection survived a new query");
+    }
+
+    /// Picking a tag narrows rather than closing, and the narrowing lives entirely
+    /// in the query so typing more keeps filtering.
+    #[test]
+    fn choosing_a_tag_narrows_to_its_notes() {
+        let mut app = palette_app();
+        app.show_palette();
+        type_into_palette(&mut app, "#work");
+        assert_eq!(app.palette_items[0].label, "#work");
+
+        handle_palette_mode(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::Palette, "palette closed on choosing a tag");
+        assert_eq!(app.palette_query, "#work ");
+        assert_eq!(app.palette_items[0].label, "Meeting Notes");
+    }
+
+    /// The task panel is reachable from the palette as well as by chord — the
+    /// palette is meant to be the one door for everything, not for most things.
+    #[test]
+    fn the_task_panel_can_be_opened_from_the_palette() {
+        let mut app = palette_app();
+        let mut n = Note::new("Chores".to_string(), None);
+        n.content = "- [ ] something to do\n".to_string();
+        app.notebook.add_note(n);
+
+        app.show_palette();
+        type_into_palette(&mut app, ">open tasks");
+        handle_palette_mode(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::Tasks, "the palette did not open the task panel");
+    }
+
+    #[test]
+    fn a_command_can_be_run_by_name() {
+        let mut app = palette_app();
+        app.show_palette();
+        type_into_palette(&mut app, ">quit");
+        handle_palette_mode(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.should_quit, "the quit command did not run");
+    }
+
+    #[test]
+    fn esc_closes_the_palette_and_forgets_the_query() {
+        let mut app = palette_app();
+        app.show_palette();
+        type_into_palette(&mut app, "groc");
+        handle_palette_mode(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::Normal);
+        assert!(app.palette_query.is_empty());
+        assert!(app.palette_items.is_empty());
+    }
+
+    /// Ctrl+N and Ctrl+P move the selection; plain n and p have to stay typable,
+    /// because a note title contains them.
+    #[test]
+    fn ctrl_n_navigates_while_plain_n_types() {
+        let mut app = palette_app();
+        app.show_palette();
+        handle_palette_mode(&mut app, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert_eq!(app.palette_selected, 1);
+        assert!(app.palette_query.is_empty(), "Ctrl+N was typed into the query");
+
+        handle_palette_mode(&mut app, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(app.palette_query, "n", "plain n did not reach the query");
+    }
+
+    /// Full text is a different question from titles, and has to point at the line.
+    #[test]
+    fn full_text_search_jumps_to_the_matching_line() {
+        let mut app = palette_app();
+        app.show_palette();
+        type_into_palette(&mut app, "?budget");
+        assert_eq!(app.palette_items[0].detail, "Meeting Notes");
+
+        handle_palette_mode(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.current_note.as_ref().map(|n| n.title.as_str()),
+            Some("Meeting Notes")
+        );
+        assert_eq!(app.editor_cursor.0, 1, "cursor did not land on the matching line");
+    }
+
     /// The structural guarantee the table exists to provide: no two bindings can
     /// claim the same key in the same context. This is what a `match` could not
     /// enforce, and what let five Ctrl chords be silently shadowed.
@@ -2582,7 +2806,7 @@ mod dispatch_tests {
     fn ctrl_chords_resolve_identically_in_both_contexts() {
         for (c, expected) in [
             ('o', Action::RecentFiles),
-            ('p', Action::TogglePreview),
+            ('p', Action::ShowPalette),
             ('g', Action::ShowOutline),
             ('e', Action::ShowExplorer),
         ] {
@@ -2617,7 +2841,7 @@ mod dispatch_tests {
             KeyCode::Char('p'),
             KeyModifiers::CONTROL | KeyModifiers::ALT,
         );
-        assert_eq!(lookup(&ctrl_alt_p, false, false), Some(Action::TogglePreview));
+        assert_eq!(lookup(&ctrl_alt_p, false, false), Some(Action::ShowPalette));
     }
 
     /// Terminals disagree about whether SHIFT is reported alongside an uppercase

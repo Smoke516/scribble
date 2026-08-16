@@ -85,6 +85,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         AppMode::ThemeBrowser => draw_theme_browser_dialog(f, app),
         AppMode::Rename => draw_rename_dialog(f, app),
         AppMode::Outline => draw_outline_dialog(f, app),
+        AppMode::Palette => draw_palette_dialog(f, app),
         AppMode::Tasks => draw_tasks_dialog(f, app),
         AppMode::TemplatePicker => draw_template_picker_dialog(f, app),
         AppMode::SpellSuggest => draw_spell_suggest_dialog(f, app),
@@ -636,7 +637,7 @@ fn draw_preview_pane(f: &mut Frame, app: &App, area: Rect) {
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "Press Ctrl+P or F2 to toggle preview mode.",
+                "Press F2 to toggle preview mode.",
                 TokyoNightTheme::help_text()
             )),
         ]);
@@ -902,6 +903,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::TemplatePicker => "TEMPLATE",
         AppMode::SpellSuggest => "SPELL",
         AppMode::Outline => "OUTLINE",
+        AppMode::Palette => "PALETTE",
         AppMode::Tasks => "TASKS",
         AppMode::Explorer => "EXPLORER",
     };
@@ -934,6 +936,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::TemplatePicker => app.theme_manager.mode_input(),
         AppMode::SpellSuggest => Style::default().fg(TokyoNightTheme::BG).bg(TokyoNightTheme::RED).add_modifier(Modifier::BOLD),
         AppMode::Outline => app.theme_manager.mode_command(),
+        AppMode::Palette => app.theme_manager.mode_command(),
         AppMode::Tasks => app.theme_manager.mode_command(),
     };
     
@@ -1737,6 +1740,8 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from(""),
         Line::from("  v          Enter Visual select mode"),
         Line::from("  Space      Toggle task checkbox [ ] <-> [x] on current line"),
+        Line::from("  Ctrl+P     Go to: notes, tags, headings, commands (one door for all of them)"),
+        Line::from("             > commands   # tags   ? full text   @ headings"),
         Line::from("  Ctrl+G     Outline: jump to a heading    F4      Open today's daily note"),
         Line::from("  Ctrl+K     Tasks: every open task in the vault"),
         Line::from("  z=         Suggest spelling fix for word at cursor"),
@@ -1762,7 +1767,7 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from(""),
         Line::from("  Tab        Accept autocomplete suggestion  ↑/↓   Navigate suggestions"),
         Line::from("  Ctrl+Z     Undo                           Ctrl+Y  Redo"),
-        Line::from("  Ctrl+S     Save                           Ctrl+P  Toggle preview"),
+        Line::from("  Ctrl+S     Save                           F2      Toggle preview"),
         Line::from("  Ctrl+V     Paste system clipboard"),
         Line::from("  Ctrl+U/D   Half-page scroll up / down"),
         Line::from("  Esc        Exit Insert mode (auto-saves + spell check)"),
@@ -1810,7 +1815,7 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
             Span::styled("Preview & Display", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
         ]),
         Line::from(""),
-        Line::from("  Ctrl+P / F2  Toggle live Markdown preview  Tab     Cycle panes"),
+        Line::from("  F2         Toggle live Markdown preview    Tab     Cycle panes"),
         Line::from("  Preview pane: j/k scroll · g/G top/bottom (independent of editor)"),
         Line::from("  Ctrl+U/D     Half-page scroll              PgUp/Dn Page scroll"),
         Line::from("  Line nums: absolute by default; set relative_line_numbers = true in config"),
@@ -2503,6 +2508,103 @@ fn draw_outline_dialog(f: &mut Frame, app: &App) {
             .style(Style::default().fg(TokyoNightTheme::COMMENT))
             .alignment(Alignment::Center),
         chunks[1],
+    );
+}
+
+/// The palette: a text field, a hint, and one ranked list of everything.
+///
+/// The kind badge is what lets four pools share one list — without it the rows
+/// read as four lists stapled together rather than as an ordering by relevance.
+fn draw_palette_dialog(f: &mut Frame, app: &App) {
+    use crate::palette::Mode;
+
+    let (mode, _) = Mode::split(&app.palette_query);
+    let area = centered_rect(70, 70, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title("  Go to")
+        .borders(Borders::ALL)
+        .border_style(TokyoNightTheme::border_focused())
+        .style(TokyoNightTheme::popup());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // query
+            Constraint::Length(1), // hint
+            Constraint::Min(3),    // results
+            Constraint::Length(1), // keys
+        ])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("> ", Style::default().fg(TokyoNightTheme::GREEN)),
+            Span::styled(
+                app.palette_query.as_str(),
+                Style::default().fg(TokyoNightTheme::FG),
+            ),
+            Span::styled("█", Style::default().fg(TokyoNightTheme::CYAN)),
+        ])),
+        chunks[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(mode.hint()).style(Style::default().fg(TokyoNightTheme::COMMENT)),
+        chunks[1],
+    );
+
+    let items: Vec<ListItem> = app
+        .palette_items
+        .iter()
+        .map(|item| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:<5}", item.kind.badge()),
+                    Style::default().fg(match item.kind {
+                        crate::palette::Kind::Note => TokyoNightTheme::BLUE,
+                        crate::palette::Kind::Tag => TokyoNightTheme::MAGENTA,
+                        crate::palette::Kind::Heading => TokyoNightTheme::CYAN,
+                        crate::palette::Kind::Command => TokyoNightTheme::YELLOW,
+                    }),
+                ),
+                Span::styled(item.label.as_str(), Style::default().fg(TokyoNightTheme::FG)),
+                Span::styled(
+                    if item.detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!("   {}", item.detail)
+                    },
+                    Style::default().fg(TokyoNightTheme::COMMENT),
+                ),
+            ]))
+        })
+        .collect();
+
+    if items.is_empty() {
+        f.render_widget(
+            Paragraph::new("No matches")
+                .style(Style::default().fg(TokyoNightTheme::COMMENT))
+                .alignment(Alignment::Center),
+            chunks[2],
+        );
+    } else {
+        let list = List::new(items)
+            .highlight_style(TokyoNightTheme::selected())
+            .highlight_symbol("▶ ");
+        let mut list_state = ListState::default();
+        list_state.select(Some(app.palette_selected));
+        f.render_stateful_widget(list, chunks[2], &mut list_state);
+    }
+
+    f.render_widget(
+        Paragraph::new("↑↓ / Ctrl+N/P: Navigate  Enter: Go  Esc: Close")
+            .style(Style::default().fg(TokyoNightTheme::COMMENT))
+            .alignment(Alignment::Center),
+        chunks[3],
     );
 }
 
