@@ -61,7 +61,6 @@ A terminal note-taking app for Obsidian-style markdown vaults. Fast to open, qui
 - **🔎 Advanced Search** - Regex and scoped search like `case:`/`folder:Name` (`Ctrl+A`), plus in-note search with `/` and `n`/`N` to step through matches
 - **🔁 Search & Replace** - Find-and-replace across notes (`Ctrl+R`)
 - **📑 Templates** - Create notes from Blank/Daily/Meeting/Project templates (`N`)
-- **💾 Session Persistence** - Remembers your last opened note and editor state
 - **🎯 Smart Autocompletion** - Intelligent markdown completion with context awareness
 - **📖 Scrollable Help** - Navigate help with `j/k`, `g/G`, PageUp/Down (`?`)
 

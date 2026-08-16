@@ -17,7 +17,6 @@ pub struct Config {
 #[serde(default)]
 pub struct EditorConfig {
     pub default: Option<String>,
-    pub helix_integration: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,7 +44,6 @@ pub struct UiConfig {
 #[serde(default)]
 pub struct BehaviorConfig {
     pub auto_save: bool,
-    pub follow_links_in_new_pane: bool,
     pub backup_on_import: bool,
     pub file_watching: bool,
     pub spell_check: bool,
@@ -83,7 +81,6 @@ impl Default for EditorConfig {
     fn default() -> Self {
         Self {
             default: None,
-            helix_integration: true,
         }
     }
 }
@@ -114,7 +111,6 @@ impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
             auto_save: true,
-            follow_links_in_new_pane: false,
             backup_on_import: true,
             file_watching: true,
             spell_check: false,
@@ -194,5 +190,69 @@ mod which {
             }
         }
         Err(())
+    }
+}
+#[cfg(test)]
+mod tests {
+    /// Every setting must be read by something.
+    ///
+    /// Eight of them were not: the config promised control over the editor, the
+    /// preview width, autosave, file watching, spell check and import backups, and
+    /// changing any of them did nothing at all. A setting that is ignored is worse
+    /// than one that is absent, because you believe you turned something off.
+    ///
+    /// Source-scanning is crude, but it is the only check that fails when someone
+    /// adds a field and forgets to wire it up — which is exactly how these got here.
+    #[test]
+    fn every_config_field_is_read_somewhere() {
+        const SOURCES: [(&str, &str); 9] = [
+            ("config.rs", include_str!("config.rs")),
+            ("main.rs", include_str!("main.rs")),
+            ("ui.rs", include_str!("ui.rs")),
+            ("events.rs", include_str!("events.rs")),
+            ("capture.rs", include_str!("capture.rs")),
+            ("app/mod.rs", include_str!("app/mod.rs")),
+            ("app/io.rs", include_str!("app/io.rs")),
+            ("app/view.rs", include_str!("app/view.rs")),
+            ("app/tags.rs", include_str!("app/tags.rs")),
+        ];
+
+        // Field names as they appear in a read: `.field`.
+        let fields = [
+            "default", "auto_detect", "recent", "theme", "show_sidebar", "preview_width",
+            "show_line_numbers", "relative_line_numbers", "auto_save", "backup_on_import",
+            "file_watching", "spell_check", "daily_folder", "daily_format", "timestamp_entries",
+        ];
+
+        // Comments must not count as reads. The first version of this test was
+        // satisfied by the doc comment sitting above the code it described, which
+        // made it pass while the setting was genuinely unused.
+        let code: Vec<String> = SOURCES
+            .iter()
+            .filter(|(name, _)| *name != "config.rs")
+            .map(|(_, src)| {
+                src.lines()
+                    .map(|l| match l.find("//") {
+                        Some(i) => &l[..i],
+                        None => l,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect();
+
+        let mut dead = Vec::new();
+        for field in fields {
+            let needle = format!(".{}", field);
+            if !code.iter().any(|src| src.contains(&needle)) {
+                dead.push(field);
+            }
+        }
+
+        assert!(
+            dead.is_empty(),
+            "config settings that nothing reads, so changing them does nothing: {:?}",
+            dead
+        );
     }
 }
