@@ -14,6 +14,53 @@ pub struct Note {
     pub modified_at: DateTime<Utc>,
     pub tags: Vec<String>,
     pub file_path: Option<PathBuf>,
+    /// What the note's file looked like when we last read or wrote it.
+    ///
+    /// This is the whole basis of the never-clobber rule: a write compares it
+    /// against the file that is actually there, and refuses to overwrite anything
+    /// it cannot account for. `None` means we have never seen the file, which for
+    /// a brand new note is the normal case.
+    ///
+    /// Deliberately not serialised. It describes this process's view of the disk at
+    /// a moment in time, so persisting it would be persisting a claim that stops
+    /// being true the moment the app exits.
+    #[serde(skip)]
+    pub disk_stamp: Option<FileStamp>,
+}
+
+/// A fingerprint of a file's contents, used to notice that it changed underneath us.
+///
+/// Contents rather than metadata, deliberately. An mtime-and-length stamp is cheaper
+/// but it lies in exactly the situation this exists for: sync clients and restores
+/// routinely write a file while preserving its mtime, and a one-character correction
+/// does not change its length. Hashing what we actually read also means the stamp
+/// describes precisely the bytes we parsed, so there is no window between reading a
+/// file and stamping it in which the file can change without us noticing.
+///
+/// The hash only ever has to be consistent within a single run — stamps are never
+/// persisted — so the standard hasher is entirely sufficient and costs no dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    pub len: u64,
+    pub hash: u64,
+}
+
+impl FileStamp {
+    /// Stamp bytes we already have in hand.
+    pub fn of_bytes(bytes: &[u8]) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        Self {
+            len: bytes.len() as u64,
+            hash: hasher.finish(),
+        }
+    }
+
+    /// Stamp a path, or `None` if there is nothing there to read.
+    pub fn of(path: &std::path::Path) -> Option<Self> {
+        std::fs::read(path).ok().map(|b| Self::of_bytes(&b))
+    }
 }
 
 impl Note {
@@ -28,6 +75,7 @@ impl Note {
             modified_at: now,
             tags: Vec::new(),
             file_path: None,
+            disk_stamp: None,
         }
     }
 

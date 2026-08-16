@@ -1,5 +1,5 @@
 use crate::error::{IoResultExt, StorageError};
-use crate::models::{NotebookData, Note, Folder};
+use crate::models::{FileStamp, NotebookData, Note, Folder};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
@@ -73,18 +73,17 @@ pub trait NotebookStorage {
     fn load_notebook(&self) -> Result<NotebookData, StorageError>;
     fn save_notebook(&self, notebook: &NotebookData) -> Result<(), StorageError>;
 
-    /// Write only the `dirty` notes and delete `deleted_paths`, returning the
-    /// on-disk path assigned to any note that did not have one yet (so the caller
-    /// can store it back). Default: fall back to a full save (correct, just not
-    /// incremental) — used by single-file backends where it's already cheap.
+    /// Write only the `dirty` notes and delete `deleted_paths`. Default: fall back
+    /// to a full save (correct, just not incremental) — used by single-file backends
+    /// where it's already cheap.
     fn save_incremental(
         &self,
         notebook: &NotebookData,
         _dirty: &[Uuid],
         _deleted_paths: &[PathBuf],
-    ) -> Result<Vec<(Uuid, PathBuf)>, StorageError> {
+    ) -> Result<SaveReport, StorageError> {
         self.save_notebook(notebook)?;
-        Ok(Vec::new())
+        Ok(SaveReport::default())
     }
 
     /// Move/rename a folder's directory (and all its files) on disk from one
@@ -101,12 +100,59 @@ pub trait NotebookStorage {
     }
 }
 
-/// Whether a filename is a sync client's conflict artefact rather than a note the
-/// user made. Nextcloud writes `Note (conflicted copy 2026-08-16 120000).md`;
-/// Syncthing writes `Note.sync-conflict-20260816-120000-ABCDEFG.md`.
+/// What a save did, beyond succeeding.
+#[derive(Debug, Default)]
+pub struct SaveReport {
+    /// Paths chosen for notes that did not have one yet, so the caller can store
+    /// them back and write to the same file next time.
+    pub assigned: Vec<(Uuid, PathBuf)>,
+    /// Fresh stamps for every note written. The caller must store these back, or
+    /// the next save will believe its own write was somebody else's.
+    pub stamps: Vec<(Uuid, FileStamp)>,
+    /// Notes whose file had changed underneath us. The version that was on disk was
+    /// preserved before ours went down.
+    pub conflicts: Vec<Conflict>,
+}
+
+/// A file that changed under us, and where the version we found got preserved.
+#[derive(Debug, Clone)]
+pub struct Conflict {
+    pub note_title: String,
+    pub preserved_at: PathBuf,
+}
+
+/// Whether a filename is a conflict artefact rather than a note the user made.
+/// Nextcloud writes `Note (conflicted copy 2026-08-16 120000).md`; Syncthing writes
+/// `Note.sync-conflict-20260816-120000-ABCDEFG.md`; we write `(scribble conflict`.
+///
+/// Ours is included deliberately: a preserved version is a byte copy and therefore
+/// carries the original's `scribble_id`, so without this it would be the artefact
+/// that keeps the contested id and the note the user is editing that gets re-minted.
 fn looks_like_a_sync_conflict(path: &Path) -> bool {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    name.contains("(conflicted copy") || name.contains(".sync-conflict-")
+    name.contains("(conflicted copy")
+        || name.contains(".sync-conflict-")
+        || name.contains("(scribble conflict")
+}
+
+/// Where to preserve the version of `path` that we found on disk.
+///
+/// Named after the note it forked from, with a timestamp, so it sorts beside the
+/// original and says for itself what it is and when it happened.
+fn conflict_sidecar_path(path: &Path) -> PathBuf {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+    let when = chrono::Local::now().format("%Y-%m-%d %H%M%S");
+    let dir = path.parent().unwrap_or(Path::new("."));
+
+    let mut candidate = dir.join(format!("{} (scribble conflict {}).md", stem, when));
+    // Two conflicts on the same note within one second is vanishingly unlikely, but
+    // silently overwriting the first one would defeat the entire point of this file.
+    let mut n = 2;
+    while candidate.exists() {
+        candidate = dir.join(format!("{} (scribble conflict {}-{}).md", stem, when, n));
+        n += 1;
+    }
+    candidate
 }
 
 /// Keep two files that claim the same `scribble_id` as two separate notes.
@@ -185,6 +231,34 @@ impl VaultStorage {
         (None, content.to_string())
     }
     
+    /// Read one note back off disk, for picking up an external change without
+    /// reloading the whole vault.
+    ///
+    /// Returns a note with a fresh `disk_stamp` and no `folder_id`: placing a note
+    /// in the tree is the caller's business, and the caller already knows where this
+    /// one lives.
+    pub fn load_single_note(&self, path: &Path) -> Option<Note> {
+        let content = fs::read_to_string(path).ok()?;
+        let stamp = Some(FileStamp::of_bytes(content.as_bytes()));
+        let (frontmatter, markdown) = self.parse_markdown_with_frontmatter(&content);
+        let title = path.file_stem()?.to_string_lossy().to_string();
+
+        let mut note = Note::new(title.clone(), None);
+        if let Some(fm) = frontmatter {
+            if let Some(id) = fm.scribble_id.as_deref().and_then(|s| Uuid::parse_str(s).ok()) {
+                note.id = id;
+            }
+            note.title = fm.title.unwrap_or(title);
+            note.created_at = fm.created_at.unwrap_or(note.created_at);
+            note.modified_at = fm.modified_at.unwrap_or(note.modified_at);
+            note.tags = fm.tags.unwrap_or_default();
+        }
+        note.content = markdown;
+        note.file_path = Some(path.to_path_buf());
+        note.disk_stamp = stamp;
+        Some(note)
+    }
+
     /// `file_path` is the path the note is actually being written to, which is not
     /// always `note.file_path`: a note being saved for the first time has none yet,
     /// and passing it in is what lets `folder_path` be correct on the first write
@@ -319,20 +393,65 @@ impl VaultStorage {
         path
     }
 
-    /// Write a single note to disk, returning its resolved path.
+    /// Write a single note to disk, returning its resolved path, a fresh stamp, and
+    /// a conflict if the file had to be preserved before we wrote over it.
+    ///
+    /// The rule is: **never overwrite a file we cannot account for.** If what is on
+    /// disk does not match what we last read or wrote there, it is somebody else's
+    /// work — another device via the sync client, a `scribble -n` capture, an
+    /// editor — and it gets copied aside before our version goes down.
+    ///
+    /// Our version keeps the original filename rather than being diverted itself,
+    /// because the person at the keyboard is mid-sentence in this note. Moving the
+    /// file out from under them, or reloading somebody else's text into the buffer
+    /// they are typing into, is the disruptive choice. This way nothing is lost, the
+    /// editor never jumps, and the preserved file is waiting whenever they get to it.
     fn write_note(
         &self,
         note: &Note,
         notebook: &NotebookData,
         claimed: &mut HashSet<PathBuf>,
-    ) -> Result<PathBuf, StorageError> {
+    ) -> Result<(PathBuf, Option<FileStamp>, Option<Conflict>), StorageError> {
         let file_path = self.resolve_note_path(note, notebook, claimed);
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent).create_dir_ctx(parent)?;
         }
+
+        let on_disk = FileStamp::of(&file_path);
+        let diverged = match (note.disk_stamp, on_disk) {
+            // Nothing there: the note is new, or its file was removed. Either way
+            // there is nothing to lose by writing.
+            (_, None) => false,
+            // We have seen this file. Is it still the one we saw?
+            (Some(expected), Some(actual)) => actual != expected,
+            // A file we have never read, under a name we are about to take. Writing
+            // would destroy it, and we have no idea what it is.
+            (None, Some(_)) => true,
+        };
+
         let content = self.create_markdown_with_frontmatter(note, &file_path, &note.content);
+
+        // If what is on disk is byte-for-byte what we were about to write, there is
+        // no conflict to preserve — only a stale stamp. This is what keeps an
+        // external edit that merely matches our own from leaving a pointless file.
+        let identical = diverged && on_disk == Some(FileStamp::of_bytes(content.as_bytes()));
+
+        let conflict = if diverged && !identical {
+            let preserved_at = conflict_sidecar_path(&file_path);
+            fs::copy(&file_path, &preserved_at).write_ctx(&preserved_at)?;
+            Some(Conflict {
+                note_title: note.title.clone(),
+                preserved_at,
+            })
+        } else {
+            None
+        };
+
         write_atomic(&file_path, &content).write_ctx(&file_path)?;
-        Ok(file_path)
+        // Stamped from what we wrote, not by re-reading: this is the exact content
+        // now on disk, and re-reading would only add a window for it to change in.
+        let stamp = FileStamp::of_bytes(content.as_bytes());
+        Ok((file_path, Some(stamp), conflict))
     }
 }
 
@@ -381,6 +500,10 @@ impl NotebookStorage for VaultStorage {
             } else if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
                 // Process markdown file
                 if let Ok(content) = fs::read_to_string(path) {
+                    // Stamped from the bytes we just read, so it describes exactly
+                    // the content we are about to parse — there is no window in
+                    // which the file could change without us noticing.
+                    let stamp = Some(FileStamp::of_bytes(content.as_bytes()));
                     let (frontmatter, markdown_content) = self.parse_markdown_with_frontmatter(&content);
                     
                     // Determine folder_id from path
@@ -416,12 +539,14 @@ impl NotebookStorage for VaultStorage {
                             modified_at: fm.modified_at.unwrap_or_else(Utc::now),
                             tags: fm.tags.unwrap_or_default(),
                             file_path: Some(path.to_path_buf()),
+                            disk_stamp: stamp,
                         }
                     } else {
                         // Create new note without frontmatter
                         let mut note = Note::new(title, folder_id);
                         note.content = markdown_content;
                         note.file_path = Some(path.to_path_buf());
+                        note.disk_stamp = stamp;
                         note
                     };
                     
@@ -476,7 +601,7 @@ impl NotebookStorage for VaultStorage {
         notebook: &NotebookData,
         dirty: &[Uuid],
         deleted_paths: &[PathBuf],
-    ) -> Result<Vec<(Uuid, PathBuf)>, StorageError> {
+    ) -> Result<SaveReport, StorageError> {
         // Remove files for deleted notes (ignore if already gone).
         for path in deleted_paths {
             let _ = fs::remove_file(path);
@@ -486,17 +611,23 @@ impl NotebookStorage for VaultStorage {
         let mut claimed: HashSet<PathBuf> =
             notebook.notes.values().filter_map(|n| n.file_path.clone()).collect();
 
-        let mut assigned = Vec::new();
+        let mut report = SaveReport::default();
         for id in dirty {
             if let Some(note) = notebook.notes.get(id) {
                 let had_path = note.file_path.is_some();
-                let path = self.write_note(note, notebook, &mut claimed)?;
+                let (path, stamp, conflict) = self.write_note(note, notebook, &mut claimed)?;
                 if !had_path {
-                    assigned.push((*id, path));
+                    report.assigned.push((*id, path));
+                }
+                if let Some(stamp) = stamp {
+                    report.stamps.push((*id, stamp));
+                }
+                if let Some(conflict) = conflict {
+                    report.conflicts.push(conflict);
                 }
             }
         }
-        Ok(assigned)
+        Ok(report)
     }
 
     fn relocate_folder(
@@ -765,13 +896,13 @@ mod tests {
 
         // Save ONLY Alpha incrementally → its file exists, Beta's does not.
         let assigned = storage.save_incremental(&nb, &[aid], &[]).unwrap();
-        assert_eq!(assigned.len(), 1, "new note should report its assigned path");
-        assert_eq!(assigned[0].0, aid);
+        assert_eq!(assigned.assigned.len(), 1, "new note should report its assigned path");
+        assert_eq!(assigned.assigned[0].0, aid);
         assert!(dir.join("Alpha.md").exists());
         assert!(!dir.join("Beta.md").exists(), "Beta must not be written");
 
         // Store the path back (as the app does), then delete Alpha's file.
-        let path = assigned[0].1.clone();
+        let path = assigned.assigned[0].1.clone();
         nb.notes.get_mut(&aid).unwrap().file_path = Some(path.clone());
         storage.save_incremental(&nb, &[], &[path]).unwrap();
         assert!(!dir.join("Alpha.md").exists(), "deleted note's file must be removed");
@@ -987,6 +1118,208 @@ mod tests {
         );
 
         assert_eq!(survivors.len(), 2, "a note was silently dropped: {:?}", survivors);
+    }
+
+    /// Save a note the way the app does: write it, then store the report's stamps
+    /// back onto the notebook. Skipping that second half is what would make every
+    /// autosave look like somebody else's edit.
+    fn save_like_the_app(
+        storage: &VaultStorage,
+        notebook: &mut NotebookData,
+        id: Uuid,
+    ) -> SaveReport {
+        let report = storage.save_incremental(notebook, &[id], &[]).unwrap();
+        for (nid, path) in &report.assigned {
+            if let Some(n) = notebook.notes.get_mut(nid) {
+                n.file_path = Some(path.clone());
+            }
+        }
+        for (nid, stamp) in &report.stamps {
+            if let Some(n) = notebook.notes.get_mut(nid) {
+                n.disk_stamp = Some(*stamp);
+            }
+        }
+        report
+    }
+
+    fn conflict_files(dir: &Path) -> Vec<String> {
+        WalkDir::new(dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains("(scribble conflict"))
+            .collect()
+    }
+
+    /// The whole point: a change that arrived under us is never overwritten. Our
+    /// version keeps the filename, because the user is mid-sentence in it; theirs is
+    /// copied aside first.
+    #[test]
+    fn an_external_change_is_preserved_before_we_write() {
+        let dir = std::env::temp_dir().join(format!("scribble_conf_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("Note.md"), "---\ntitle: Note\n---\noriginal\n").unwrap();
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        let mut nb = storage.load_notebook().unwrap();
+        let id = *nb.notes.keys().next().unwrap();
+
+        // We type. Meanwhile the sync client lands somebody else's version.
+        nb.notes.get_mut(&id).unwrap().content = "what I typed\n".to_string();
+        fs::write(
+            dir.join("Note.md"),
+            "---\ntitle: Note\n---\nwhat the other device wrote\n",
+        )
+        .unwrap();
+
+        let report = save_like_the_app(&storage, &mut nb, id);
+
+        let ours = fs::read_to_string(dir.join("Note.md")).unwrap();
+        let preserved: Vec<String> = conflict_files(&dir);
+        let theirs = preserved
+            .first()
+            .map(|n| fs::read_to_string(dir.join(n)).unwrap())
+            .unwrap_or_default();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(report.conflicts.len(), 1, "conflict was not reported");
+        assert_eq!(preserved.len(), 1, "expected one preserved file: {:?}", preserved);
+        assert!(ours.contains("what I typed"), "our edit did not land: {:?}", ours);
+        assert!(
+            theirs.contains("what the other device wrote"),
+            "their version was not preserved: {:?}",
+            theirs
+        );
+    }
+
+    /// The anti-noise test, and the one that matters most in practice. Autosave runs
+    /// constantly; if a save could mistake its own previous write for an external
+    /// change, ordinary typing would bury the vault in conflict files.
+    #[test]
+    fn ordinary_repeated_saves_never_create_a_conflict_file() {
+        let dir = std::env::temp_dir().join(format!("scribble_noconf_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("Note.md"), "---\ntitle: Note\n---\nstart\n").unwrap();
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        let mut nb = storage.load_notebook().unwrap();
+        let id = *nb.notes.keys().next().unwrap();
+
+        for i in 0..5 {
+            nb.notes.get_mut(&id).unwrap().content = format!("keystroke {}\n", i);
+            let report = save_like_the_app(&storage, &mut nb, id);
+            assert!(
+                report.conflicts.is_empty(),
+                "save {} invented a conflict with its own write",
+                i
+            );
+        }
+
+        let leftovers = conflict_files(&dir);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(leftovers.is_empty(), "conflict files appeared: {:?}", leftovers);
+    }
+
+    /// An external write that happens to say exactly what we were going to say is
+    /// not a conflict. Preserving a byte-identical copy would be pure noise.
+    #[test]
+    fn an_identical_external_write_is_not_a_conflict() {
+        let dir = std::env::temp_dir().join(format!("scribble_ident_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("Note.md"), "---\ntitle: Note\n---\nbody\n").unwrap();
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        let mut nb = storage.load_notebook().unwrap();
+        let id = *nb.notes.keys().next().unwrap();
+
+        // Write once so the file holds exactly what we would write, then blank the
+        // stamp to stand in for "something touched this file behind our back".
+        save_like_the_app(&storage, &mut nb, id);
+        nb.notes.get_mut(&id).unwrap().disk_stamp = None;
+
+        let report = save_like_the_app(&storage, &mut nb, id);
+        let leftovers = conflict_files(&dir);
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(report.conflicts.is_empty(), "identical content reported as a conflict");
+        assert!(leftovers.is_empty(), "conflict files appeared: {:?}", leftovers);
+    }
+
+    /// A brand new note whose filename is already taken by a file we have never
+    /// read. We have no idea what that file is, so it does not get destroyed.
+    #[test]
+    fn a_file_we_have_never_read_is_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("scribble_unknown_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        let mut nb = storage.load_notebook().unwrap();
+
+        // Something lands in the vault after the load — a capture, a sync, a copy.
+        fs::write(dir.join("Ideas.md"), "someone else's work\n").unwrap();
+
+        let note = Note::new("Ideas".to_string(), None);
+        let id = note.id;
+        nb.add_note(note);
+        let report = save_like_the_app(&storage, &mut nb, id);
+
+        let preserved = conflict_files(&dir);
+        let theirs = preserved
+            .first()
+            .map(|n| fs::read_to_string(dir.join(n)).unwrap())
+            .unwrap_or_default();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(report.conflicts.len(), 1, "unknown file was overwritten silently");
+        assert!(
+            theirs.contains("someone else's work"),
+            "the unknown file's contents were lost: {:?}",
+            theirs
+        );
+    }
+
+    /// A preserved version is a byte copy, so it carries the original's
+    /// scribble_id. On the next load it must not evict the note it was forked from —
+    /// which is only true because the sidecar name is recognised as an artefact.
+    #[test]
+    fn a_preserved_version_does_not_evict_the_note_it_forked_from() {
+        let dir = std::env::temp_dir().join(format!("scribble_confid_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("Note.md"),
+            "---\nscribble_id: 6f1c9b3e-51a0-4a5f-9d2e-8c7b4a1f0e33\ntitle: Note\n---\noriginal\n",
+        )
+        .unwrap();
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        let mut nb = storage.load_notebook().unwrap();
+        let id = *nb.notes.keys().next().unwrap();
+
+        nb.notes.get_mut(&id).unwrap().content = "mine\n".to_string();
+        fs::write(
+            dir.join("Note.md"),
+            "---\nscribble_id: 6f1c9b3e-51a0-4a5f-9d2e-8c7b4a1f0e33\ntitle: Note\n---\ntheirs\n",
+        )
+        .unwrap();
+        save_like_the_app(&storage, &mut nb, id);
+
+        // Reload the vault from scratch, as a fresh run of the app would.
+        let reloaded = storage.load_notebook().unwrap();
+        let contents: Vec<String> = reloaded.notes.values().map(|n| n.content.clone()).collect();
+        let kept_the_id = reloaded.notes.get(&id).map(|n| n.content.clone());
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(reloaded.notes.len(), 2, "a note was lost on reload: {:?}", contents);
+        assert_eq!(
+            kept_the_id.as_deref(),
+            Some("mine\n"),
+            "the preserved copy stole the note's identity"
+        );
     }
 
     /// Frontmatter must not embed absolute paths: they pin a note to one machine

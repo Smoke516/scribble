@@ -139,6 +139,25 @@ scribble --help
 cargo run
 ```
 
+## External Changes and Conflicts
+
+Scribble assumes it is not the only thing writing to your vault — a sync client,
+another device, an editor, or another scribble instance may all touch the same
+files. The rule is simple: **it never overwrites a file it cannot account for.**
+
+- **You have nothing unsaved for that note** — the disk version is taken silently.
+  There is nothing to lose, and a stale in-memory copy is how a later edit quietly
+  reverts somebody else's work.
+- **You have unsaved changes** — that is a real conflict. Your version keeps the
+  filename, because you are mid-sentence in it, and the version found on disk is
+  copied to `Note (scribble conflict 2026-08-16 131829).md` before yours is
+  written. Nothing is lost, the editor never jumps, and the status line tells you
+  the file exists.
+
+Nothing is ever merged or discarded automatically — which version wins is your
+call, made whenever you get to it. Conflict files are recognised as artefacts, so
+they never displace the note they were forked from in the sidebar.
+
 ## Command Line Options
 
 Scribble supports several command line options:
