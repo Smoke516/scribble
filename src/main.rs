@@ -218,8 +218,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Initialize storage based on mode
     let mut storage: Box<dyn storage::NotebookStorage> = if let Some(vault_path) = final_vault_path.clone() {
-        // Initialize file watcher for vault mode
-        app.initialize_file_watcher(vault_path.clone());
+        // `behavior.file_watching` was never consulted, so the watcher could not be
+        // turned off however the config was written.
+        if config.behavior.file_watching {
+            app.initialize_file_watcher(vault_path.clone());
+        }
         
         // Update recent vaults in config
         config.add_recent_vault(vault_path.clone());

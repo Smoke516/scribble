@@ -244,8 +244,10 @@ fn draw_editor_with_preview(f: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(50),  // Editor
-            Constraint::Percentage(50),  // Preview
+            // `ui.preview_width` is the preview's share, clamped so neither pane
+            // can be squeezed out of existence by a stray config value.
+            Constraint::Percentage(100 - app.config.ui.preview_width.clamp(10, 90)),
+            Constraint::Percentage(app.config.ui.preview_width.clamp(10, 90)),
         ])
         .split(area);
     

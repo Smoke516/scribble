@@ -71,9 +71,12 @@ impl App {
             return Err("Import directory does not exist".to_string());
         }
         
-        // Create backup before importing
-        if let Err(e) = self.create_backup() {
-            return Err(format!("Failed to create backup before import: {}", e));
+        // Create backup before importing. `behavior.backup_on_import` was never
+        // consulted, so this happened however the config was written.
+        if self.config.behavior.backup_on_import {
+            if let Err(e) = self.create_backup() {
+                return Err(format!("Failed to create backup before import: {}", e));
+            }
         }
         
         let mut result = ImportResult::new();

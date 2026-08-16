@@ -527,7 +527,9 @@ impl App {
             pending_folder_parent: None,
             
             // Try to detect helix, then fall back to other editors
-            external_editor: detect_external_editor(),
+            // `editor.default` first, then $EDITOR, then whatever is installed.
+            // Detection alone ignored the config entirely.
+            external_editor: config.get_editor().or_else(detect_external_editor),
             just_returned_from_editor: false,
             
             // Move operation
@@ -550,6 +552,9 @@ impl App {
             // aspell is probed once at startup; everything else starts empty.
             spell: SpellState {
                 aspell_available: crate::spell::check_available(),
+                // `behavior.spell_check` was never consulted, so turning it on in
+                // the config did nothing and it always started off.
+                enabled: config.behavior.spell_check,
                 ..SpellState::default()
             },
             note_search: NoteSearchState::default(),
@@ -1342,8 +1347,11 @@ impl App {
             }
         }
 
-        // Auto-save debounce: save 2 seconds after last keystroke if modified
-        if let Some(last_key) = self.last_keystroke {
+        // Auto-save debounce: save 2 seconds after last keystroke if modified.
+        // `behavior.auto_save` was never consulted, so this ran whatever the config
+        // said; turning it off left Ctrl+S, :w and the exit flush as the ways to
+        // write, which is what the setting promises.
+        if let Some(last_key) = self.last_keystroke.filter(|_| self.config.behavior.auto_save) {
             if last_key.elapsed().as_secs() >= 2 && self.save_status == SaveStatus::Modified {
                 let _ = self.save_current_note();
                 self.last_keystroke = None;

@@ -1190,9 +1190,13 @@ fn execute_command(app: &mut App, command: &str) {
         "export" => {
             match app.export_all_notes() {
                 Ok(count) => {
-                    let storage = crate::storage::Storage::new().unwrap();
-                    let export_path = storage.get_notes_dir();
-                    app.set_operation_success(format!("Exported {} notes to {:?}", count, export_path), Some("📦".to_string()));
+                    let where_to = crate::storage::Storage::new()
+                        .map(|s| s.get_notes_dir().display().to_string())
+                        .unwrap_or_else(|_| "the notes directory".to_string());
+                    app.set_operation_success(
+                        format!("Exported {} notes to {}", count, where_to),
+                        Some("📦".to_string()),
+                    );
                 },
                 Err(e) => app.set_operation_error(format!("Export failed: {}", e), Some("🚨".to_string())),
             }
@@ -1305,7 +1309,7 @@ fn execute_command(app: &mut App, command: &str) {
                     },
                     Err(e) => app.set_operation_error(format!("Import failed: {}", e), Some("🚨".to_string())),
                 }
-        } else if command == "spell" || command == "spellon" {
+        } else if matches!(command, "spell" | "spellon" | "spell on") {
             if !app.spell.aspell_available {
                 app.set_message("aspell not found — install it: sudo apt install aspell".to_string());
             } else {
@@ -1313,7 +1317,7 @@ fn execute_command(app: &mut App, command: &str) {
                 app.run_spell_check();
                 app.set_message(format!("Spell check ON — {} error(s)", app.spell.errors.len()));
             }
-        } else if command == "nospell" || command == "spelloff" {
+        } else if matches!(command, "nospell" | "spelloff" | "spell off") {
             app.spell.enabled = false;
             app.spell.errors.clear();
             app.set_message("Spell check OFF".to_string());
