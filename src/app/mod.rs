@@ -1243,6 +1243,61 @@ impl App {
     }
 
     /// Surface a failed disk write and keep the save pending so it retries.
+    /// Absorb what a save reported: paths chosen for new notes, fresh disk stamps,
+    /// and any file that had to be preserved before we wrote over it.
+    ///
+    /// Storing the stamps back is not bookkeeping — it is what stops the *next*
+    /// save from mistaking our own write for somebody else's and preserving a copy
+    /// of it on every single autosave.
+    pub fn apply_save_report(&mut self, report: crate::storage::SaveReport) {
+        // Store back the path chosen for any newly-written note so it writes to the
+        // same file next time.
+        for (id, path) in report.assigned {
+            if let Some(n) = self.notebook.notes.get_mut(&id) {
+                n.file_path = Some(path.clone());
+            }
+            if self.current_note.as_ref().map(|n| n.id) == Some(id) {
+                if let Some(cn) = self.current_note.as_mut() {
+                    cn.file_path = Some(path);
+                }
+            }
+        }
+
+        for (id, stamp) in report.stamps {
+            if let Some(n) = self.notebook.notes.get_mut(&id) {
+                n.disk_stamp = Some(stamp);
+            }
+            if let Some(cn) = self.current_note.as_mut() {
+                if cn.id == id {
+                    cn.disk_stamp = Some(stamp);
+                }
+            }
+        }
+
+        // Say so plainly. The user's own text is still in the note they are editing;
+        // what they need to know is that a second file now exists and where.
+        if let Some(conflict) = report.conflicts.last() {
+            let name = conflict
+                .preserved_at
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| conflict.preserved_at.display().to_string());
+            let extra = report.conflicts.len().saturating_sub(1);
+            let message = if extra > 0 {
+                format!(
+                    "'{}' changed on disk — kept that version as {} ({} more)",
+                    conflict.note_title, name, extra
+                )
+            } else {
+                format!(
+                    "'{}' changed on disk — kept that version as {}",
+                    conflict.note_title, name
+                )
+            };
+            self.set_operation_info(message, Some("⚔️".to_string()));
+        }
+    }
+
     pub fn report_save_failure(&mut self, err: String) {
         self.save_status = SaveStatus::Error;
         self.disk.pending_disk_save = true;
@@ -1334,6 +1389,24 @@ impl App {
     }
     
     /// Ensure cursor is visible after scrolling
+    /// Pull the cursor back inside the buffer.
+    ///
+    /// Needed whenever the content changes underneath the cursor rather than
+    /// because of it — a reload from disk, say. `get_cursor_byte_index` trusts the
+    /// row and column it is given, so a cursor left past the end of a shortened note
+    /// indexes into nothing.
+    pub fn clamp_cursor_to_content(&mut self) {
+        let lines: Vec<&str> = self.editor_content.lines().collect();
+        let last_row = lines.len().saturating_sub(1) as u16;
+        self.editor_cursor.0 = self.editor_cursor.0.min(last_row);
+        let line_len = lines
+            .get(self.editor_cursor.0 as usize)
+            .map(|l| l.chars().count())
+            .unwrap_or(0) as u16;
+        self.editor_cursor.1 = self.editor_cursor.1.min(line_len);
+        self.adjust_scroll_to_cursor();
+    }
+
     pub fn adjust_scroll_to_cursor(&mut self) {
         let visible_height = 20; // Approximate visible lines in editor
         
@@ -1971,6 +2044,76 @@ mod persistence_tests {
         app.mark_disk_saved();
         assert!(app.wrote_recently());
         assert_eq!(app.save_status, SaveStatus::Saved);
+    }
+
+    /// Storing the report's stamps back is what stops the next save mistaking our
+    /// own write for somebody else's. Dropping them would put a conflict file beside
+    /// every note on the second autosave.
+    #[test]
+    fn a_save_report_stores_paths_and_stamps_back_onto_the_notes() {
+        use crate::models::FileStamp;
+        let mut app = App::default();
+        let note = Note::new("Test".to_string(), None);
+        let id = note.id;
+        app.notebook.add_note(note.clone());
+        app.current_note = Some(note);
+
+        let path = std::path::PathBuf::from("/vault/Test.md");
+        let stamp = FileStamp::of_bytes(b"written");
+        app.apply_save_report(crate::storage::SaveReport {
+            assigned: vec![(id, path.clone())],
+            stamps: vec![(id, stamp)],
+            conflicts: Vec::new(),
+        });
+
+        let stored = app.notebook.notes.get(&id).unwrap();
+        assert_eq!(stored.file_path.as_deref(), Some(path.as_path()));
+        assert_eq!(stored.disk_stamp, Some(stamp), "stamp was not stored back");
+        // The open copy of the note has to be updated too, or it saves with a stale
+        // stamp and conflicts with itself.
+        let open = app.current_note.as_ref().unwrap();
+        assert_eq!(open.file_path.as_deref(), Some(path.as_path()));
+        assert_eq!(open.disk_stamp, Some(stamp));
+    }
+
+    /// A preserved file the user never hears about is a file they will not think to
+    /// look for, so a conflict has to reach the status line.
+    #[test]
+    fn a_conflict_is_reported_to_the_user() {
+        let mut app = App::default();
+        app.apply_save_report(crate::storage::SaveReport {
+            assigned: Vec::new(),
+            stamps: Vec::new(),
+            conflicts: vec![crate::storage::Conflict {
+                note_title: "Meeting".to_string(),
+                preserved_at: std::path::PathBuf::from(
+                    "/vault/Meeting (scribble conflict 2026-08-16 131829).md",
+                ),
+            }],
+        });
+
+        let shown = format!("{:?}", app.operation_result);
+        assert!(shown.contains("Meeting"), "note not named: {}", shown);
+        assert!(
+            shown.contains("scribble conflict"),
+            "the preserved file was not named: {}",
+            shown
+        );
+    }
+
+    /// A reload can shorten the note under the cursor, and get_cursor_byte_index
+    /// trusts whatever row and column it is handed.
+    #[test]
+    fn the_cursor_is_pulled_back_inside_a_shortened_note() {
+        let mut app = App::default();
+        app.editor_content = "a much longer first line\nand a second\n".to_string();
+        app.editor_cursor = (1, 12);
+
+        app.editor_content = "short\n".to_string();
+        app.clamp_cursor_to_content();
+
+        assert_eq!(app.editor_cursor.0, 0, "cursor left past the last line");
+        assert!(app.editor_cursor.1 <= 5, "cursor left past the end of its line");
     }
 
     #[test]
