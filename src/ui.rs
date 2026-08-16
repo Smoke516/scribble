@@ -1680,13 +1680,26 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         ]),
         Line::from(""),
 
-        // ── Notes & Tree ──────────────────────────────────────────────────────
+        // ── Landing Page ──────────────────────────────────────────────────────
         Line::from(vec![
-            Span::styled("Notes & Tree", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled("Landing Page  ", Style::default().fg(TokyoNightTheme::PURPLE).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled("(shown when no note is open)", Style::default().fg(TokyoNightTheme::COMMENT)),
+        ]),
+        Line::from(""),
+        Line::from("  j / k      Move down / up                 Enter   Open the highlighted row"),
+        Line::from("  1 - 8      Jump straight to that recent note"),
+        Line::from("  F4         Today's daily note             Ctrl+E  Browse the vault"),
+        Line::from("  q          Quit                           ?       This help"),
+        Line::from("  Shows your eight most recent notes, today's note, and any open tasks."),
+        Line::from(""),
+
+        // ── Notes & Explorer ──────────────────────────────────────────────────
+        Line::from(vec![
+            Span::styled("Notes & Explorer", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
         ]),
         Line::from(""),
         Line::from("  Ctrl+E     Explorer: the folder tree as an overlay (sidebar is off by default)"),
-        Line::from("  In Explorer: j/k move · Enter open · h collapse · Esc close"),
+        Line::from("  In Explorer: j/k move · Enter open · h collapse · Esc / e / q close"),
         Line::from("               n new note · f new folder · F folder at root"),
         Line::from("               r rename · m move · d delete (returns to the tree)"),
         Line::from(""),
@@ -1694,7 +1707,7 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from("  r          Rename current note             m    Move current note"),
         Line::from("  u          Undo last delete                dd   Delete line (editor)"),
         Line::from("  Enter      Open note / expand folder"),
-        Line::from("  q          Close note → landing page      Q    Quit immediately"),
+        Line::from("  q          Close note → landing page       Q       Quit immediately"),
         Line::from("  m          Move: j/k pick a folder · ~ vault root · Enter drop · Esc cancel"),
         Line::from("  Pin the sidebar back with  show_sidebar = true  under [ui] in config.toml"),
         Line::from(""),
@@ -1856,9 +1869,10 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from("  • Type [[ in Insert mode to get wiki-link autocomplete for note titles"),
         Line::from("  • Cursor position is remembered per-note when you switch between notes"),
         Line::from("  • :spell on + z= gives Vim-style spell correction with aspell suggestions"),
-        Line::from("  • N (tree focused) picks a template; applies Blank/Daily/Meeting/Project"),
+        Line::from("  • N (outside the editor) picks a template: Blank/Daily/Meeting/Project"),
         Line::from("  • Use Ctrl+J for instant fuzzy-jump to any note by title"),
         Line::from("  • Ctrl+V to switch vaults; works transparently with Obsidian folders"),
+        Line::from("  • Prefer a permanent sidebar? show_sidebar = true under [ui] in config.toml"),
         Line::from(""),
         
         // System Info
