@@ -100,6 +100,49 @@ pub trait NotebookStorage {
     }
 }
 
+/// Split a leading YAML frontmatter block off `content`, returning `(yaml, body)`.
+///
+/// Both delimiters may end in either LF or CRLF. Requiring a literal `---\n` meant
+/// a note that had been through a Windows editor or a sync client parsed as having
+/// no frontmatter at all, so it loaded as a brand new note on every single load: a
+/// fresh `scribble_id` each time, and `created_at` reset to now. It self-healed on
+/// the next save, but the note's identity and true creation date were already gone.
+///
+/// The closing delimiter is matched as a whole line rather than by searching for a
+/// fixed byte sequence, which is also what keeps the body free of the delimiter's
+/// own newline — leaving that behind is what used to grow every note by a blank
+/// line on each save.
+fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
+    let rest = content
+        .strip_prefix("---\n")
+        .or_else(|| content.strip_prefix("---\r\n"))?;
+
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        if line.trim_end_matches(['\n', '\r']) == "---" {
+            return Some((&rest[..offset], &rest[offset + line.len()..]));
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// Convert CRLF to LF.
+///
+/// The editor is LF-only by construction: `get_cursor_byte_index` walks
+/// `content.lines()` adding `line.len() + 1` for the terminator, and `lines()` has
+/// already stripped the `\r`. A CRLF note would therefore under-count by one byte
+/// per line, drifting the cursor further with every line above it and inserting
+/// typed characters at the wrong offset. Normalising on load keeps that whole class
+/// of corruption out of the editor; the file is rewritten as LF on the next save.
+fn normalize_line_endings(content: &str) -> String {
+    if content.contains('\r') {
+        content.replace("\r\n", "\n")
+    } else {
+        content.to_string()
+    }
+}
+
 /// What a save did, beyond succeeding.
 #[derive(Debug, Default)]
 pub struct SaveReport {
@@ -214,21 +257,12 @@ impl VaultStorage {
     }
     
     fn parse_markdown_with_frontmatter(&self, content: &str) -> (Option<NoteFrontmatter>, String) {
-        if let Some(rest) = content.strip_prefix("---\n") {
-            if let Some(end_pos) = rest.find("\n---\n") {
-                let yaml_content = &rest[..end_pos];
-                // "\n---\n" is five bytes. Skipping only four left the closing
-                // delimiter's newline at the head of the body, and since saving
-                // re-adds the separator, every load/save round trip grew the note
-                // by one blank line.
-                let markdown_content = &rest[end_pos + 5..];
-                
-                if let Ok(frontmatter) = serde_yaml::from_str::<NoteFrontmatter>(yaml_content) {
-                    return (Some(frontmatter), markdown_content.to_string());
-                }
+        if let Some((yaml_content, markdown_content)) = split_frontmatter(content) {
+            if let Ok(frontmatter) = serde_yaml::from_str::<NoteFrontmatter>(yaml_content) {
+                return (Some(frontmatter), normalize_line_endings(markdown_content));
             }
         }
-        (None, content.to_string())
+        (None, normalize_line_endings(content))
     }
     
     /// Read one note back off disk, for picking up an external change without
@@ -998,6 +1032,90 @@ mod tests {
 
         assert_eq!(recorded_year, "2020", "frontmatter modified_at was overwritten");
         assert_eq!(bare_year, now_year, "note without frontmatter should use file mtime");
+    }
+
+    /// A CRLF note must keep its identity. Regression: the parser required a
+    /// literal `---\n`, so a note saved by a Windows editor or touched by a sync
+    /// client had no frontmatter as far as scribble was concerned, and was handed a
+    /// fresh id and a fresh creation date on every load.
+    #[test]
+    fn crlf_frontmatter_keeps_id_and_created_at() {
+        let dir = std::env::temp_dir().join(format!("scribble_crlf_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let id = "6f1c9b3e-51a0-4a5f-9d2e-8c7b4a1f0e33";
+        fs::write(
+            dir.join("Windows.md"),
+            format!(
+                "---\r\nscribble_id: {}\r\ntitle: Windows\r\ncreated_at: 2019-05-06T07:08:09Z\r\n---\r\nfirst\r\nsecond\r\n",
+                id
+            ),
+        )
+        .unwrap();
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        let nb = storage.load_notebook().unwrap();
+        let note = nb.notes.values().find(|n| n.title == "Windows").unwrap().clone();
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(note.id.to_string(), id, "CRLF note was given a new id");
+        assert_eq!(
+            note.created_at.format("%Y").to_string(),
+            "2019",
+            "CRLF note lost its creation date"
+        );
+        assert_eq!(
+            note.content, "first\nsecond\n",
+            "CRLF survived into the editor buffer, where byte offsets assume LF"
+        );
+    }
+
+    /// The same normalisation has to apply to a note with no frontmatter at all,
+    /// which takes the other branch of the parser.
+    #[test]
+    fn crlf_body_without_frontmatter_is_normalized() {
+        let dir = std::env::temp_dir().join(format!("scribble_crlf_bare_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("Bare.md"), "alpha\r\nbeta\r\n").unwrap();
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        let nb = storage.load_notebook().unwrap();
+        let note = nb.notes.values().find(|n| n.title == "Bare").unwrap().clone();
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(note.content, "alpha\nbeta\n");
+    }
+
+    /// A CRLF note must also be round-trip stable once normalised, the same way an
+    /// LF one is — no growth, no re-parsing as new.
+    #[test]
+    fn crlf_note_round_trips_without_growing() {
+        let dir = std::env::temp_dir().join(format!("scribble_crlf_rt_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("Round.md"),
+            "---\r\ntitle: Round\r\n---\r\nbody line\r\n",
+        )
+        .unwrap();
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        let nb = storage.load_notebook().unwrap();
+        storage.save_notebook(&nb).unwrap();
+        let reloaded = storage.load_notebook().unwrap();
+        let once = reloaded.notes.values().find(|n| n.title == "Round").unwrap().clone();
+        storage.save_notebook(&reloaded).unwrap();
+        let twice_nb = storage.load_notebook().unwrap();
+        let twice = twice_nb.notes.values().find(|n| n.title == "Round").unwrap().clone();
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(once.content, twice.content, "note changed on a second round trip");
+        assert_eq!(once.id, twice.id, "note was given a new id on reload");
+        assert!(!once.content.contains('\r'), "CRLF survived the round trip");
     }
 
     /// Write a vault of `(filename, body)` notes that all share one scribble_id,
