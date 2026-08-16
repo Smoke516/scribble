@@ -123,7 +123,11 @@ impl VaultStorage {
         if let Some(rest) = content.strip_prefix("---\n") {
             if let Some(end_pos) = rest.find("\n---\n") {
                 let yaml_content = &rest[..end_pos];
-                let markdown_content = &rest[end_pos + 4..];
+                // "\n---\n" is five bytes. Skipping only four left the closing
+                // delimiter's newline at the head of the body, and since saving
+                // re-adds the separator, every load/save round trip grew the note
+                // by one blank line.
+                let markdown_content = &rest[end_pos + 5..];
                 
                 if let Ok(frontmatter) = serde_yaml::from_str::<NoteFrontmatter>(yaml_content) {
                     return (Some(frontmatter), markdown_content.to_string());
@@ -910,6 +914,44 @@ mod tests {
                 assert!(msg.contains("Blocked.md"), "message does not name the file: {}", msg);
             }
         }
+    }
+
+    /// Saving and reloading must be idempotent. It was not: the frontmatter
+    /// delimiter is five bytes and the parser skipped four, so each round trip
+    /// left the delimiter's newline on the body and the next save added another.
+    /// Notes silently grew a blank line every time they were opened and saved.
+    #[test]
+    fn save_load_round_trip_does_not_grow_the_note() {
+        let dir = std::env::temp_dir().join(format!("scribble_rt_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+
+        let mut nb = NotebookData::new();
+        let mut note = Note::new("Round".to_string(), None);
+        note.content = "first line\nsecond line\n".to_string();
+        nb.add_note(note);
+        storage.save_notebook(&nb).unwrap();
+
+        let mut bodies = Vec::new();
+        for _ in 0..4 {
+            let loaded = storage.load_notebook().unwrap();
+            let body = loaded.notes.values().next().unwrap().content.clone();
+            bodies.push(body);
+            storage.save_notebook(&loaded).unwrap();
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            bodies.windows(2).all(|w| w[0] == w[1]),
+            "body changed across round trips: {:?}",
+            bodies.iter().map(|b| b.len()).collect::<Vec<_>>()
+        );
+        assert!(
+            !bodies[0].starts_with('\n'),
+            "body must not start with the delimiter's newline: {:?}",
+            bodies[0]
+        );
     }
 
     #[test]

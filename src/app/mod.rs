@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use crate::autocomplete::{AutocompleteState, MarkdownAutocomplete};
 use crate::models::{Note, Folder, NotebookData, FolderTreeNode};
 use crate::search::{EnhancedSearch, SearchResult};
@@ -48,6 +49,8 @@ pub enum AppMode {
     TemplatePicker,
     SpellSuggest,
     Outline,
+    /// The folder tree as an overlay, for when the sidebar is not on screen.
+    Explorer,
 }
 
 /// Which section of the links panel keyboard navigation currently acts on.
@@ -246,6 +249,78 @@ impl Default for LinksState {
     }
 }
 
+/// One row of the "where you left off" list.
+#[derive(Debug, Clone)]
+pub struct RecentEntry {
+    pub id: Uuid,
+    pub title: String,
+    /// Containing folder name, empty for notes at the vault root.
+    pub folder: String,
+    /// Coarse "2h ago" style age, for a glanceable column.
+    pub age: String,
+}
+
+/// What activating a landing-page row does.
+///
+/// The page returns intent rather than performing it, so the row and the key
+/// that does the same thing share one code path in the dispatcher instead of
+/// drifting apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WelcomeAction {
+    OpenNote(Uuid),
+    DailyNote,
+    NewNote,
+    Search,
+    QuickJump,
+    Explorer,
+    Help,
+}
+
+/// One selectable row of the landing page.
+#[derive(Debug, Clone)]
+pub struct MenuItem {
+    pub label: String,
+    pub detail: String,
+    pub key: String,
+    pub action: WelcomeAction,
+}
+
+/// Everything the landing page shows.
+///
+/// Computed rather than stored: it is read once per frame from state that is
+/// already authoritative, so it cannot drift the way a cached copy would.
+#[derive(Debug, Default)]
+pub struct Dashboard {
+    pub recent: Vec<RecentEntry>,
+    /// Every selectable row, recents first, then the fixed actions.
+    pub menu: Vec<MenuItem>,
+    /// Where the recents end and the actions begin, for the separating gap.
+    pub recent_count: usize,
+    pub open_tasks: usize,
+    pub notes_with_tasks: usize,
+    pub note_count: usize,
+    pub folder_count: usize,
+    pub tag_count: usize,
+    pub vault_label: Option<String>,
+}
+
+/// Render a duration as the coarsest unit that is still true. Deliberately
+/// approximate: the column exists to be scanned, not to be precise.
+fn humanize_age(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let mins = (now - then).num_minutes();
+    if mins < 1 {
+        "just now".to_string()
+    } else if mins < 60 {
+        format!("{}m ago", mins)
+    } else if mins < 60 * 24 {
+        format!("{}h ago", mins / 60)
+    } else if mins < 60 * 24 * 7 {
+        format!("{}d ago", mins / (60 * 24))
+    } else {
+        format!("{}w ago", mins / (60 * 24 * 7))
+    }
+}
+
 pub struct App {
     pub links: LinksState,
     pub note_search: NoteSearchState,
@@ -337,6 +412,13 @@ pub struct App {
     // Theme management
     pub theme_manager: ThemeManager,
     pub config: Config,
+    /// Vault root actually in use, for the landing page. None in JSON mode.
+    pub vault_path: Option<std::path::PathBuf>,
+    /// Highlighted row of the landing page menu.
+    pub welcome_selected: usize,
+    /// Where a confirm dialog should return to. Without this, deleting from the
+    /// explorer would dump you back to Normal instead of the tree you were in.
+    pub modal_return: Option<AppMode>,
     pub theme_browser_selected: usize,
     
     // Help dialog
@@ -485,6 +567,9 @@ impl App {
             // Theme management
             theme_manager: ThemeManager::new(&config.ui.theme),
             config: config.clone(),
+            vault_path: None,
+            welcome_selected: 0,
+            modal_return: None,
             theme_browser_selected: 0,
             
             // Help dialog
@@ -873,18 +958,160 @@ impl App {
     }
 
     // Recent Files functionality
+    /// Build the landing-page view of the notebook.
+    ///
+    /// The landing page answers "what was I doing, and what should I do next" —
+    /// so it is built from the notebook's actual state (recency, open tasks,
+    /// today's note) rather than from a list of the app's features, which is
+    /// what `?` is for.
+    pub fn dashboard(&self) -> Dashboard {
+        let now = Utc::now();
+
+        let mut by_recency: Vec<&Note> = self.notebook.notes.values().collect();
+        // Ties broken by id so the list never reshuffles between frames.
+        by_recency.sort_by(|a, b| b.modified_at.cmp(&a.modified_at).then(a.id.cmp(&b.id)));
+
+        let recent = by_recency
+            .iter()
+            .take(8)
+            .map(|n| RecentEntry {
+                id: n.id,
+                title: n.title.clone(),
+                folder: n
+                    .folder_id
+                    .and_then(|fid| self.notebook.folders.get(&fid))
+                    .map(|f| f.name.clone())
+                    .unwrap_or_default(),
+                age: humanize_age(n.modified_at, now),
+            })
+            .collect();
+
+        let today_title = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let today_exists = self.notebook.find_note_by_title(&today_title).is_some();
+
+        let mut open_tasks = 0usize;
+        let mut notes_with_tasks = 0usize;
+        for note in self.notebook.notes.values() {
+            let n = note
+                .content
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    t.starts_with("- [ ]") || t.starts_with("* [ ]")
+                })
+                .count();
+            if n > 0 {
+                open_tasks += n;
+                notes_with_tasks += 1;
+            }
+        }
+
+        let recent: Vec<RecentEntry> = recent;
+        let mut menu: Vec<MenuItem> = recent
+            .iter()
+            .enumerate()
+            .map(|(i, e)| MenuItem {
+                label: e.title.clone(),
+                detail: if e.folder.is_empty() {
+                    e.age.clone()
+                } else {
+                    format!("{} · {}", e.folder, e.age)
+                },
+                key: format!("{}", i + 1),
+                action: WelcomeAction::OpenNote(e.id),
+            })
+            .collect();
+        let recent_count = menu.len();
+
+        let today_detail = if today_exists {
+            format!("{} · open", today_title)
+        } else {
+            format!("{} · new", today_title)
+        };
+        for (label, detail, key, action) in [
+            ("Today's daily note", today_detail.as_str(), "F4", WelcomeAction::DailyNote),
+            ("Browse the vault", "", "e", WelcomeAction::Explorer),
+            ("New note", "", "n", WelcomeAction::NewNote),
+            ("Search all notes", "", "/", WelcomeAction::Search),
+            ("Jump to note", "", "Ctrl+J", WelcomeAction::QuickJump),
+            ("Help", "", "?", WelcomeAction::Help),
+        ] {
+            menu.push(MenuItem {
+                label: label.to_string(),
+                detail: detail.to_string(),
+                key: key.to_string(),
+                action,
+            });
+        }
+
+        Dashboard {
+            menu,
+            recent_count,
+            recent,
+            open_tasks,
+            notes_with_tasks,
+            note_count: self.notebook.notes.len(),
+            folder_count: self.notebook.folders.len(),
+            tag_count: self.tag_manager.get_tags_alphabetical().len(),
+            vault_label: self.vault_path.as_ref().and_then(|p| {
+                p.file_name().map(|n| n.to_string_lossy().to_string())
+            }),
+        }
+    }
+
+    /// Move the landing-page highlight, clamped rather than wrapped: running off
+    /// the end of a short list and silently landing back at the top is
+    /// disorienting on a page you are only glancing at.
+    /// Point the tree selection at the note currently open.
+    ///
+    /// The rename/move/delete commands all act on the tree selection. With the
+    /// sidebar hidden that selection is invisible, so acting on it blind is a
+    /// footgun — retarget it at the note actually on screen first, and the
+    /// existing commands keep working unchanged.
+    pub fn focus_tree_on_current_note(&mut self) -> bool {
+        let Some(id) = self.current_note.as_ref().map(|n| n.id) else {
+            return false;
+        };
+        if let Some(idx) = self
+            .folder_tree_items
+            .iter()
+            .position(|t| t.id == id && t.item_type == TreeItemType::Note)
+        {
+            self.selected_folder_index = idx;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn welcome_move(&mut self, delta: isize) {
+        let len = self.dashboard().menu.len();
+        if len == 0 {
+            self.welcome_selected = 0;
+            return;
+        }
+        let next = self.welcome_selected as isize + delta;
+        self.welcome_selected = next.clamp(0, len as isize - 1) as usize;
+    }
+
+    /// What the highlighted row would do. The dispatcher performs it, so a row
+    /// and its shortcut key cannot diverge.
+    pub fn welcome_action_at_cursor(&self) -> Option<WelcomeAction> {
+        self.dashboard().menu.get(self.welcome_selected).map(|m| m.action)
+    }
+
     pub fn set_welcome_message(&mut self) {
         let note_count = self.notebook.notes.len();
         let folder_count = self.notebook.folders.len();
         
+        // The landing page already shows the counts and the keys, so repeating
+        // them in the status bar is just noise. Only the empty vault needs a nudge.
         if note_count == 0 {
-            self.set_message("Welcome to Scribble! Press 'n' to create your first note or '?' for help".to_string());
+            self.set_message("Press 'n' to write your first note, or '?' for help".to_string());
         } else {
-            self.set_message(format!(
-                "Welcome back! Loaded {} notes across {} folders. Press 'n' for new note, '?' for help", 
-                note_count, folder_count
-            ));
+            self.set_message(String::new());
         }
+        let _ = folder_count;
         
         // Start with focus on the folder tree to encourage exploration
         self.focused_pane = FocusedPane::Folders;
@@ -1954,5 +2181,187 @@ intro text
         app.open_daily_note();
         assert_eq!(app.notebook.notes.len(), after_create);
         assert_eq!(app.notebook.find_note_by_title(&today), Some(id));
+    }
+}
+
+#[cfg(test)]
+mod dashboard_tests {
+    use super::*;
+    use crate::models::{Folder, Note};
+
+    /// App::new seeds a sample note and three folders, which would skew every
+    /// count here — start from a genuinely empty notebook instead.
+    fn empty_app() -> App {
+        let mut app = App::default();
+        app.notebook.notes.clear();
+        app.notebook.folders.clear();
+        app
+    }
+
+    fn note_at(title: &str, minutes_ago: i64, folder: Option<Uuid>) -> Note {
+        let mut n = Note::new(title.to_string(), folder);
+        n.modified_at = Utc::now() - chrono::Duration::minutes(minutes_ago);
+        n
+    }
+
+    /// The list answers "what was I doing", so it is newest-first and capped
+    /// however large the vault is.
+    #[test]
+    fn recent_list_is_newest_first_and_capped() {
+        let mut app = empty_app();
+        let titles = ["oldest", "h", "g", "f", "e", "d", "c", "b", "newest"];
+        for (i, title) in titles.iter().enumerate() {
+            app.notebook.add_note(note_at(title, (titles.len() - i) as i64 * 10, None));
+        }
+        let d = app.dashboard();
+        assert_eq!(d.recent.len(), 8, "capped at eight");
+        assert_eq!(d.recent[0].title, "newest");
+        assert!(
+            !d.recent.iter().any(|e| e.title == "oldest"),
+            "the oldest note must fall off the list"
+        );
+    }
+
+    /// The folder column names the containing folder, and root notes say so
+    /// rather than rendering an empty gap.
+    #[test]
+    fn recent_entries_carry_their_folder() {
+        let mut app = empty_app();
+        let folder = Folder::new("Cheat-Sheets".to_string(), None);
+        let fid = folder.id;
+        app.notebook.add_folder(folder);
+        app.notebook.add_note(note_at("yazi", 1, Some(fid)));
+        app.notebook.add_note(note_at("loose", 2, None));
+
+        let d = app.dashboard();
+        assert_eq!(d.recent[0].folder, "Cheat-Sheets");
+        assert_eq!(d.recent[1].folder, "", "root notes carry no folder name");
+    }
+
+    /// Only unchecked boxes count — a finished list is not outstanding work.
+    #[test]
+    fn only_unchecked_tasks_are_counted() {
+        let mut app = empty_app();
+        let mut a = Note::new("Plan".to_string(), None);
+        a.content = "- [ ] one\n- [x] done\n  - [ ] indented\n* [ ] star bullet\n- not a task".into();
+        let mut b = Note::new("Done".to_string(), None);
+        b.content = "- [x] all\n- [X] finished".into();
+        app.notebook.add_note(a);
+        app.notebook.add_note(b);
+
+        let d = app.dashboard();
+        assert_eq!(d.open_tasks, 3, "two dash bullets plus the star bullet");
+        assert_eq!(d.notes_with_tasks, 1, "the fully-checked note does not count");
+    }
+
+    #[test]
+    fn ages_read_as_the_coarsest_true_unit() {
+        let now = Utc::now();
+        let ago = |m: i64| humanize_age(now - chrono::Duration::minutes(m), now);
+        assert_eq!(ago(0), "just now");
+        assert_eq!(ago(5), "5m ago");
+        assert_eq!(ago(90), "1h ago");
+        assert_eq!(ago(60 * 30), "1d ago");
+        assert_eq!(ago(60 * 24 * 10), "1w ago");
+    }
+
+    /// An empty vault has no recency to show; the renderer branches on this.
+    #[test]
+    fn empty_vault_yields_an_empty_recent_list() {
+        let d = empty_app().dashboard();
+        assert!(d.recent.is_empty());
+        assert_eq!(d.open_tasks, 0);
+        assert_eq!(d.recent_count, 0, "no recents means the menu is actions only");
+        assert!(
+            d.menu.iter().any(|m| m.action == WelcomeAction::DailyNote),
+            "the daily-note action is offered even in an empty vault"
+        );
+    }
+
+    /// The menu is recents then actions, with recent_count marking the seam the
+    /// renderer puts a gap at.
+    #[test]
+    fn menu_is_recents_then_actions() {
+        let mut app = empty_app();
+        app.notebook.add_note(note_at("Alpha", 5, None));
+        app.notebook.add_note(note_at("Beta", 9, None));
+        let d = app.dashboard();
+
+        assert_eq!(d.recent_count, 2);
+        assert!(matches!(d.menu[0].action, WelcomeAction::OpenNote(_)));
+        assert!(matches!(d.menu[1].action, WelcomeAction::OpenNote(_)));
+        assert!(
+            d.menu[d.recent_count..]
+                .iter()
+                .all(|m| !matches!(m.action, WelcomeAction::OpenNote(_))),
+            "everything after the seam is a fixed action"
+        );
+        assert_eq!(d.menu[0].key, "1", "recents keep their digit shortcut");
+    }
+
+    /// Clamped, not wrapped: silently jumping from the last row back to the first
+    /// is disorienting on a page you only glance at.
+    #[test]
+    fn welcome_selection_clamps_at_both_ends() {
+        let mut app = empty_app();
+        app.notebook.add_note(note_at("Alpha", 5, None));
+        let last = app.dashboard().menu.len() - 1;
+
+        app.welcome_move(-1);
+        assert_eq!(app.welcome_selected, 0, "cannot go above the first row");
+
+        for _ in 0..50 {
+            app.welcome_move(1);
+        }
+        assert_eq!(app.welcome_selected, last, "cannot go past the last row");
+    }
+
+    /// The highlighted row and its shortcut key must resolve to the same thing.
+    #[test]
+    fn activating_a_recent_row_targets_that_note() {
+        let mut app = empty_app();
+        app.notebook.add_note(note_at("Older", 90, None));
+        let newest = note_at("Newest", 1, None);
+        let newest_id = newest.id;
+        app.notebook.add_note(newest);
+
+        app.welcome_selected = 0;
+        assert_eq!(
+            app.welcome_action_at_cursor(),
+            Some(WelcomeAction::OpenNote(newest_id))
+        );
+    }
+
+    /// Rename/move act on the tree selection. With the sidebar hidden that
+    /// selection is invisible, so they retarget it at the open note first.
+    #[test]
+    fn focus_tree_on_current_note_targets_the_open_note() {
+        let mut app = empty_app();
+        let a = note_at("Alpha", 5, None);
+        let b = note_at("Beta", 9, None);
+        let b_id = b.id;
+        app.notebook.add_note(a);
+        app.notebook.add_note(b.clone());
+        app.refresh_tree_view();
+
+        app.current_note = Some(b);
+        app.selected_folder_index = 0;
+        assert!(app.focus_tree_on_current_note());
+
+        let sel = app.get_selected_item().expect("something must be selected");
+        assert_eq!(sel.id, b_id, "selection follows the note on screen");
+    }
+
+    /// Nothing open means nothing to retarget, and it must not move the cursor.
+    #[test]
+    fn focus_tree_on_current_note_is_a_noop_with_no_note() {
+        let mut app = empty_app();
+        app.notebook.add_note(note_at("Alpha", 5, None));
+        app.refresh_tree_view();
+        app.current_note = None;
+        app.selected_folder_index = 0;
+
+        assert!(!app.focus_tree_on_current_note());
+        assert_eq!(app.selected_folder_index, 0);
     }
 }

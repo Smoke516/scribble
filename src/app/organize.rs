@@ -26,24 +26,40 @@ impl App {
         self.set_message("Move cancelled".to_string());
     }
     
+    /// Move the pending item to the highlighted row's folder.
+    ///
+    /// A highlighted *note* means its containing folder, which is what makes the
+    /// tree usable as a destination picker.
     pub fn execute_move(&mut self) -> Result<(), String> {
+        let destination_folder_id = match self.get_selected_item() {
+            Some(item) => match item.item_type {
+                TreeItemType::Folder => Some(item.id),
+                TreeItemType::Note => self
+                    .notebook
+                    .notes
+                    .get(&item.id)
+                    .and_then(|n| n.folder_id),
+            },
+            None => return Err("No destination selected".to_string()),
+        };
+        self.execute_move_to(destination_folder_id)
+    }
+
+    /// Move the pending item to the vault root.
+    ///
+    /// Reachable only by aiming at a root-level note otherwise — which fails
+    /// outright in a vault that has none, leaving no way to move anything back
+    /// out of a folder.
+    pub fn execute_move_to_root(&mut self) -> Result<(), String> {
+        self.execute_move_to(None)
+    }
+
+    /// Perform the pending move. `destination` of None means the vault root.
+    fn execute_move_to(&mut self, destination_folder_id: Option<uuid::Uuid>) -> Result<(), String> {
         let move_id = self.move_item_id.ok_or("No item selected for moving")?;
         let move_type = self.move_item_type.as_ref().ok_or("No item type selected")?;
-        
-        // Get the selected destination
-        if let Some(selected_item) = self.get_selected_item() {
-            let destination_folder_id = match selected_item.item_type {
-                TreeItemType::Folder => Some(selected_item.id),
-                TreeItemType::Note => {
-                    // Find the parent folder of the selected note
-                    if let Some(note) = self.notebook.notes.get(&selected_item.id) {
-                        note.folder_id
-                    } else {
-                        None
-                    }
-                },
-            };
-            
+
+        {
             match move_type {
                 TreeItemType::Note => {
                     // move_note relocates the file and flags the save itself.
@@ -76,8 +92,6 @@ impl App {
             
             self.set_operation_success(format!("Item moved to '{}'!", dest_name), Some("📁".to_string()));
             Ok(())
-        } else {
-            Err("No destination selected".to_string())
         }
     }
     

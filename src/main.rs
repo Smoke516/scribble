@@ -143,6 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("Warning: Failed to save config: {}", e);
         }
         
+        app.vault_path = Some(vault_path.clone());
         Box::new(storage::VaultStorage::new(vault_path)?)
     } else {
         // Regular JSON storage

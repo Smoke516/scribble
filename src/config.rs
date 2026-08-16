@@ -31,6 +31,10 @@ pub struct VaultConfig {
 #[serde(default)]
 pub struct UiConfig {
     pub theme: String,
+    /// Show the folder tree beside the editor. Off by default: the tree is
+    /// available as an overlay on Ctrl+E, and a permanent sidebar competes with
+    /// the editor for attention. Set true to pin it back.
+    pub show_sidebar: bool,
     pub preview_width: u16,
     pub show_line_numbers: bool,
     pub relative_line_numbers: bool,
@@ -69,6 +73,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             theme: "tokyo-night".to_string(),
+            show_sidebar: false,
             preview_width: 50,
             show_line_numbers: true,
             relative_line_numbers: false,

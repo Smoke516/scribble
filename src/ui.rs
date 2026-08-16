@@ -34,12 +34,32 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // Draw breadcrumb
     draw_breadcrumb(f, app, chunks[0]);
-    
-    // Draw folder tree with recent files if enabled
-    draw_folder_tree_with_recent(f, app, main_chunks[0]);
-    
-    // Draw editor
-    draw_editor(f, app, main_chunks[1]);
+
+    if app.current_note.is_none() {
+        // Landing page takes the whole width. The sidebar and the landing page
+        // are both "notes you could open", and showing them side by side puts a
+        // worse-ordered list next to a better one. Press `e` for the tree as an
+        // overlay; opening a note restores the split.
+        draw_welcome_screen(
+            f,
+            app,
+            chunks[1],
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(TokyoNightTheme::border_inactive())
+                .style(TokyoNightTheme::normal()),
+        );
+    } else if app.config.ui.show_sidebar {
+        // Draw folder tree with recent files if enabled
+        draw_folder_tree_with_recent(f, app, main_chunks[0]);
+
+        // Draw editor
+        draw_editor(f, app, main_chunks[1]);
+    } else {
+        // Sidebar off (the default): the editor gets the full width and the tree
+        // is a Ctrl+E overlay. Set ui.show_sidebar = true to pin it back.
+        draw_editor(f, app, chunks[1]);
+    }
     
     
     // Draw status bar
@@ -54,6 +74,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         AppMode::InputNote => draw_input_note_dialog(f, app),
         AppMode::InputFolder => draw_input_folder_dialog(f, app),
         AppMode::Help => draw_help_dialog(f, app),
+        AppMode::Explorer => draw_explorer_dialog(f, app),
+        AppMode::Move => draw_move_dialog(f, app),
         AppMode::DeleteConfirm => draw_delete_confirm_dialog(f, app),
         AppMode::QuickJump => draw_quick_jump_dialog(f, app),
         AppMode::RecentFiles => draw_recent_files_dialog(f, app),
@@ -291,9 +313,43 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
         // Tell app how tall the editor viewport is (used for scroll clamping)
         app.editor_viewport_height = inner_rect.height;
 
+        // Lay the note out once, up front: the gutter, the scroll offset and the
+        // cursor all read from this same layout, which is what stops them
+        // disagreeing about where the wrapped lines fall.
+        let gutter_w: u16 = if app.config.ui.show_line_numbers {
+            if is_split_view { 4 } else { 6 }
+        } else {
+            0
+        };
+        let wrap_width = inner_rect.width.saturating_sub(gutter_w).max(1) as usize;
+        let (screen_rows, line_start) = layout_note(content, wrap_width);
+
+        // editor_scroll is a logical line; the viewport scrolls in screen rows.
+        let top_logical = (app.editor_scroll as usize).min(line_start.len().saturating_sub(1));
+        let mut screen_scroll = line_start.get(top_logical).copied().unwrap_or(0);
+
+        // Keep the cursor on screen. The renderer is the only place that knows
+        // how far the note actually wrapped, so the correction belongs here.
+        let cursor_screen_row = screen_row_of(
+            &screen_rows,
+            &line_start,
+            app.editor_cursor.0 as usize,
+            app.editor_cursor.1 as usize,
+        );
+        let view_h = inner_rect.height.max(1) as usize;
+        if cursor_screen_row < screen_scroll {
+            screen_scroll = cursor_screen_row;
+        } else if cursor_screen_row >= screen_scroll + view_h {
+            screen_scroll = cursor_screen_row + 1 - view_h;
+        }
+        if let Some(r) = screen_rows.get(screen_scroll) {
+            app.editor_scroll = r.logical as u16;
+        }
+        let screen_scroll_u16 = screen_scroll.min(u16::MAX as usize) as u16;
+
         // Optionally render line numbers; returns the rect for the content area
         let content_rect = if app.config.ui.show_line_numbers {
-            let line_number_width = if is_split_view { 4 } else { 6 };
+            let line_number_width = gutter_w;
             let editor_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
@@ -302,11 +358,17 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
                 ])
                 .split(inner_rect);
 
-            let line_count = content.lines().count().max(1);
             let cursor_row = (app.editor_cursor.0 + 1) as usize;
             let rel = app.config.ui.relative_line_numbers;
-            let line_numbers: Vec<Line> = (1..=line_count)
-                .map(|i| {
+            // One entry per SCREEN row. Continuation rows are blank, so a number
+            // always sits beside the line it belongs to.
+            let line_numbers: Vec<Line> = screen_rows
+                .iter()
+                .map(|r| {
+                    if r.start != 0 {
+                        return Line::from(Span::raw(" ".repeat(line_number_width as usize)));
+                    }
+                    let i = r.logical + 1;
                     let is_current = i == cursor_row && is_focused;
                     let style = if is_current {
                         Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)
@@ -329,7 +391,7 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
 
             let line_numbers_widget = Paragraph::new(line_numbers)
                 .style(TokyoNightTheme::normal())
-                .scroll((app.editor_scroll, 0));
+                .scroll((screen_scroll_u16, 0));
             f.render_widget(line_numbers_widget, editor_chunks[0]);
             editor_chunks[1]
         } else {
@@ -434,10 +496,41 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
             }
         }
 
-        let paragraph = Paragraph::new(styled_content)
+        // Every highlight above works in logical lines. Wrap only now, by slicing
+        // those styled lines into the screen rows computed up front — so the text,
+        // the gutter and the scroll all derive from one layout. Rendered with
+        // ratatui's wrap OFF, since the wrapping has already happened.
+        let mut wrapped: Vec<Line> = screen_rows
+            .iter()
+            .map(|r| match styled_content.lines.get(r.logical) {
+                Some(line) => slice_line(line, r.start, r.end),
+                None => Line::from(String::new()),
+            })
+            .collect();
+
+        // Block cursor for the non-insert modes, painted AFTER wrapping and into
+        // the screen row it actually occupies. Painting it before would let a
+        // cursor resting past end-of-line pad a logical line beyond the slice it
+        // belongs to, and the cursor would simply vanish.
+        if app.mode != AppMode::Insert && is_focused && app.current_note.is_some() {
+            if let Some(line) = wrapped.get_mut(cursor_screen_row) {
+                let col = screen_rows
+                    .get(cursor_screen_row)
+                    .map(|r| (app.editor_cursor.1 as usize).saturating_sub(r.start))
+                    .unwrap_or(0);
+                paint_cursor_in_line(
+                    line,
+                    col,
+                    Style::default()
+                        .fg(TokyoNightTheme::BG)
+                        .bg(TokyoNightTheme::CYAN),
+                );
+            }
+        }
+
+        let paragraph = Paragraph::new(Text::from(wrapped))
             .style(TokyoNightTheme::normal())
-            .wrap(Wrap { trim: false })
-            .scroll((app.editor_scroll, 0));
+            .scroll((screen_scroll_u16, 0));
 
         f.render_widget(paragraph, content_rect);
 
@@ -470,38 +563,21 @@ fn draw_editor_pane(f: &mut Frame, app: &mut App, area: Rect, is_split_view: boo
                 .style(Style::default().bg(TokyoNightTheme::BG_DARK)), bar_rect);
         }
 
-        // Normal/Visual mode block cursor overlay
-        if app.mode != AppMode::Insert && is_focused && app.current_note.is_some() {
-            let cursor_row = app.editor_cursor.0.saturating_sub(app.editor_scroll);
-            let cursor_col = app.editor_cursor.1;
-            if cursor_row < content_rect.height {
-                let cx = content_rect.x + cursor_col;
-                let cy = content_rect.y + cursor_row;
-                if cx < content_rect.x + content_rect.width {
-                    let lines: Vec<&str> = content.lines().collect();
-                    let cursor_char = lines.get(app.editor_cursor.0 as usize)
-                        .and_then(|l| l.chars().nth(app.editor_cursor.1 as usize))
-                        .unwrap_or(' ');
-                    f.render_widget(
-                        Paragraph::new(Span::styled(
-                            cursor_char.to_string(),
-                            Style::default().fg(TokyoNightTheme::BG).bg(TokyoNightTheme::CYAN),
-                        )),
-                        Rect::new(cx, cy, 1, 1),
-                    );
-                }
-            }
-        }
-
         // Show cursor if in insert mode
         if app.mode == AppMode::Insert && is_focused {
-            let cursor_area = Rect::new(
-                content_rect.x + app.editor_cursor.1,
-                content_rect.y + app.editor_cursor.0 - app.editor_scroll,
-                1,
-                1,
-            );
-            f.set_cursor_position((cursor_area.x, cursor_area.y));
+            // Same layout as everything else: the terminal cursor has to land on
+            // the wrapped row, not on `line - scroll`.
+            let row = cursor_screen_row.saturating_sub(screen_scroll);
+            let col = screen_rows
+                .get(cursor_screen_row)
+                .map(|r| (app.editor_cursor.1 as usize).saturating_sub(r.start))
+                .unwrap_or(0);
+            if row < content_rect.height as usize && col < content_rect.width as usize {
+                f.set_cursor_position((
+                    content_rect.x + col as u16,
+                    content_rect.y + row as u16,
+                ));
+            }
         }
 
         // Draw autocompletion popup if active
@@ -574,191 +650,231 @@ fn draw_preview_pane(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// Block-letter wordmark, five rows tall. One entry per letter of "scribble".
+///
+/// Hand-drawn rather than pulled from a figlet font so the glyphs share a
+/// consistent 5x5 cell and the whole mark stays a predictable width — a font
+/// with variable-width glyphs would make centring drift between letters.
+const WORDMARK: [[&str; 5]; 8] = [
+    // s
+    ["█████", "█    ", "█████", "    █", "█████"],
+    // c
+    ["█████", "█    ", "█    ", "█    ", "█████"],
+    // r
+    ["█████", "█   █", "█████", "█  █ ", "█   █"],
+    // i
+    ["█████", "  █  ", "  █  ", "  █  ", "█████"],
+    // b
+    ["█    ", "█    ", "█████", "█   █", "█████"],
+    // b
+    ["█    ", "█    ", "█████", "█   █", "█████"],
+    // l
+    ["█    ", "█    ", "█    ", "█    ", "█████"],
+    // e
+    ["█████", "█    ", "█████", "█    ", "█████"],
+];
+
+const WORDMARK_ROWS: usize = 5;
+/// 8 glyphs of 5 columns, single-column gutter between them.
+const WORDMARK_WIDTH: usize = 8 * 5 + 7;
+
+/// The landing page.
+///
+/// Answers "what was I doing, and what should I do next" — recency, today's
+/// note, outstanding work — rather than listing what the app can do. The feature
+/// tour that used to live here duplicated `?`, and a landing page that is never
+/// quiet is one you stop reading.
+///
+/// Laid out as a single centred column: the wordmark is centred over it, and
+/// every row below shares a left edge with its key right-aligned against the
+/// same right edge, so the eye can run straight down either column.
 fn draw_welcome_screen(f: &mut Frame, app: &App, area: Rect, block: Block) {
-    let content_width = 64u16;
-    let left_padding = if area.width > content_width { (area.width - content_width) / 2 } else { 0 };
-    let p = left_padding as usize;
+    let d = app.dashboard();
 
-    let editor_status = if let Some(ref editor) = app.external_editor {
-        format!("External editor: {}", editor)
+    // Inner width, minus the block's borders.
+    let inner = area.width.saturating_sub(2) as usize;
+    // Wide enough for label + detail + key without either being clipped, but
+    // never wider than the pane. Falls back gracefully in a narrow split.
+    let col = inner.saturating_sub(8).clamp(20, 76).min(inner.saturating_sub(2));
+    let left = (inner.saturating_sub(col)) / 2;
+
+    let dim = Style::default().fg(TokyoNightTheme::COMMENT);
+    let body = Style::default().fg(TokyoNightTheme::FG_DARK);
+    let keycap = Style::default()
+        .fg(TokyoNightTheme::CYAN)
+        .add_modifier(Modifier::BOLD);
+    let mark = Style::default().fg(TokyoNightTheme::BLUE);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let pad = |n: usize| Span::raw(" ".repeat(n));
+    let blank = |v: &mut Vec<Line>| v.push(Line::from(""));
+
+    // ── Wordmark ────────────────────────────────────────────────────────────
+    blank(&mut lines);
+    blank(&mut lines);
+    // Double the mark when the pane is wide and tall enough to carry it. At full
+    // screen the 1x mark is lost in the width; at 1x it still fits a split pane.
+    let scale: usize = if inner >= WORDMARK_WIDTH * 2 + 8 && area.height >= 34 { 2 } else { 1 };
+    let mark_width = WORDMARK_WIDTH * scale;
+
+    if inner >= mark_width + 2 {
+        // Centred on the pane, not on the menu column: the mark is allowed to be
+        // wider than the menu without dragging the key column out to the margin.
+        let logo_left = (inner.saturating_sub(mark_width)) / 2;
+        for row in 0..WORDMARK_ROWS {
+            let mut text = String::new();
+            for (i, glyph) in WORDMARK.iter().enumerate() {
+                if i > 0 {
+                    text.push_str(&" ".repeat(scale));
+                }
+                for ch in glyph[row].chars() {
+                    for _ in 0..scale {
+                        text.push(ch);
+                    }
+                }
+            }
+            // Repeating the row scales the stroke vertically to match.
+            for _ in 0..scale {
+                lines.push(Line::from(vec![
+                    pad(logo_left),
+                    Span::styled(text.clone(), mark),
+                ]));
+            }
+        }
     } else {
-        "$EDITOR not set — using built-in editor".to_string()
-    };
-
-    // Helper closures for repeated patterns
-    macro_rules! pad { () => { Span::raw(" ".repeat(p)) }; }
-    macro_rules! pad2 { () => { Span::raw(" ".repeat(p + 2)) }; }
-    macro_rules! pad4 { () => { Span::raw(" ".repeat(p + 4)) }; }
-    macro_rules! key {
-        ($k:expr) => {
-            Span::styled(format!("{:<9}", $k),
-                Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD))
-        };
-    }
-    macro_rules! desc {
-        ($d:expr) => { Span::styled($d, TokyoNightTheme::help_text()) };
-    }
-    macro_rules! section {
-        ($label:expr, $color:expr, $rule:expr) => {
-            vec![
-                Line::from(""),
-                Line::from(vec![
-                    pad!(),
-                    Span::styled($label, Style::default().fg($color).add_modifier(Modifier::BOLD)),
-                ]),
-                Line::from(vec![
-                    pad!(),
-                    Span::styled($rule, Style::default().fg($color)),
-                ]),
-                Line::from(""),
-            ]
-        };
-    }
-
-    let mut lines: Vec<Line> = vec![
-        Line::from(""),
-        Line::from(""),
-        // ── Title ──────────────────────────────────────────────────────────
-        Line::from(vec![
-            pad!(),
-            Span::styled("SCRIBBLE", Style::default()
-                .fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(vec![
-            pad!(),
-            Span::styled("────────", Style::default().fg(TokyoNightTheme::CYAN)),
-        ]),
-        Line::from(vec![
-            pad!(),
-            Span::styled("Terminal Note-Taking, Vim-Powered", Style::default()
-                .fg(TokyoNightTheme::FG_DARK).add_modifier(Modifier::ITALIC)),
-        ]),
-        Line::from(vec![
-            pad!(),
-            Span::styled(format!("Version {}", VERSION), Style::default()
-                .fg(TokyoNightTheme::COMMENT).add_modifier(Modifier::ITALIC)),
-        ]),
-    ];
-
-    // ── Features ────────────────────────────────────────────────────────────
-    lines.extend(section!("FEATURES", TokyoNightTheme::PURPLE, "────────"));
-
-    let features: &[(&str, ratatui::style::Color, &str)] = &[
-        (Icons::FOLDER_CLOSED, TokyoNightTheme::BLUE,   "Hierarchical folders — Obsidian vault compatible"),
-        (Icons::NOTE,          TokyoNightTheme::GREEN,  "Vim modal editing: Normal / Insert / Visual modes"),
-        (Icons::PREVIEW,       TokyoNightTheme::CYAN,   "Live split-pane Markdown preview (tables, code blocks)"),
-        (Icons::SEARCH,        TokyoNightTheme::PURPLE, "Full-text search (tree) · in-note search (editor)"),
-        (Icons::EDITOR,        TokyoNightTheme::ORANGE, "Wiki [[links]] autocomplete + backlinks panel"),
-        (Icons::NOTE,          TokyoNightTheme::YELLOW, "Note templates: Blank · Daily Note · Meeting · Project"),
-        (Icons::FOLDER_CLOSED, TokyoNightTheme::BLUE,   "Undo/redo, per-note cursor memory, relative line nums"),
-        (Icons::PREVIEW,       TokyoNightTheme::GREEN,  "HTML export · tag browser · auto-save"),
-    ];
-    for (icon, color, text) in features {
+        // Too narrow for the block letters; fall back rather than wrap them.
+        let text = "s c r i b b l e";
+        let l = left + (col.saturating_sub(text.len())) / 2;
         lines.push(Line::from(vec![
-            pad2!(),
-            Span::styled(format!("{} ", icon), Style::default().fg(*color)),
-            Span::styled(*text, TokyoNightTheme::help_text()),
+            pad(l),
+            Span::styled(text, mark.add_modifier(Modifier::BOLD)),
         ]));
     }
 
-    // ── Quick Start ─────────────────────────────────────────────────────────
-    lines.extend(section!("QUICK START", TokyoNightTheme::YELLOW, "───────────"));
-
-    // Creating
+    // Version, right-aligned under the mark like the reference layout.
+    let ver = format!("v{}", VERSION);
     lines.push(Line::from(vec![
-        pad2!(),
-        Span::styled("Creating", Style::default().fg(TokyoNightTheme::GREEN).add_modifier(Modifier::BOLD)),
+        pad(left + col.saturating_sub(ver.len())),
+        Span::styled(ver, dim),
     ]));
-    let creating: &[(&str, &str)] = &[
-        ("n",   "New note"),
-        ("N",   "New note from template"),
-        ("f",   "New folder"),
-        ("i",   "Enter Insert mode (start editing)"),
-    ];
-    for &(k, d) in creating { lines.push(Line::from(vec![pad4!(), key!(k), desc!(d)])); }
+    blank(&mut lines);
+    blank(&mut lines);
 
-    // Navigation
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        pad2!(),
-        Span::styled("Navigation", Style::default().fg(TokyoNightTheme::PURPLE).add_modifier(Modifier::BOLD)),
-    ]));
-    let nav: &[(&str, &str)] = &[
-        ("Tab",    "Switch panes"),
-        ("j / k",  "Down / up"),
-        ("h / l",  "Left / right (editor)"),
-        ("g / G",  "Top / bottom of note"),
-        (":N",     "Jump to line N"),
-        ("Enter",  "Open note or folder"),
-    ];
-    for &(k, d) in nav { lines.push(Line::from(vec![pad4!(), key!(k), desc!(d)])); }
+    // A menu row: label on the left, dim detail after it, key hard right.
+    let row = |lines: &mut Vec<Line>, label: &str, detail: &str, key: &str, selected: bool| {
+        const INDENT: usize = 4;
+        const GUTTER: usize = 2;
+        let keylen = key.chars().count();
 
-    // Visual mode
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        pad2!(),
-        Span::styled("Visual Mode", Style::default().fg(TokyoNightTheme::BLUE).add_modifier(Modifier::BOLD)),
-    ]));
-    let visual: &[(&str, &str)] = &[
-        ("v",  "Enter Visual select"),
-        ("y",  "Yank (copy) selection"),
-        ("d",  "Delete selection"),
-        ("c",  "Change (delete + Insert)"),
-        ("Esc","Cancel selection"),
-    ];
-    for &(k, d) in visual { lines.push(Line::from(vec![pad4!(), key!(k), desc!(d)])); }
+        // Label takes a fixed share; detail takes what is left after the key,
+        // so the key column stays flush right whatever the labels do.
+        let label_w = 28.min(col.saturating_sub(keylen + INDENT + GUTTER + 4));
+        // A detail column too narrow to hold anything readable is worse than
+        // no column at all — give the space back to the label instead.
+        let mut detail_w = col
+            .saturating_sub(INDENT + label_w + GUTTER + keylen + 2)
+            .min(24);
+        if detail_w < 10 {
+            detail_w = 0;
+        }
+        let label_w = if detail_w == 0 {
+            col.saturating_sub(INDENT + keylen + GUTTER + 2)
+        } else {
+            label_w
+        };
 
-    // Tools
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        pad2!(),
-        Span::styled("Tools", Style::default().fg(TokyoNightTheme::ORANGE).add_modifier(Modifier::BOLD)),
-    ]));
-    let tools: &[(&str, &str)] = &[
-        ("/",        "Search notes (tree) · in-note search (editor)"),
-        ("n / N",    "Next / prev match (in-note search)"),
-        ("[[",       "Wiki-link autocomplete"),
-        ("Ctrl+B",   "Backlinks panel"),
-        ("Ctrl+J",   "Quick jump to note"),
-        ("Ctrl+G",   "Outline / jump to heading"),
-        ("Space",    "Toggle task checkbox (editor)"),
-        ("F4",       "Open today's daily note"),
-        ("Ctrl+P",   "Toggle live preview"),
-        ("?",        "Full help"),
-        (":export html", "Export all notes to HTML"),
-    ];
-    for &(k, d) in tools { lines.push(Line::from(vec![pad4!(), key!(k), desc!(d)])); }
+        let clip = |t: &str, w: usize| -> String {
+            if w == 0 {
+                String::new()
+            } else if t.chars().count() > w {
+                format!("{}…", t.chars().take(w - 1).collect::<String>())
+            } else {
+                t.to_string()
+            }
+        };
 
-    // ── Status ───────────────────────────────────────────────────────────────
-    lines.extend(section!("STATUS", TokyoNightTheme::GREEN, "──────"));
+        let gap = col.saturating_sub(INDENT + label_w + GUTTER + detail_w + keylen);
+        // The caret is the only selection marker: a full-width highlight bar on a
+        // page this sparse reads as an error state rather than a cursor.
+        let (marker, label_style) = if selected {
+            ("▸ ", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD))
+        } else {
+            ("  ", body)
+        };
+        lines.push(Line::from(vec![
+            pad(left + INDENT - 2),
+            Span::styled(marker, Style::default().fg(TokyoNightTheme::CYAN)),
+            Span::styled(format!("{:<w$}", clip(label, label_w), w = label_w), label_style),
+            pad(GUTTER),
+            Span::styled(format!("{:<w$}", clip(detail, detail_w), w = detail_w), dim),
+            pad(gap),
+            Span::styled(key.to_string(), keycap),
+        ]));
+    };
+
+    // ── Menu ────────────────────────────────────────────────────────────────
+    // Recents and actions are one list so j/k runs the whole thing, with a gap
+    // marking where "what I was doing" ends and "what I could do" begins.
+    if d.menu.is_empty() {
+        row(&mut lines, "Write your first note", "", "n", false);
+        row(&mut lines, "Start today's daily note", "", "F4", false);
+        row(&mut lines, "Help", "", "?", false);
+    } else {
+        for (i, item) in d.menu.iter().enumerate() {
+            if i == d.recent_count && d.recent_count > 0 {
+                blank(&mut lines);
+            }
+            row(
+                &mut lines,
+                &item.label,
+                &item.detail,
+                &item.key,
+                i == app.welcome_selected,
+            );
+        }
+    }
+
+    blank(&mut lines);
+    blank(&mut lines);
+
+    // ── Footer ──────────────────────────────────────────────────────────────
+    // Centred and dim, in the spirit of the reference's plugin-count line.
+    // Outstanding work gets its own accent line — it is the one thing here that
+    // is a prompt rather than a statistic. Hidden entirely when there is none.
+    if d.open_tasks > 0 {
+        let text = format!(
+            "{} open task{} across {} note{}",
+            d.open_tasks,
+            if d.open_tasks == 1 { "" } else { "s" },
+            d.notes_with_tasks,
+            if d.notes_with_tasks == 1 { "" } else { "s" }
+        );
+        let len = text.chars().count() + 2;
+        lines.push(Line::from(vec![
+            pad(left + (col.saturating_sub(len)) / 2),
+            Span::styled("▸ ", Style::default().fg(TokyoNightTheme::ORANGE)),
+            Span::styled(text, Style::default().fg(TokyoNightTheme::ORANGE)),
+        ]));
+        blank(&mut lines);
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(format!("{} notes", d.note_count));
+    parts.push(format!("{} folders", d.folder_count));
+    if d.tag_count > 0 {
+        parts.push(format!("{} tags", d.tag_count));
+    }
+    if let Some(v) = &d.vault_label {
+        parts.push(v.clone());
+    }
+    let footer = parts.join(" · ");
+    let flen = footer.chars().count();
     lines.push(Line::from(vec![
-        pad2!(),
-        Span::styled("Folders: ", Style::default().fg(TokyoNightTheme::COMMENT)),
-        Span::styled(format!("{}", app.notebook.folders.len()), Style::default().fg(TokyoNightTheme::FG)),
-        Span::raw("   "),
-        Span::styled("Notes: ", Style::default().fg(TokyoNightTheme::COMMENT)),
-        Span::styled(format!("{}", app.notebook.notes.len()), Style::default().fg(TokyoNightTheme::FG)),
-    ]));
-    lines.push(Line::from(vec![
-        pad2!(),
-        Span::styled("Editor: ", Style::default().fg(TokyoNightTheme::COMMENT)),
-        Span::styled(editor_status, Style::default().fg(TokyoNightTheme::FG_DARK)),
-    ]));
-    lines.push(Line::from(""));
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        pad!(),
-        Span::styled("Select a note from the sidebar to begin", Style::default()
-            .fg(TokyoNightTheme::COMMENT).add_modifier(Modifier::ITALIC)),
+        pad(left + (col.saturating_sub(flen)) / 2),
+        Span::styled(footer, dim),
     ]));
 
-    let paragraph = Paragraph::new(Text::from(lines))
-        .block(block)
-        .style(TokyoNightTheme::normal())
-        .wrap(Wrap { trim: false })
-        .alignment(Alignment::Left);
-
-    f.render_widget(paragraph, area);
+    f.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
@@ -787,6 +903,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::TemplatePicker => "TEMPLATE",
         AppMode::SpellSuggest => "SPELL",
         AppMode::Outline => "OUTLINE",
+        AppMode::Explorer => "EXPLORER",
     };
 
     let pane_text = match app.focused_pane {
@@ -796,6 +913,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let mode_style = match app.mode {
+        AppMode::Explorer => app.theme_manager.mode_command(),
         AppMode::Normal => app.theme_manager.mode_normal(),
         AppMode::Insert => app.theme_manager.mode_insert(),
         AppMode::Search | AppMode::SearchAdvanced | AppMode::SearchReplace => app.theme_manager.mode_search(),
@@ -1275,6 +1393,232 @@ fn draw_replace_dialog(f: &mut Frame, app: &App) {
     f.render_widget(input, area);
 }
 
+
+
+/// One screen row of the wrapped note: which logical line it came from, and the
+/// half-open character range of that line it shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScreenRow {
+    logical: usize,
+    start: usize,
+    end: usize,
+}
+
+/// Lay the note out exactly as it will be drawn.
+///
+/// ratatui's own `Wrap` is deliberately not used here. It wraps at render time,
+/// so the gutter, the scroll offset and the cursor each had to guess where the
+/// breaks would fall — and each guessed differently: the gutter numbered screen
+/// rows instead of lines, and the scroll counted lines while ratatui counted
+/// rows. Wrapping here and rendering with wrap off makes this the single
+/// authority, so there is no second algorithm left to disagree with.
+///
+/// Rows tile their line with no gaps, so every character — including the space a
+/// break lands on — belongs to exactly one row and the cursor always maps.
+fn layout_note(content: &str, width: usize) -> (Vec<ScreenRow>, Vec<usize>) {
+    let width = width.max(1);
+    let mut rows: Vec<ScreenRow> = Vec::new();
+    let mut line_start: Vec<usize> = Vec::new();
+
+    for (logical, line) in content.lines().enumerate() {
+        line_start.push(rows.len());
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() {
+            rows.push(ScreenRow { logical, start: 0, end: 0 });
+            continue;
+        }
+        let mut pos = 0usize;
+        while pos < chars.len() {
+            let hard = (pos + width).min(chars.len());
+            let mut brk = hard;
+            if hard < chars.len() {
+                // Prefer the last space that fits; a word longer than the pane
+                // still has to be broken mid-word.
+                let mut b = hard;
+                while b > pos && !chars[b - 1].is_whitespace() {
+                    b -= 1;
+                }
+                if b > pos {
+                    brk = b;
+                }
+            }
+            rows.push(ScreenRow { logical, start: pos, end: brk });
+            pos = brk;
+        }
+    }
+
+    if rows.is_empty() {
+        line_start.push(0);
+        rows.push(ScreenRow { logical: 0, start: 0, end: 0 });
+    }
+    (rows, line_start)
+}
+
+/// Take the characters `[start, end)` of a styled line, keeping each span's own
+/// style so wrapping does not flatten the markdown colouring.
+fn slice_line(line: &Line<'_>, start: usize, end: usize) -> Line<'static> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut seen = 0usize;
+    for span in &line.spans {
+        let chars: Vec<char> = span.content.chars().collect();
+        let n = chars.len();
+        let from = seen.max(start);
+        let to = (seen + n).min(end);
+        if from < to {
+            let text: String = chars[(from - seen)..(to - seen)].iter().collect();
+            out.push(Span::styled(text, span.style));
+        }
+        seen += n;
+        if seen >= end {
+            break;
+        }
+    }
+    if out.is_empty() {
+        out.push(Span::raw(String::new()));
+    }
+    Line::from(out)
+}
+
+/// Which screen row holds a given cursor position.
+fn screen_row_of(rows: &[ScreenRow], line_start: &[usize], logical: usize, col: usize) -> usize {
+    let first = line_start.get(logical).copied().unwrap_or(0);
+    let mut last = first;
+    for (i, r) in rows.iter().enumerate().skip(first) {
+        if r.logical != logical {
+            break;
+        }
+        last = i;
+        if col >= r.start && col < r.end {
+            return i;
+        }
+    }
+    // Resting past the final character of the line.
+    last
+}
+
+/// Paint the block cursor into the text itself instead of overlaying it at a
+/// computed screen position.
+///
+/// The editor soft-wraps, so one logical line can occupy several screen rows and
+/// `cursor_row - scroll` is simply not where the character is: the cursor drifted
+/// upward by one row for every wrapped row above it, landing off the very line
+/// the highlight had marked. Styling the character in place hands the positioning
+/// to ratatui's own wrapping — which is why the current-line highlight, done the
+/// same way, was always correct.
+///
+/// Only the span containing the cursor is split, so markdown colouring either
+/// side of it survives.
+fn paint_cursor_in_line(line: &mut Line<'_>, col: usize, cursor_style: Style) {
+    let mut out: Vec<Span> = Vec::new();
+    let mut seen = 0usize;
+    let mut placed = false;
+
+    for span in std::mem::take(&mut line.spans) {
+        let text = span.content.to_string();
+        let len = text.chars().count();
+        if !placed && col >= seen && col < seen + len {
+            let k = col - seen;
+            let before: String = text.chars().take(k).collect();
+            let at: String = text.chars().skip(k).take(1).collect();
+            let after: String = text.chars().skip(k + 1).collect();
+            if !before.is_empty() {
+                out.push(Span::styled(before, span.style));
+            }
+            out.push(Span::styled(at, cursor_style));
+            if !after.is_empty() {
+                out.push(Span::styled(after, span.style));
+            }
+            placed = true;
+        } else {
+            out.push(Span::styled(text, span.style));
+        }
+        seen += len;
+    }
+
+    if !placed {
+        // Past the end of the line: an empty line, or resting on the newline in
+        // Normal mode. Show the cursor on a trailing space.
+        let gap = col.saturating_sub(seen);
+        if gap > 0 {
+            out.push(Span::raw(" ".repeat(gap)));
+        }
+        out.push(Span::styled(" ".to_string(), cursor_style));
+    }
+
+    line.spans = out;
+}
+
+
+/// The destination picker for a move.
+///
+/// `execute_move` reads the tree selection, so moving has always required the
+/// tree to be on screen to aim at. With the sidebar hidden by default there was
+/// nothing to aim at: the status bar said "select destination folder" and no
+/// selection was visible anywhere. Same tree as the explorer, with a banner
+/// naming what is in flight.
+fn draw_move_dialog(f: &mut Frame, app: &mut App) {
+    let area = centered_rect(56, 76, f.area());
+    f.render_widget(Clear, area);
+    // Opaque, like every other dialog — see draw_explorer_dialog.
+    f.render_widget(Block::default().style(TokyoNightTheme::popup()), area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+
+    let what = app
+        .move_item_id
+        .and_then(|id| {
+            app.folder_tree_items
+                .iter()
+                .find(|t| t.id == id)
+                .map(|t| t.name.clone())
+        })
+        .unwrap_or_else(|| "item".to_string());
+
+    // Trim the name rather than the key hints: the hints are the part you need
+    // when you have never used this dialog before.
+    let hints = "Enter here · ~ root · h/l fold · Esc";
+    let room = (chunks[0].width as usize).saturating_sub(hints.len() + 10);
+    let what = if what.chars().count() > room && room > 1 {
+        format!("{}…", what.chars().take(room - 1).collect::<String>())
+    } else {
+        what
+    };
+
+    let banner = Line::from(vec![
+        Span::styled(
+            format!(" Move \"{}\" to  ", what),
+            Style::default()
+                .fg(TokyoNightTheme::ORANGE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(hints, Style::default().fg(TokyoNightTheme::COMMENT)),
+    ]);
+    f.render_widget(
+        Paragraph::new(banner).style(Style::default().bg(TokyoNightTheme::BG_DARK)),
+        chunks[0],
+    );
+
+    draw_folder_tree(f, app, chunks[1]);
+}
+
+/// The folder tree, floating. Deliberately the same renderer as the sidebar
+/// rather than a second tree widget: one tree, one set of behaviours, and it
+/// keeps working when the sidebar is not on screen.
+fn draw_explorer_dialog(f: &mut Frame, app: &mut App) {
+    let area = centered_rect(52, 74, f.area());
+    f.render_widget(Clear, area);
+    // draw_folder_tree styles itself for the sidebar, which sits on the app
+    // background and so sets no background of its own. As an overlay that leaves
+    // the note behind it showing through — and, on a transparent terminal, the
+    // desktop. Lay the popup background down first; the tree paints over it with
+    // foreground colours only, so it survives.
+    f.render_widget(Block::default().style(TokyoNightTheme::popup()), area);
+    draw_folder_tree(f, app, area);
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -1336,16 +1680,36 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         ]),
         Line::from(""),
 
-        // ── Notes & Tree ──────────────────────────────────────────────────────
+        // ── Landing Page ──────────────────────────────────────────────────────
         Line::from(vec![
-            Span::styled("Notes & Tree", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled("Landing Page  ", Style::default().fg(TokyoNightTheme::PURPLE).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled("(shown when no note is open)", Style::default().fg(TokyoNightTheme::COMMENT)),
         ]),
         Line::from(""),
-        Line::from("  n          New note (in selected folder)   N    New note from template"),
-        Line::from("  f          New folder (root)               F    New subfolder"),
-        Line::from("  r          Rename selected item            m    Move selected item"),
-        Line::from("  d          Delete (confirm prompt)         u    Undo last delete"),
+        Line::from("  j / k      Move down / up                 Enter   Open the highlighted row"),
+        Line::from("  1 - 8      Jump straight to that recent note"),
+        Line::from("  F4         Today's daily note             Ctrl+E  Browse the vault"),
+        Line::from("  q          Quit                           ?       This help"),
+        Line::from("  Shows your eight most recent notes, today's note, and any open tasks."),
+        Line::from(""),
+
+        // ── Notes & Explorer ──────────────────────────────────────────────────
+        Line::from(vec![
+            Span::styled("Notes & Explorer", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        ]),
+        Line::from(""),
+        Line::from("  Ctrl+E     Explorer: the folder tree as an overlay (sidebar is off by default)"),
+        Line::from("  In Explorer: j/k move · Enter open · h collapse · Esc / e / q close"),
+        Line::from("               n new note · f new folder · F folder at root"),
+        Line::from("               r rename · m move · d delete (returns to the tree)"),
+        Line::from(""),
+        Line::from("  n          New note                        N    New note from template"),
+        Line::from("  r          Rename current note             m    Move current note"),
+        Line::from("  u          Undo last delete                dd   Delete line (editor)"),
         Line::from("  Enter      Open note / expand folder"),
+        Line::from("  q          Close note → landing page       Q       Quit immediately"),
+        Line::from("  m          Move: j/k pick a folder · ~ vault root · Enter drop · Esc cancel"),
+        Line::from("  Pin the sidebar back with  show_sidebar = true  under [ui] in config.toml"),
         Line::from(""),
 
         // ── Normal Mode ───────────────────────────────────────────────────────
@@ -1505,9 +1869,10 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from("  • Type [[ in Insert mode to get wiki-link autocomplete for note titles"),
         Line::from("  • Cursor position is remembered per-note when you switch between notes"),
         Line::from("  • :spell on + z= gives Vim-style spell correction with aspell suggestions"),
-        Line::from("  • N (tree focused) picks a template; applies Blank/Daily/Meeting/Project"),
+        Line::from("  • N (outside the editor) picks a template: Blank/Daily/Meeting/Project"),
         Line::from("  • Use Ctrl+J for instant fuzzy-jump to any note by title"),
         Line::from("  • Ctrl+V to switch vaults; works transparently with Obsidian folders"),
+        Line::from("  • Prefer a permanent sidebar? show_sidebar = true under [ui] in config.toml"),
         Line::from(""),
         
         // System Info
@@ -2464,5 +2829,189 @@ mod preview_tests {
             assert!(w <= width, "preview line {:?} is {} cols, exceeds pane width {}",
                 line.spans.iter().map(|s| s.content.as_ref()).collect::<String>(), w, width);
         }
+    }
+}
+
+#[cfg(test)]
+mod cursor_paint_tests {
+    use super::*;
+
+    fn plain(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn cursor_char(line: &Line) -> Option<String> {
+        line.spans
+            .iter()
+            .find(|s| s.style.bg == Some(TokyoNightTheme::CYAN))
+            .map(|s| s.content.to_string())
+    }
+
+    fn cur() -> Style {
+        Style::default().fg(TokyoNightTheme::BG).bg(TokyoNightTheme::CYAN)
+    }
+
+    #[test]
+    fn marks_the_character_under_the_cursor_without_changing_the_text() {
+        let mut line = Line::from("hello world");
+        paint_cursor_in_line(&mut line, 6, cur());
+        assert_eq!(plain(&line), "hello world", "text must be untouched");
+        assert_eq!(cursor_char(&line).as_deref(), Some("w"));
+    }
+
+    /// Splitting must not flatten the markdown colouring either side of it.
+    #[test]
+    fn surrounding_styles_survive_the_split() {
+        let red = Style::default().fg(TokyoNightTheme::RED);
+        let mut line = Line::from(vec![Span::styled("abcdef", red)]);
+        paint_cursor_in_line(&mut line, 3, cur());
+
+        assert_eq!(plain(&line), "abcdef");
+        assert_eq!(cursor_char(&line).as_deref(), Some("d"));
+        let kept: Vec<&str> = line
+            .spans
+            .iter()
+            .filter(|s| s.style.fg == Some(TokyoNightTheme::RED))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(kept, vec!["abc", "ef"], "colour preserved on both sides");
+    }
+
+    /// Normal mode rests the cursor past the last character on empty lines.
+    #[test]
+    fn empty_line_still_shows_a_cursor() {
+        let mut line = Line::from("");
+        paint_cursor_in_line(&mut line, 0, cur());
+        assert_eq!(cursor_char(&line).as_deref(), Some(" "));
+    }
+
+    #[test]
+    fn cursor_past_end_of_line_pads_out_to_it() {
+        let mut line = Line::from("ab");
+        paint_cursor_in_line(&mut line, 5, cur());
+        assert_eq!(plain(&line), "ab    ", "padded to the cursor column");
+        assert_eq!(cursor_char(&line).as_deref(), Some(" "));
+    }
+
+    #[test]
+    fn cursor_on_the_first_character_works() {
+        let mut line = Line::from("xyz");
+        paint_cursor_in_line(&mut line, 0, cur());
+        assert_eq!(plain(&line), "xyz");
+        assert_eq!(cursor_char(&line).as_deref(), Some("x"));
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn text_of(content: &str, rows: &[ScreenRow]) -> Vec<String> {
+        let lines: Vec<&str> = content.lines().collect();
+        rows.iter()
+            .map(|r| {
+                lines
+                    .get(r.logical)
+                    .map(|l| l.chars().skip(r.start).take(r.end - r.start).collect())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn short_lines_are_one_row_each() {
+        let (rows, starts) = layout_note("one\ntwo\nthree", 40);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(starts, vec![0, 1, 2]);
+        assert!(rows.iter().all(|r| r.start == 0));
+    }
+
+    #[test]
+    fn a_long_line_breaks_on_a_space() {
+        let (rows, starts) = layout_note("aaa bbb ccc ddd", 8);
+        assert_eq!(starts, vec![0], "still one logical line");
+        assert!(rows.len() > 1, "but several screen rows");
+        let shown = text_of("aaa bbb ccc ddd", &rows);
+        assert!(
+            shown.iter().all(|r| r.chars().count() <= 8),
+            "no row exceeds the width: {:?}",
+            shown
+        );
+        assert_eq!(shown.concat(), "aaa bbb ccc ddd", "no character is lost");
+    }
+
+    /// A word longer than the pane has to be broken mid-word rather than
+    /// overflowing or being dropped.
+    #[test]
+    fn an_over_long_word_is_hard_broken() {
+        let content = "supercalifragilistic";
+        let (rows, _) = layout_note(content, 6);
+        let shown = text_of(content, &rows);
+        assert!(shown.iter().all(|r| r.chars().count() <= 6), "{:?}", shown);
+        assert_eq!(shown.concat(), content);
+    }
+
+    /// Rows must tile their line with no gaps, or a cursor resting on the space a
+    /// break landed on would belong to no row at all.
+    #[test]
+    fn rows_tile_their_line_without_gaps() {
+        let content = "the quick brown fox jumps over the lazy dog";
+        let (rows, _) = layout_note(content, 11);
+        let mut expected = 0usize;
+        for r in &rows {
+            assert_eq!(r.start, expected, "gap or overlap at {:?}", r);
+            expected = r.end;
+        }
+        assert_eq!(expected, content.chars().count());
+    }
+
+    #[test]
+    fn empty_lines_still_occupy_a_row() {
+        let (rows, starts) = layout_note("a\n\nb", 10);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(starts, vec![0, 1, 2]);
+        assert_eq!(rows[1].start, rows[1].end, "the blank line is a zero-width row");
+    }
+
+    #[test]
+    fn empty_content_still_yields_one_row() {
+        let (rows, starts) = layout_note("", 10);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(starts, vec![0]);
+    }
+
+    #[test]
+    fn cursor_maps_to_the_row_holding_its_column() {
+        let content = "aaa bbb ccc ddd";
+        let (rows, starts) = layout_note(content, 8);
+        // column 0 is on the first row; a column past the first break is not
+        assert_eq!(screen_row_of(&rows, &starts, 0, 0), 0);
+        let later = screen_row_of(&rows, &starts, 0, 12);
+        assert!(later > 0, "a column past the wrap is on a continuation row");
+        assert!(rows[later].start <= 12 && 12 < rows[later].end);
+    }
+
+    /// Resting past the last character (Normal mode at end of line) still lands
+    /// on that line's final row rather than falling through to the next line.
+    #[test]
+    fn cursor_past_end_of_line_stays_on_that_line() {
+        let content = "short\nnext";
+        let (rows, starts) = layout_note(content, 20);
+        let r = screen_row_of(&rows, &starts, 0, 99);
+        assert_eq!(rows[r].logical, 0);
+    }
+
+    #[test]
+    fn slicing_preserves_span_styles() {
+        let red = Style::default().fg(TokyoNightTheme::RED);
+        let line = Line::from(vec![
+            Span::styled("abcd", red),
+            Span::raw("efgh"),
+        ]);
+        let cut = slice_line(&line, 2, 6);
+        let plain: String = cut.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(plain, "cdef");
+        assert_eq!(cut.spans[0].style.fg, Some(TokyoNightTheme::RED));
+        assert_eq!(cut.spans[1].style.fg, None, "the unstyled half stays unstyled");
     }
 }
