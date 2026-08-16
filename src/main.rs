@@ -1,5 +1,6 @@
 mod app;
 mod autocomplete;
+mod capture;
 mod config;
 mod error;
 mod events;
@@ -17,6 +18,7 @@ mod watcher;
 
 use app::App;
 use std::env;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 // Version information from Cargo.toml
@@ -77,6 +79,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let mut vault_path: Option<PathBuf> = None;
     
+    // Capture flags are collected rather than acted on here, because they need the
+    // vault, and the vault may be named by a --vault that comes after them.
+    let mut new_note = false;
+    let mut today = false;
+    let mut capture_text: Option<String> = None;
+
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -97,6 +105,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
+            "--new" | "-n" => new_note = true,
+            "--today" | "-t" => today = true,
+            // The capture text is a plain positional, so it reads the same wherever
+            // it lands: `-n "..."`, `-n -t "..."` and `-t "..."` all mean what they
+            // look like. Omitting it entirely falls back to stdin, so
+            // `git log -1 | scribble -n` composes.
+            text if (new_note || today) && capture_text.is_none() && !text.starts_with('-') => {
+                capture_text = Some(text.to_string());
+            }
             _ => {
                 eprintln!("Unknown argument: {}", args[i]);
                 eprintln!("Use --help for usage information");
@@ -105,7 +122,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         i += 1;
     }
-    
+
+    // Where a capture goes, resolved the same way the TUI resolves its vault.
+    let capture_vault = || {
+        vault_path
+            .clone()
+            .or_else(|| if config.vaults.auto_detect { detect_obsidian_vault() } else { None })
+            .or_else(|| config.vaults.default.clone())
+    };
+
+    // `--today` alone opens the TUI; every other capture form is headless. Deciding
+    // here keeps `scribble -t` (open today) and `scribble -t "..."` (append to
+    // today) from needing different flags for what is obviously the same note.
+    let headless = capture_text.is_some() || (new_note && !std::io::stdin().is_terminal());
+
+    // Headless capture: write the note, print where it went, and never touch the
+    // terminal. Capturing a thought should cost less than opening an editor.
+    if headless {
+        let Some(vault) = capture_vault() else {
+            eprintln!("{}", capture::CaptureError::NoVault);
+            std::process::exit(1);
+        };
+        let result = capture::resolve_text(capture_text).and_then(|text| {
+            if today {
+                capture::today_note(&vault, &config, Some(&text))
+            } else {
+                capture::new_note(&vault, &text)
+            }
+        });
+        match result {
+            Ok(path) => {
+                println!("{}", path.display());
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // `-n` with nothing to capture and nothing piped in is a mistake, not a request
+    // to launch the app — say so rather than silently ignoring the flag.
+    if new_note {
+        eprintln!("{}", capture::CaptureError::NoText);
+        std::process::exit(1);
+    }
+
+    // `--today` on its own has nothing to capture, so it opens the TUI on today's
+    // note instead — created first, so the app finds it during its normal load.
+    let mut open_at: Option<PathBuf> = None;
+    if today {
+        let Some(vault) = capture_vault() else {
+            eprintln!("{}", capture::CaptureError::NoVault);
+            std::process::exit(1);
+        };
+        match capture::today_note(&vault, &config, None) {
+            Ok(path) => open_at = Some(path),
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+
     // A panic must not strand the user in raw mode on the alternate screen with no
     // echo and no line editing. Restore first, then chain to the default hook so
     // the message and backtrace land on a terminal that can actually show them.
@@ -157,8 +238,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app.notebook = notebook;
             app.initialize_tag_manager();
             app.refresh_tree_view();
-            // Start with no note selected - show welcome page instead
-            app.set_welcome_message();
+            // `--today` asked for a specific note, so land on it rather than on the
+            // welcome page. It was created before the load, so it is already here.
+            let today_id = open_at.as_ref().and_then(|path| {
+                app.notebook
+                    .notes
+                    .values()
+                    .find(|n| n.file_path.as_deref() == Some(path.as_path()))
+                    .map(|n| n.id)
+            });
+            match today_id {
+                Some(id) => app.open_note_by_id(id),
+                // Start with no note selected - show welcome page instead
+                None => app.set_welcome_message(),
+            }
         }
         Err(e) => {
             app.set_message(format!("Failed to load notebook: {}. Starting fresh.", e));
@@ -250,25 +343,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // changes fall back to a full save.
         if app.disk.pending_disk_save {
             let result = if app.disk.force_full_save {
-                storage.save_notebook(&app.notebook).map(|_| Vec::new())
+                storage
+                    .save_notebook(&app.notebook)
+                    .map(|_| storage::SaveReport::default())
             } else {
                 let dirty: Vec<_> = app.disk.dirty_note_ids.iter().copied().collect();
                 storage.save_incremental(&app.notebook, &dirty, &app.disk.deleted_note_paths)
             };
             match result {
-                Ok(assigned) => {
-                    // Store back the path chosen for any newly-written note so it
-                    // writes to the same file next time.
-                    for (id, path) in assigned {
-                        if let Some(n) = app.notebook.notes.get_mut(&id) {
-                            n.file_path = Some(path.clone());
-                        }
-                        if app.current_note.as_ref().map(|n| n.id) == Some(id) {
-                            if let Some(cn) = app.current_note.as_mut() {
-                                cn.file_path = Some(path);
-                            }
-                        }
-                    }
+                Ok(report) => {
+                    app.apply_save_report(report);
                     app.disk.clear_after_write();
                     app.mark_disk_saved();
                 }
@@ -290,12 +374,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if app.disk.has_pending_work() {
         let dirty: Vec<_> = app.disk.dirty_note_ids.iter().copied().collect();
         let outcome = if app.disk.force_full_save {
-            storage.save_notebook(&app.notebook).map(|_| Vec::new())
+            storage
+                .save_notebook(&app.notebook)
+                .map(|_| storage::SaveReport::default())
         } else {
             storage.save_incremental(&app.notebook, &dirty, &app.disk.deleted_note_paths)
         };
-        if let Err(e) = outcome {
-            eprintln!("Failed to save notebook data: {}", e);
+        match outcome {
+            // The app is already gone by now, so there is no status line to report a
+            // conflict to. Say it on stdout instead: a preserved file the user never
+            // hears about is a file they will not think to look for.
+            Ok(report) => {
+                for conflict in report.conflicts {
+                    eprintln!(
+                        "'{}' had changed on disk; the version found there was kept as {}",
+                        conflict.note_title,
+                        conflict.preserved_at.display()
+                    );
+                }
+            }
+            Err(e) => eprintln!("Failed to save notebook data: {}", e),
         }
     }
 
@@ -317,6 +415,11 @@ fn print_help() {
     println!("    {} --vault <path>      Start with Obsidian vault at <path>", PKG_NAME);
     println!("    {} --version           Show version information", PKG_NAME);
     println!("    {} --help              Show this help message\n", PKG_NAME);
+    println!("QUICK CAPTURE (no TUI; prints the path it wrote):");
+    println!("    {} -n \"buy milk\"       Create a note, titled from its first line", PKG_NAME);
+    println!("    {} -t \"buy milk\"       Append an entry to today's daily note", PKG_NAME);
+    println!("    {} -t                  Open today's daily note in the app", PKG_NAME);
+    println!("    ... | {} -n            Capture piped stdin\n", PKG_NAME);
     println!("FEATURES:");
     println!("  • 📝 Rich markdown editing with live preview");
     println!("  • 🗂️  Hierarchical folder organization");
