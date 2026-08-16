@@ -90,6 +90,70 @@ impl App {
     pub fn cancel_vault_switcher(&mut self) {
         self.mode = AppMode::Normal;
     }
+
+    /// Ask the main loop to switch to the highlighted vault.
+    ///
+    /// The app cannot do this itself: storage is owned by the main loop, and
+    /// swapping it means flushing whatever is still owed to the *current* vault
+    /// first. Requesting it here and performing it there is the same shape as
+    /// pending folder relocations.
+    pub fn request_vault_switch(&mut self) {
+        let Some(vault) = self.get_selected_vault().cloned() else {
+            return;
+        };
+        self.cancel_vault_switcher();
+
+        if self.vault_path.as_ref() == Some(&vault) {
+            self.set_message("Already in that vault".to_string());
+            return;
+        }
+        self.disk.pending_vault_switch = Some(vault);
+    }
+
+    /// Adopt a freshly-loaded notebook from another vault.
+    ///
+    /// Everything keyed to the old vault has to go, not merely be ignored.
+    /// `deleted_note_paths` is the sharp one: it holds absolute paths, and
+    /// carrying it across would delete files in the vault we just left on the next
+    /// write. The undo stack, cursor memory and open note are all equally
+    /// meaningless against a different set of notes.
+    pub fn adopt_vault(&mut self, vault: std::path::PathBuf, notebook: NotebookData) {
+        self.notebook = notebook;
+        self.vault_path = Some(vault.clone());
+
+        self.disk = DiskState::default();
+
+        self.current_note = None;
+        self.editor_content.clear();
+        self.editor_cursor = (0, 0);
+        self.editor_scroll = 0;
+        self.note_cursor_map.clear();
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.search_results.clear();
+        self.yank_buffer.clear();
+
+        self.palette_query.clear();
+        self.palette_items.clear();
+        self.palette_selected = 0;
+        self.task_items.clear();
+        self.task_selected = 0;
+        self.outline_headings.clear();
+        self.outline_selected = 0;
+
+        self.initialize_tag_manager();
+        self.refresh_tree_view();
+        self.set_welcome_message();
+        self.mode = AppMode::Normal;
+        self.focused_pane = FocusedPane::Folders;
+
+        let name = vault
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        self.set_operation_info(format!("Switched to vault: {}", name), Some("📁".to_string()));
+    }
     
     // File watcher functionality
     pub fn initialize_file_watcher(&mut self, vault_path: std::path::PathBuf) {
@@ -368,6 +432,115 @@ mod conflict_tests {
         assert_eq!(
             buffer, "half a sentence I am still typ",
             "a reload interrupted someone mid-sentence"
+        );
+    }
+}
+
+#[cfg(test)]
+mod vault_switch_tests {
+    use super::*;
+    use crate::models::{Note, NotebookData};
+
+    fn app_in_vault(path: &str) -> App {
+        let mut app = App::default();
+        app.notebook.notes.clear();
+        app.notebook.folders.clear();
+        app.vault_path = Some(std::path::PathBuf::from(path));
+        app.available_vaults = vec![
+            std::path::PathBuf::from("/vaults/one"),
+            std::path::PathBuf::from("/vaults/two"),
+        ];
+        app
+    }
+
+    #[test]
+    fn choosing_a_vault_requests_the_switch_and_closes_the_picker() {
+        let mut app = app_in_vault("/vaults/one");
+        app.show_vault_switcher();
+        app.vault_switcher_selected = 1;
+        app.request_vault_switch();
+
+        assert_eq!(
+            app.disk.pending_vault_switch.as_deref(),
+            Some(std::path::Path::new("/vaults/two"))
+        );
+        assert_eq!(app.mode, AppMode::Normal, "the picker stayed open");
+    }
+
+    /// Reloading the vault you are already in would throw away the open note and
+    /// the undo stack for nothing.
+    #[test]
+    fn choosing_the_current_vault_does_nothing() {
+        let mut app = app_in_vault("/vaults/one");
+        app.show_vault_switcher();
+        app.vault_switcher_selected = 0;
+        app.request_vault_switch();
+
+        assert!(app.disk.pending_vault_switch.is_none());
+    }
+
+    /// The sharp one. `deleted_note_paths` holds absolute paths into the vault we
+    /// are leaving; carrying it across would delete files over there on the next
+    /// write in the new vault.
+    #[test]
+    fn switching_drops_state_belonging_to_the_old_vault() {
+        let mut app = app_in_vault("/vaults/one");
+        let mut old = Note::new("Old".to_string(), None);
+        old.content = "old text".to_string();
+        let old_id = old.id;
+        app.notebook.add_note(old);
+        app.open_note_by_id(old_id);
+        app.mark_note_dirty(old_id);
+        app.disk
+            .deleted_note_paths
+            .push(std::path::PathBuf::from("/vaults/one/Gone.md"));
+        app.note_cursor_map.insert(old_id, (5, 5));
+        app.push_undo_snapshot();
+
+        let mut fresh = NotebookData::new();
+        fresh.add_note(Note::new("New".to_string(), None));
+        app.adopt_vault(std::path::PathBuf::from("/vaults/two"), fresh);
+
+        assert!(
+            app.disk.deleted_note_paths.is_empty(),
+            "a delete queued against the old vault survived the switch"
+        );
+        assert!(app.disk.dirty_note_ids.is_empty(), "old dirty ids survived");
+        assert!(!app.disk.pending_disk_save, "a pending write survived");
+        assert!(app.note_cursor_map.is_empty(), "cursor memory survived");
+        assert!(app.undo_stack.is_empty(), "undo history from the old vault survived");
+        assert!(app.current_note.is_none(), "the old note stayed open");
+        assert!(app.editor_content.is_empty(), "the old note's text stayed in the editor");
+    }
+
+    #[test]
+    fn switching_adopts_the_new_notebook_and_its_path() {
+        let mut app = app_in_vault("/vaults/one");
+        let mut fresh = NotebookData::new();
+        fresh.add_note(Note::new("Only In Two".to_string(), None));
+        app.adopt_vault(std::path::PathBuf::from("/vaults/two"), fresh);
+
+        assert_eq!(
+            app.vault_path.as_deref(),
+            Some(std::path::Path::new("/vaults/two"))
+        );
+        assert!(app.notebook.find_note_by_title("Only In Two").is_some());
+        assert_eq!(app.notebook.notes.len(), 1, "notes from the old vault lingered");
+    }
+
+    /// The switch is requested, not performed here — the main loop owns storage and
+    /// has to flush the old vault first.
+    #[test]
+    fn requesting_a_switch_does_not_itself_change_the_vault() {
+        let mut app = app_in_vault("/vaults/one");
+        app.show_vault_switcher();
+        app.vault_switcher_selected = 1;
+        app.request_vault_switch();
+
+        assert_eq!(
+            app.vault_path.as_deref(),
+            Some(std::path::Path::new("/vaults/one")),
+            "the vault changed before the old one was flushed"
         );
     }
 }
