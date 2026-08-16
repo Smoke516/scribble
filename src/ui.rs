@@ -992,8 +992,23 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     
     let right_text = if let Some(ref note) = app.current_note {
         let cursor_info = format!(" | {}:{}", app.editor_cursor.0 + 1, app.editor_cursor.1 + 1);
-        
-        format!("Modified: {}{} | {} {} notes{}",
+
+        // The open note's tags, so tagging something shows immediately rather than
+        // only inside the dialog you tagged it from. Capped, because a heavily
+        // tagged note would otherwise crowd out everything else on the line.
+        let tags = app.current_note_tags();
+        let tag_info = if tags.is_empty() {
+            String::new()
+        } else {
+            let shown: Vec<String> = tags.iter().take(3).map(|t| format!("#{}", t)).collect();
+            match tags.len().saturating_sub(3) {
+                0 => format!("{} | ", shown.join(" ")),
+                extra => format!("{} +{} | ", shown.join(" "), extra),
+            }
+        };
+
+        format!("{}Modified: {}{} | {} {} notes{}",
+                tag_info,
                 note.modified_at.format("%m/%d %H:%M"),
                 cursor_info,
                 Icons::NOTE,
@@ -1010,7 +1025,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     // Split the area for left and right aligned text
     let status_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(right_text.len() as u16 + 2)])
+        .constraints([Constraint::Min(0), Constraint::Length(right_text.chars().count() as u16 + 2)])
         .split(area);
 
     let left_paragraph = Paragraph::new(Line::from(left_spans))

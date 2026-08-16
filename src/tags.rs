@@ -308,23 +308,28 @@ impl TagManager {
     }
 
     /// Update a note's tags based on its content and YAML frontmatter
+    /// Fold the tags written in a note's body into its tag list.
+    ///
+    /// Merges rather than replaces. This used to assign the extracted tags over
+    /// `note.tags`, and storage strips frontmatter out of `content` before storing
+    /// it — so `extract_yaml_tags` found nothing and every frontmatter tag was
+    /// dropped. Opening the tag dialog wiped the note's tags, and the next save
+    /// wrote that loss to disk: a tag added this way survived exactly until the
+    /// next time you looked at it.
+    ///
+    /// Sorted, because the set had no order of its own and the frontmatter `tags:`
+    /// line was being rewritten in a different order on every save — which rewrites
+    /// the file, which makes the sync client re-upload a note nothing changed in.
     pub fn sync_note_tags(&mut self, note: &mut Note) {
-        // Extract all tags from content and frontmatter
-        let yaml_tags = self.extract_yaml_tags(&note.content);
-        let inline_tags = self.extract_inline_tags(&note.content);
-        
-        // Combine all tags
-        let mut all_tags = HashSet::new();
-        all_tags.extend(yaml_tags);
-        all_tags.extend(inline_tags);
-        
-        // Update note tags
-        let new_tags: Vec<String> = all_tags.into_iter().collect();
-        note.tags = new_tags;
-        
-        // Rebuild index for this note
-        // Note: In a real implementation, we'd want to be more efficient
-        // and only update the specific entries, but this is simpler for now
+        let mut all: HashSet<String> = note.tags.iter().cloned().collect();
+        all.extend(self.extract_inline_tags(&note.content));
+        // A no-op for vault storage, which has already parsed the frontmatter out,
+        // but the single-file backend can still have it sitting in `content`.
+        all.extend(self.extract_yaml_tags(&note.content));
+
+        let mut tags: Vec<String> = all.into_iter().collect();
+        tags.sort();
+        note.tags = tags;
     }
 
     /// Format tags for display in UI
@@ -417,6 +422,54 @@ back to #realtag
     #[test]
     fn nested_tags_keep_their_slashes() {
         assert_eq!(tags_in("filed under #work/admin"), vec!["work/admin"]);
+    }
+
+    /// The bug that made tagging pointless: `sync_note_tags` assigned the tags
+    /// extracted from `content` over `note.tags`, and storage strips frontmatter
+    /// out of `content` before storing it — so the extraction found nothing and
+    /// every frontmatter tag was dropped. Opening the tag dialog wiped the note's
+    /// tags, and the next save wrote that loss to disk.
+    #[test]
+    fn syncing_keeps_the_tags_a_note_already_had() {
+        let mut tm = TagManager::new();
+        let mut note = Note::new("N".to_string(), None);
+        // As storage loads it: frontmatter parsed into `tags`, body without it.
+        note.tags = vec!["work".to_string(), "urgent".to_string()];
+        note.content = "body text with #inline\n".to_string();
+
+        tm.sync_note_tags(&mut note);
+
+        assert!(note.tags.contains(&"work".to_string()), "a frontmatter tag was destroyed");
+        assert!(note.tags.contains(&"urgent".to_string()), "a frontmatter tag was destroyed");
+        assert!(note.tags.contains(&"inline".to_string()), "the inline tag was not folded in");
+    }
+
+    /// Syncing twice must not keep changing the note, or every save rewrites the
+    /// file and the sync client re-uploads a note nothing changed in.
+    #[test]
+    fn syncing_is_stable_and_ordered() {
+        let mut tm = TagManager::new();
+        let mut note = Note::new("N".to_string(), None);
+        note.tags = vec!["zebra".to_string(), "apple".to_string()];
+        note.content = "text #mango\n".to_string();
+
+        tm.sync_note_tags(&mut note);
+        let once = note.tags.clone();
+        tm.sync_note_tags(&mut note);
+
+        assert_eq!(once, note.tags, "a second sync changed the note again");
+        assert_eq!(once, vec!["apple", "mango", "zebra"], "tags are not in a stable order");
+    }
+
+    #[test]
+    fn syncing_does_not_duplicate_a_tag_written_in_both_places() {
+        let mut tm = TagManager::new();
+        let mut note = Note::new("N".to_string(), None);
+        note.tags = vec!["work".to_string()];
+        note.content = "text #work\n".to_string();
+
+        tm.sync_note_tags(&mut note);
+        assert_eq!(note.tags, vec!["work"]);
     }
 
     /// Frontmatter tags are a separate source and must still come through.
