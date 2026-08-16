@@ -5,6 +5,7 @@ mod config;
 mod error;
 mod events;
 mod models;
+mod palette;
 mod preview;
 mod search;
 mod spell;
