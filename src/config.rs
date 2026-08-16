@@ -10,6 +10,7 @@ pub struct Config {
     pub vaults: VaultConfig,
     pub ui: UiConfig,
     pub behavior: BehaviorConfig,
+    pub capture: CaptureConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +49,31 @@ pub struct BehaviorConfig {
     pub backup_on_import: bool,
     pub file_watching: bool,
     pub spell_check: bool,
+}
+
+/// Settings for `--new` and `--today`, the command-line capture paths.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CaptureConfig {
+    /// Vault-relative folder for daily notes. Empty means the vault root.
+    pub daily_folder: String,
+    /// strftime pattern for a daily note's title, resolved against *local* time —
+    /// a daily note that rolls over at UTC midnight is the wrong day's note for
+    /// most of the world.
+    pub daily_format: String,
+    /// Prefix each captured entry with the time it was captured. In a daily log,
+    /// when an entry was written is usually half of what it means.
+    pub timestamp_entries: bool,
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self {
+            daily_folder: "daily".to_string(),
+            daily_format: "%Y-%m-%d".to_string(),
+            timestamp_entries: true,
+        }
+    }
 }
 
 impl Default for EditorConfig {

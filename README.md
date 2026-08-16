@@ -151,6 +151,28 @@ scribble --help       # Show detailed help
 scribble -h           # Show help (short form)
 ```
 
+### Quick Capture
+
+Capture without starting the TUI. Each of these writes the note and prints the
+path it wrote, so a thought costs less than opening an editor.
+
+```bash
+scribble -n "buy milk"       # New note, titled from its first line
+scribble -t "buy milk"       # Append an entry to today's daily note
+scribble -t                  # Open today's daily note in the app
+git log -1 | scribble -n     # Capture piped stdin
+```
+
+Daily notes go in `daily/` and are titled `YYYY-MM-DD` in **local** time. Entries
+are appended as timestamped bullets. All three are configurable:
+
+```toml
+[capture]
+daily_folder = "daily"      # "" puts daily notes at the vault root
+daily_format = "%Y-%m-%d"   # strftime, resolved against local time
+timestamp_entries = true    # prefix each entry with HH:MM
+```
+
 ### Command Line Help Output
 ```
 scribble v2.1.0
@@ -159,9 +181,16 @@ A powerful terminal-based note-taking app with folder organization,
 markdown support, and syntax highlighting.
 
 USAGE:
-    scribble              Start the application
-    scribble --version    Show version information
-    scribble --help       Show this help message
+    scribble                    Start the application
+    scribble --vault <path>      Start with Obsidian vault at <path>
+    scribble --version           Show version information
+    scribble --help              Show this help message
+
+QUICK CAPTURE (no TUI; prints the path it wrote):
+    scribble -n "buy milk"       Create a note, titled from its first line
+    scribble -t "buy milk"       Append an entry to today's daily note
+    scribble -t                  Open today's daily note in the app
+    ... | scribble -n            Capture piped stdin
 
 FEATURES:
   • 📝 Rich markdown editing with live preview
