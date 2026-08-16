@@ -147,21 +147,97 @@ impl App {
         self.set_message("File changes detected from external source".to_string());
     }
     
+    /// A note's file changed on disk.
+    ///
+    /// If we have nothing unsaved for that note, take the disk version — there is
+    /// nothing to lose, and leaving the in-memory copy stale is how a later edit
+    /// silently reverts somebody else's work. If we *do* have unsaved changes, leave
+    /// the buffer alone and say so; the write path preserves whichever version it
+    /// finds rather than overwriting it, so nothing is riding on this notification.
     pub(crate) fn handle_file_modified(&mut self, path: std::path::PathBuf) {
-        // If the modified file is the currently open note, offer to reload
-        if let Some(current_note) = &self.current_note {
-            if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
-                let note_filename = sanitize_filename(&current_note.title);
-                if file_name == note_filename {
-                    // Note: In a more sophisticated implementation, we might show a dialog
-                    // asking the user if they want to reload the file
-                    self.set_operation_info(
-                        format!("Note '{}' was modified externally", current_note.title),
-                        Some("🔄".to_string())
-                    );
-                }
-            }
+        let Some(note_id) = self
+            .notebook
+            .notes
+            .values()
+            .find(|n| n.file_path.as_deref() == Some(path.as_path()))
+            .map(|n| n.id)
+        else {
+            // Not a file we have a note for. `handle_file_created` covers arrivals.
+            return;
+        };
+
+        if self.has_unsaved_work_for(note_id) {
+            let title = self
+                .notebook
+                .notes
+                .get(&note_id)
+                .map(|n| n.title.clone())
+                .unwrap_or_default();
+            self.set_operation_info(
+                format!("'{}' also changed on disk — both versions will be kept", title),
+                Some("⚔️".to_string()),
+            );
+            return;
         }
+
+        self.reload_note_from_disk(note_id, &path);
+    }
+
+    /// Whether anything would be lost by replacing this note with the disk version.
+    ///
+    /// The dirty set is the main answer, but the editor buffer is checked too: it
+    /// holds keystrokes that have not been folded back into the note yet, and those
+    /// are exactly the edits a reload would throw away.
+    fn has_unsaved_work_for(&self, note_id: uuid::Uuid) -> bool {
+        if self.disk.dirty_note_ids.contains(&note_id) {
+            return true;
+        }
+        match (&self.current_note, self.notebook.notes.get(&note_id)) {
+            (Some(current), Some(stored)) if current.id == note_id => {
+                self.editor_content != stored.content
+            }
+            _ => false,
+        }
+    }
+
+    /// Replace a note with what is now on disk, refreshing the editor if that note
+    /// happens to be open.
+    fn reload_note_from_disk(&mut self, note_id: uuid::Uuid, path: &std::path::Path) {
+        let Some(vault) = self.vault_path.clone() else {
+            return;
+        };
+        let Ok(storage) = crate::storage::VaultStorage::new(vault) else {
+            return;
+        };
+        let Some(fresh) = storage.load_single_note(path) else {
+            return;
+        };
+
+        let Some(note) = self.notebook.notes.get_mut(&note_id) else {
+            return;
+        };
+        let title = fresh.title.clone();
+        // Keep the identity we already have. The id, and the note's place in the
+        // tree, are ours; only the file's contents are the disk's to change.
+        note.title = fresh.title;
+        note.content = fresh.content;
+        note.tags = fresh.tags;
+        note.modified_at = fresh.modified_at;
+        note.disk_stamp = fresh.disk_stamp;
+        let content = note.content.clone();
+
+        if self.current_note.as_ref().map(|n| n.id) == Some(note_id) {
+            self.current_note = self.notebook.notes.get(&note_id).cloned();
+            self.editor_content = content;
+            // The note got shorter while we were looking away; a cursor left past
+            // the end would index outside the buffer.
+            self.clamp_cursor_to_content();
+        }
+
+        self.set_operation_info(
+            format!("'{}' reloaded from disk", title),
+            Some("🔄".to_string()),
+        );
     }
     
     pub(crate) fn handle_file_created(&mut self, path: std::path::PathBuf) {
@@ -199,4 +275,99 @@ impl App {
     }
     
     // Tag management functionality
+}
+
+#[cfg(test)]
+mod conflict_tests {
+    use super::*;
+    use crate::storage::{NotebookStorage, VaultStorage};
+    use std::fs;
+
+    /// A vault with one note, loaded into an App the way main.rs does it.
+    fn app_on_a_vault(tag: &str, body: &str) -> (App, std::path::PathBuf, uuid::Uuid) {
+        let dir = std::env::temp_dir().join(format!("scribble_watch_{}_{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("Note.md"), body).unwrap();
+
+        let storage = VaultStorage::new(dir.clone()).unwrap();
+        let mut app = App::default();
+        app.notebook = storage.load_notebook().unwrap();
+        app.vault_path = Some(dir.clone());
+        let id = *app.notebook.notes.keys().next().unwrap();
+        (app, dir, id)
+    }
+
+    /// Nothing unsaved means nothing to lose. Leaving the in-memory copy stale is
+    /// how a later edit silently reverts somebody else's work, so take the disk
+    /// version without asking.
+    #[test]
+    fn a_clean_note_is_reloaded_from_disk() {
+        let (mut app, dir, id) = app_on_a_vault("clean", "---\ntitle: Note\n---\nbefore\n");
+        let path = dir.join("Note.md");
+
+        fs::write(&path, "---\ntitle: Note\n---\nafter\n").unwrap();
+        app.handle_file_modified(path);
+
+        let content = app.notebook.notes.get(&id).unwrap().content.clone();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(content, "after\n", "clean note was not refreshed from disk");
+    }
+
+    /// The open note must have the editor buffer refreshed too, or the reload is
+    /// invisible and the next keystroke saves the stale text straight back.
+    #[test]
+    fn reloading_the_open_note_refreshes_the_editor() {
+        let (mut app, dir, id) = app_on_a_vault("open", "---\ntitle: Note\n---\nbefore\n");
+        let path = dir.join("Note.md");
+        app.current_note = app.notebook.notes.get(&id).cloned();
+        app.editor_content = "before\n".to_string();
+        app.editor_cursor = (0, 6);
+
+        fs::write(&path, "---\ntitle: Note\n---\nx\n").unwrap();
+        app.handle_file_modified(path);
+
+        let content = app.editor_content.clone();
+        let cursor = app.editor_cursor;
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(content, "x\n", "editor buffer kept the stale text");
+        assert!(cursor.1 <= 1, "cursor left past the end of the shorter line");
+    }
+
+    /// Unsaved work is never thrown away by a notification. The buffer stands, and
+    /// the write path is what keeps both versions when the save comes.
+    #[test]
+    fn a_dirty_note_is_left_alone() {
+        let (mut app, dir, id) = app_on_a_vault("dirty", "---\ntitle: Note\n---\nbefore\n");
+        let path = dir.join("Note.md");
+        app.notebook.notes.get_mut(&id).unwrap().content = "what I typed\n".to_string();
+        app.mark_note_dirty(id);
+
+        fs::write(&path, "---\ntitle: Note\n---\nfrom elsewhere\n").unwrap();
+        app.handle_file_modified(path);
+
+        let content = app.notebook.notes.get(&id).unwrap().content.clone();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(content, "what I typed\n", "a reload discarded unsaved work");
+    }
+
+    /// Keystrokes that have not been folded back into the note yet count as unsaved
+    /// work, even though nothing has marked the note dirty.
+    #[test]
+    fn an_untracked_edit_in_the_buffer_still_blocks_a_reload() {
+        let (mut app, dir, id) = app_on_a_vault("buffer", "---\ntitle: Note\n---\nbefore\n");
+        let path = dir.join("Note.md");
+        app.current_note = app.notebook.notes.get(&id).cloned();
+        app.editor_content = "half a sentence I am still typ".to_string();
+
+        fs::write(&path, "---\ntitle: Note\n---\nfrom elsewhere\n").unwrap();
+        app.handle_file_modified(path);
+
+        let buffer = app.editor_content.clone();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(
+            buffer, "half a sentence I am still typ",
+            "a reload interrupted someone mid-sentence"
+        );
+    }
 }

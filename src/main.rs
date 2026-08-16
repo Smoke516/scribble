@@ -342,25 +342,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // changes fall back to a full save.
         if app.disk.pending_disk_save {
             let result = if app.disk.force_full_save {
-                storage.save_notebook(&app.notebook).map(|_| Vec::new())
+                storage
+                    .save_notebook(&app.notebook)
+                    .map(|_| storage::SaveReport::default())
             } else {
                 let dirty: Vec<_> = app.disk.dirty_note_ids.iter().copied().collect();
                 storage.save_incremental(&app.notebook, &dirty, &app.disk.deleted_note_paths)
             };
             match result {
-                Ok(assigned) => {
-                    // Store back the path chosen for any newly-written note so it
-                    // writes to the same file next time.
-                    for (id, path) in assigned {
-                        if let Some(n) = app.notebook.notes.get_mut(&id) {
-                            n.file_path = Some(path.clone());
-                        }
-                        if app.current_note.as_ref().map(|n| n.id) == Some(id) {
-                            if let Some(cn) = app.current_note.as_mut() {
-                                cn.file_path = Some(path);
-                            }
-                        }
-                    }
+                Ok(report) => {
+                    app.apply_save_report(report);
                     app.disk.clear_after_write();
                     app.mark_disk_saved();
                 }
@@ -382,12 +373,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if app.disk.has_pending_work() {
         let dirty: Vec<_> = app.disk.dirty_note_ids.iter().copied().collect();
         let outcome = if app.disk.force_full_save {
-            storage.save_notebook(&app.notebook).map(|_| Vec::new())
+            storage
+                .save_notebook(&app.notebook)
+                .map(|_| storage::SaveReport::default())
         } else {
             storage.save_incremental(&app.notebook, &dirty, &app.disk.deleted_note_paths)
         };
-        if let Err(e) = outcome {
-            eprintln!("Failed to save notebook data: {}", e);
+        match outcome {
+            // The app is already gone by now, so there is no status line to report a
+            // conflict to. Say it on stdout instead: a preserved file the user never
+            // hears about is a file they will not think to look for.
+            Ok(report) => {
+                for conflict in report.conflicts {
+                    eprintln!(
+                        "'{}' had changed on disk; the version found there was kept as {}",
+                        conflict.note_title,
+                        conflict.preserved_at.display()
+                    );
+                }
+            }
+            Err(e) => eprintln!("Failed to save notebook data: {}", e),
         }
     }
 
