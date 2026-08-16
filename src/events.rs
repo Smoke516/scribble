@@ -28,6 +28,7 @@ pub fn handle_event(app: &mut App, event: Event) -> Result<(), Box<dyn std::erro
         AppMode::TemplatePicker => handle_template_picker_mode(app, key),
         AppMode::SpellSuggest => handle_spell_suggest_mode(app, key),
         AppMode::Outline => handle_outline_mode(app, key),
+        AppMode::Tasks => handle_tasks_mode(app, key),
         AppMode::Explorer => handle_explorer_mode(app, key),
         }
     }
@@ -112,6 +113,7 @@ enum Action {
     ToggleTaskCheckbox,
     PasteBelow,
     PasteClipboardBelow,
+    ShowTasks,
     DeleteToLineEnd,
     ChangeToLineEnd,
     YankLine,
@@ -250,6 +252,7 @@ const NORMAL_BINDINGS: &[Binding] = &[
     // --- panels ---
     ctrl(KeyCode::Char('j'), Ctx::Any, Action::QuickJump, "Quick jump to note"),
     ctrl(KeyCode::Char('g'), Ctx::Any, Action::ShowOutline, "Outline panel"),
+    ctrl(KeyCode::Char('k'), Ctx::Any, Action::ShowTasks, "Tasks: every open task in the vault"),
     ctrl(KeyCode::Char('b'), Ctx::Any, Action::Backlinks, "Backlinks panel"),
     ctrl(KeyCode::Char('e'), Ctx::Any, Action::ShowExplorer, "Explorer: browse the vault"),
     ctrl(KeyCode::Char('o'), Ctx::Any, Action::RecentFiles, "Recent files"),
@@ -742,6 +745,7 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
         // --- panels ---
         Action::QuickJump => app.start_quick_jump(),
         Action::ShowOutline => app.show_outline(),
+        Action::ShowTasks => app.show_task_panel(),
         Action::Backlinks => app.show_backlinks_panel(),
         Action::RecentFiles => app.toggle_recent_files(),
         Action::VaultSwitcher => app.show_vault_switcher(),
@@ -1982,6 +1986,20 @@ fn handle_outline_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => app.outline_select(),
         KeyCode::Up | KeyCode::Char('k') => app.outline_navigate_up(),
         KeyCode::Down | KeyCode::Char('j') => app.outline_navigate_down(),
+        _ => {}
+    }
+}
+
+fn handle_tasks_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.cancel_task_panel(),
+        KeyCode::Enter => app.task_select(),
+        KeyCode::Up | KeyCode::Char('k') => app.task_navigate_up(),
+        KeyCode::Down | KeyCode::Char('j') => app.task_navigate_down(),
+        // Tick it where it lives, without leaving the list — the same key that
+        // toggles a checkbox in the editor.
+        KeyCode::Char(' ') => app.task_toggle_selected(),
+        KeyCode::Char('a') => app.toggle_task_panel_done(),
         _ => {}
     }
 }

@@ -33,7 +33,7 @@ A powerful terminal-based note-taking app with advanced tag management, Obsidian
 - **🔍 Fuzzy Search** - Intelligent search that finds matches even with typos (`Ctrl+F`)
 - **⚡ Quick Jump** - Instant note navigation with `Ctrl+J` - like VS Code's quick open
 - **🗂️ Outline Panel** - Jump to any heading in the current note (`Ctrl+G`)
-- **☑️ Task Checkboxes** - Toggle `- [ ]`/`- [x]` on the current line with `Space`
+- **☑️ Task Panel** - Every open task in the vault in one list, jump to it with `Enter` or tick it in place with `Space` (`Ctrl+K`); toggle a checkbox in the editor with `Space`
 - **📅 Daily Notes** - One-key open-or-create of today's dated note (`F4` or `:daily`)
 - **📋 Recent Files** - Quick access to recently opened notes (`Ctrl+O`)
 - **👁️ Live Preview** - Real-time markdown preview in split-screen mode (`Ctrl+P`)
@@ -485,6 +485,7 @@ Either way, changes are written to disk continuously — on edit, on a periodic 
 - `/` - Search
 - `Ctrl+B` - Links panel (backlinks + outgoing)
 - `Ctrl+G` - Outline panel (jump to heading)
+- `Ctrl+K` - Task panel: every open task in the vault
 - `F4` - Open today's daily note
 - `:` - Command mode
 - `Ctrl+S` - Save

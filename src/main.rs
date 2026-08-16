@@ -11,6 +11,7 @@ mod spell;
 mod storage;
 mod syntax;
 mod tags;
+mod tasks;
 mod theme;
 mod ui;
 mod vim;
