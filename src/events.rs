@@ -1435,43 +1435,23 @@ fn handle_move_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('g') => app.navigate_to_top(),
         KeyCode::Char('G') => app.navigate_to_bottom(),
         KeyCode::Char('h') | KeyCode::Left => {
-            // Collapse rather than leave: the overlay is the only tree on screen.
+            // Collapse a folder to get past it quickly while hunting for the
+            // destination. Nothing here may modify the vault: you are choosing
+            // where something lands, not editing.
             if let Some(item) = app.get_selected_item() {
                 if item.item_type == TreeItemType::Folder && item.expanded {
                     app.toggle_folder_expansion();
                 }
             }
         }
-
-        // --- structural edits, acting on the highlighted row ---
-        KeyCode::Char('n') => {
-            let folder_id = app.get_selected_item().and_then(|item| match item.item_type {
-                TreeItemType::Folder => Some(item.id),
-                TreeItemType::Note => app.notebook.notes.get(&item.id).and_then(|n| n.folder_id),
-            });
-            app.start_new_note_input(folder_id);
-        }
-        KeyCode::Char('f') => {
-            let parent = app.get_selected_item().and_then(|item| match item.item_type {
-                TreeItemType::Folder => Some(item.id),
-                TreeItemType::Note => app.notebook.notes.get(&item.id).and_then(|n| n.folder_id),
-            });
-            app.start_new_folder_input(parent);
-        }
-        KeyCode::Char('F') => app.start_new_folder_input(None),
-        KeyCode::Char('r') => app.start_rename_item(),
-        KeyCode::Char('m') => app.start_move_item(),
-        KeyCode::Char('d') => {
-            // Stack the confirm over the tree and come back to it afterwards:
-            // being dumped out of the explorer to delete one file is annoying.
-            app.modal_return = Some(AppMode::Explorer);
-            if let Err(e) = app.start_delete_confirmation() {
-                app.modal_return = None;
-                app.set_message(e);
+        KeyCode::Char('l') | KeyCode::Right => {
+            if let Some(item) = app.get_selected_item() {
+                if item.item_type == TreeItemType::Folder && !item.expanded {
+                    app.toggle_folder_expansion();
+                }
             }
         }
-        
-        // Execute move
+
         KeyCode::Enter => {
             if let Err(e) = app.execute_move() {
                 app.set_message(e);
@@ -2006,6 +1986,43 @@ fn handle_explorer_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('k') | KeyCode::Up => app.navigate_up(),
         KeyCode::Char('g') => app.navigate_to_top(),
         KeyCode::Char('G') => app.navigate_to_bottom(),
+        KeyCode::Char('h') | KeyCode::Left => {
+            // Collapse rather than leave: the overlay is the only tree on screen.
+            if let Some(item) = app.get_selected_item() {
+                if item.item_type == TreeItemType::Folder && item.expanded {
+                    app.toggle_folder_expansion();
+                }
+            }
+        }
+
+        // --- structural edits, acting on the highlighted row ---
+        KeyCode::Char('n') => {
+            let folder_id = app.get_selected_item().and_then(|item| match item.item_type {
+                TreeItemType::Folder => Some(item.id),
+                TreeItemType::Note => app.notebook.notes.get(&item.id).and_then(|n| n.folder_id),
+            });
+            app.start_new_note_input(folder_id);
+        }
+        KeyCode::Char('f') => {
+            let parent = app.get_selected_item().and_then(|item| match item.item_type {
+                TreeItemType::Folder => Some(item.id),
+                TreeItemType::Note => app.notebook.notes.get(&item.id).and_then(|n| n.folder_id),
+            });
+            app.start_new_folder_input(parent);
+        }
+        KeyCode::Char('F') => app.start_new_folder_input(None),
+        KeyCode::Char('r') => app.start_rename_item(),
+        KeyCode::Char('m') => app.start_move_item(),
+        KeyCode::Char('d') => {
+            // Stack the confirm over the tree and come back to it afterwards:
+            // being dumped out of the explorer to delete one file is annoying.
+            app.modal_return = Some(AppMode::Explorer);
+            if let Err(e) = app.start_delete_confirmation() {
+                app.modal_return = None;
+                app.set_message(e);
+            }
+        }
+
         KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
             if let Some(item) = app.get_selected_item() {
                 match item.item_type {

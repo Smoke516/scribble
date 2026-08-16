@@ -75,6 +75,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         AppMode::InputFolder => draw_input_folder_dialog(f, app),
         AppMode::Help => draw_help_dialog(f, app),
         AppMode::Explorer => draw_explorer_dialog(f, app),
+        AppMode::Move => draw_move_dialog(f, app),
         AppMode::DeleteConfirm => draw_delete_confirm_dialog(f, app),
         AppMode::QuickJump => draw_quick_jump_dialog(f, app),
         AppMode::RecentFiles => draw_recent_files_dialog(f, app),
@@ -1545,6 +1546,60 @@ fn paint_cursor_in_line(line: &mut Line<'_>, col: usize, cursor_style: Style) {
     }
 
     line.spans = out;
+}
+
+
+/// The destination picker for a move.
+///
+/// `execute_move` reads the tree selection, so moving has always required the
+/// tree to be on screen to aim at. With the sidebar hidden by default there was
+/// nothing to aim at: the status bar said "select destination folder" and no
+/// selection was visible anywhere. Same tree as the explorer, with a banner
+/// naming what is in flight.
+fn draw_move_dialog(f: &mut Frame, app: &mut App) {
+    let area = centered_rect(56, 76, f.area());
+    f.render_widget(Clear, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+
+    let what = app
+        .move_item_id
+        .and_then(|id| {
+            app.folder_tree_items
+                .iter()
+                .find(|t| t.id == id)
+                .map(|t| t.name.clone())
+        })
+        .unwrap_or_else(|| "item".to_string());
+
+    // Trim the name rather than the key hints: the hints are the part you need
+    // when you have never used this dialog before.
+    let hints = "Enter here · h/l fold · Esc";
+    let room = (chunks[0].width as usize).saturating_sub(hints.len() + 10);
+    let what = if what.chars().count() > room && room > 1 {
+        format!("{}…", what.chars().take(room - 1).collect::<String>())
+    } else {
+        what
+    };
+
+    let banner = Line::from(vec![
+        Span::styled(
+            format!(" Move \"{}\" to  ", what),
+            Style::default()
+                .fg(TokyoNightTheme::ORANGE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(hints, Style::default().fg(TokyoNightTheme::COMMENT)),
+    ]);
+    f.render_widget(
+        Paragraph::new(banner).style(Style::default().bg(TokyoNightTheme::BG_DARK)),
+        chunks[0],
+    );
+
+    draw_folder_tree(f, app, chunks[1]);
 }
 
 /// The folder tree, floating. Deliberately the same renderer as the sidebar
