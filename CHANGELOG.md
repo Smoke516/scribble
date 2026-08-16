@@ -5,6 +5,37 @@ All notable changes to Scribble will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.1] - 2026-08-16
+
+Fixes for two things 3.0.0 shipped broken.
+
+### 🐛 Fixed
+
+- **Opening the tag dialog destroyed the note's tags.** `sync_note_tags` assigned
+  the tags extracted from `note.content` over `note.tags`, and storage strips
+  frontmatter out of `content` before storing it — so the extraction found nothing
+  and every frontmatter tag was dropped. A tag added through the dialog survived
+  exactly until the next time you opened the dialog, and the next save wrote that
+  loss to disk. It merges now, and sorts, so the `tags:` line stops being
+  rewritten in a different order on every save.
+- **The tag dialog disagreed with the rest of the app**, reading only the
+  frontmatter field — so it could report no tags on a note the browser and the
+  palette both listed as tagged. It uses the shared extractor now.
+- **The palette printed the wrong shortcut for the live preview**, still showing
+  `Ctrl+P` after 3.0.0 moved preview to `F2` and gave `Ctrl+P` to the palette
+  itself. Since the palette exists partly to teach the chord, printing one that
+  does nothing was worse than printing none. A test now walks every palette
+  command against the keymap.
+- The status bar's width was measured in **bytes**, so a multi-byte tag or note
+  title over-reserved space and pushed the left-hand side off screen.
+
+### ✨ Added
+
+- The open note's tags are shown in the status line, capped at three with `+N`.
+  Tagging something previously gave no sign it had worked outside the dialog you
+  did it in.
+- Screenshots on the README.
+
 ## [3.0.0] - 2026-08-16
 
 A large release. Storage got the attention it needed, retrieval was consolidated
