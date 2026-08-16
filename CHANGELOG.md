@@ -5,6 +5,78 @@ All notable changes to Scribble will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-08-16
+
+A large release. Storage got the attention it needed, retrieval was consolidated
+behind one door, editing became properly vim-like, and one unused feature was
+removed rather than expanded.
+
+### ⚠️ Breaking
+
+- **Wiki links are gone.** The `[[ ]]` parser, link graph, backlinks panel,
+  `[[` autocomplete and follow-link were all removed, along with `Ctrl+B` and
+  `Ctrl+L`. Note content is untouched — any `[[text]]` already written stays in
+  the file as ordinary text.
+- **`Ctrl+P` now opens the Go to palette**, not the live preview. Preview keeps
+  `F2`, which it already answered to.
+
+### ✨ Added
+
+- **Go to (`Ctrl+P`)** — one door in front of the six finders. Notes, tags,
+  headings and commands ranked together. Prefixes: `>` commands, `#` tags,
+  `?` full text, `@` headings. The original finders all still work as direct
+  shortcuts.
+- **Real vim operators** — `d`, `c` and `y` compose with motions, text objects
+  and counts: `dw`, `ciw`, `d$`, `3dd`, `d3w`, `dG`, `daw`, plus `D`/`C`/`Y`.
+  Counts work on plain motions too. Yanks remember whether they were linewise.
+- **Task panel (`Ctrl+K`)** — every open task in the vault in one list, grouped
+  by note. `Enter` jumps to it, `Space` ticks it in place, `a` shows completed.
+- **Quick capture from the shell** — `scribble -n "..."` for a new note,
+  `scribble -t "..."` to append to today's daily note, `scribble -t` to open it,
+  and piped stdin. Each prints the path it wrote.
+- **Live vault switching** — `Ctrl+V` switches immediately instead of asking for
+  a restart, and remembers the vault as the default.
+- **A file-conflict policy.** Notes carry a content hash of the file as last read
+  or written, and nothing is overwritten that cannot be accounted for. Nothing
+  unsaved: the disk version is taken silently. Unsaved changes: your version
+  keeps the filename and the version found on disk is preserved beside it.
+
+### 🐛 Fixed
+
+- **CRLF notes lost their identity on every load.** The frontmatter parser
+  required a literal `---\n`, so a note with Windows line endings parsed as
+  having no frontmatter and was given a fresh id and creation date each time.
+- **A sync client's conflicted copy could make the real note disappear.** It
+  carries the original's `scribble_id`, and notes are keyed by id, so the pair
+  collapsed into one — and walk order consistently favoured the copy.
+- **Code comments were counted as tags.** The inline tag regex had no context
+  rules, so `#` in Python, Bash and Ruby comments became tags. Against a real
+  vault that was 21 tags across 5 notes before and 9 across 1 after.
+- **External edits were silently overwritten**, and edits to notes that were not
+  open never reached memory at all.
+- `--today` and the in-app `F4` disagreed about where today's note lives, so
+  using both could produce two notes for the same day.
+
+### 🧪 Internal
+
+- Tests 67 → 198.
+
+## [2.1.0] - 2026-08-15
+
+Recorded after the fact; this release was never written up at the time.
+
+### ✨ Added
+- Outline panel (`Ctrl+G`), task checkboxes (`Space`), daily notes (`F4`),
+  folder-scoped advanced search, full-screen landing page, explorer overlay
+  (`Ctrl+E`), and a move picker.
+
+### 🐛 Fixed
+- **Every save added a blank line to the top of every note.** The frontmatter
+  delimiter is five bytes and the parser skipped four; 144 accumulated lines were
+  cleaned across the vault.
+- Atomic writes, panic-safe terminal restore, vault-relative `folder_path`, and a
+  keymap table that fixed five silently shadowed Ctrl chords.
+
 ## [2.0.0] - 2024-10-13
 
 ### 🎉 Major New Features
