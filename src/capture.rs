@@ -106,11 +106,23 @@ fn commit(
     notebook: &NotebookData,
     note_id: uuid::Uuid,
 ) -> Result<PathBuf, CaptureError> {
-    let assigned = storage
+    let report = storage
         .save_incremental(notebook, &[note_id], &[])
         .map_err(|e| CaptureError::Storage(e.to_string()))?;
 
-    if let Some((_, path)) = assigned.into_iter().find(|(id, _)| *id == note_id) {
+    // A capture goes through the same never-clobber rule as the app, so it can find
+    // the note changed underneath it — most likely by a running scribble instance
+    // that has it open. Nothing was lost, but a preserved file the user never hears
+    // about is a file they will not think to look for.
+    for conflict in &report.conflicts {
+        eprintln!(
+            "'{}' had changed on disk; the version found there was kept as {}",
+            conflict.note_title,
+            conflict.preserved_at.display()
+        );
+    }
+
+    if let Some((_, path)) = report.assigned.into_iter().find(|(id, _)| *id == note_id) {
         return Ok(path);
     }
     // An existing note keeps the path it already had; save_incremental only reports
