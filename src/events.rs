@@ -23,7 +23,6 @@ pub fn handle_event(app: &mut App, event: Event) -> Result<(), Box<dyn std::erro
         AppMode::ThemeBrowser => handle_theme_browser_mode(app, key),
         AppMode::Rename => handle_rename_mode(app, key),
         AppMode::NoteSearch => handle_note_search_mode(app, key),
-        AppMode::Backlinks => handle_backlinks_mode(app, key),
         AppMode::Visual => handle_visual_mode(app, key),
         AppMode::TemplatePicker => handle_template_picker_mode(app, key),
         AppMode::SpellSuggest => handle_spell_suggest_mode(app, key),
@@ -136,14 +135,12 @@ enum Action {
     // Panels and search
     QuickJump,
     ShowOutline,
-    Backlinks,
     RecentFiles,
     VaultSwitcher,
     TagBrowser,
     ThemeBrowser,
     DailyNote,
     TogglePreview,
-    FollowLink,
     SearchInNoteOrGlobal,
     SearchPrevOrTemplates,
     FuzzySearch,
@@ -253,12 +250,10 @@ const NORMAL_BINDINGS: &[Binding] = &[
     ctrl(KeyCode::Char('j'), Ctx::Any, Action::QuickJump, "Quick jump to note"),
     ctrl(KeyCode::Char('g'), Ctx::Any, Action::ShowOutline, "Outline panel"),
     ctrl(KeyCode::Char('k'), Ctx::Any, Action::ShowTasks, "Tasks: every open task in the vault"),
-    ctrl(KeyCode::Char('b'), Ctx::Any, Action::Backlinks, "Backlinks panel"),
     ctrl(KeyCode::Char('e'), Ctx::Any, Action::ShowExplorer, "Explorer: browse the vault"),
     ctrl(KeyCode::Char('o'), Ctx::Any, Action::RecentFiles, "Recent files"),
     ctrl(KeyCode::Char('v'), Ctx::Any, Action::VaultSwitcher, "Switch vault"),
     ctrl(KeyCode::Char('t'), Ctx::Any, Action::TagBrowser, "Tag browser"),
-    ctrl(KeyCode::Char('l'), Ctx::Any, Action::FollowLink, "Follow link at cursor"),
     ctrl(KeyCode::Char('p'), Ctx::Any, Action::TogglePreview, "Toggle preview"),
     k(KeyCode::F(2), Ctx::Any, Action::TogglePreview, "Toggle preview"),
     k(KeyCode::F(3), Ctx::Any, Action::ThemeBrowser, "Theme browser"),
@@ -746,18 +741,12 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
         Action::QuickJump => app.start_quick_jump(),
         Action::ShowOutline => app.show_outline(),
         Action::ShowTasks => app.show_task_panel(),
-        Action::Backlinks => app.show_backlinks_panel(),
         Action::RecentFiles => app.toggle_recent_files(),
         Action::VaultSwitcher => app.show_vault_switcher(),
         Action::TagBrowser => app.show_tag_browser(),
         Action::ThemeBrowser => app.show_theme_browser(),
         Action::DailyNote => app.open_daily_note(),
         Action::TogglePreview => app.toggle_preview(),
-        Action::FollowLink => {
-            if let Err(e) = app.follow_link_at_cursor() {
-                app.set_message(e);
-            }
-        }
 
         // --- search ---
         Action::SearchInNoteOrGlobal => {
@@ -900,8 +889,6 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                 if let Err(e) = app.save_current_note() {
                     app.set_message(e);
                 }
-                // Parse links when exiting insert mode
-                app.parse_current_note_links();
                 // Refresh spell errors after editing
                 app.run_spell_check();
             }
@@ -969,12 +956,6 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                     }
                     'd' => {
                         app.scroll_half_page_down();
-                    }
-                    'l' => {
-                        // Follow link at cursor (also works in insert mode)
-                        if let Err(e) = app.follow_link_at_cursor() {
-                            app.set_message(e);
-                        }
                     }
                     'v' => {
                         // Ctrl+V paste from system clipboard in insert mode
@@ -2004,32 +1985,6 @@ fn handle_tasks_mode(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn handle_backlinks_mode(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.cancel_backlinks();
-        }
-
-        KeyCode::Enter => {
-            app.open_selected_backlink();
-        }
-
-        KeyCode::Tab | KeyCode::BackTab => {
-            app.backlinks_toggle_focus();
-        }
-
-        KeyCode::Up | KeyCode::Char('k') => {
-            app.backlinks_navigate_up();
-        }
-
-        KeyCode::Down | KeyCode::Char('j') => {
-            app.backlinks_navigate_down();
-        }
-
-        _ => {}
-    }
-}
-
 fn handle_visual_mode(app: &mut App, key: KeyEvent) {
     let editor_focused = app.focused_pane == crate::app::FocusedPane::Editor;
     match key.code {
@@ -2268,8 +2223,11 @@ mod dispatch_tests {
         assert_eq!(app.mode, AppMode::RecentFiles, "Ctrl+O was swallowed by the 'o' open-line motion");
     }
 
+    /// Ctrl+B lost its binding when wiki links were retired. An unbound Ctrl chord
+    /// must still not fall through to the plain key — the modifier has to be part
+    /// of the match, or every freed chord silently becomes its own motion.
     #[test]
-    fn ctrl_b_opens_backlinks_even_when_editor_focused() {
+    fn an_unbound_ctrl_chord_does_not_fall_through_to_the_motion() {
         let mut app = editor_focused_app();
         let col_before = app.editor_cursor.1;
         press(&mut app, 'b', KeyModifiers::CONTROL);
@@ -2623,10 +2581,10 @@ mod dispatch_tests {
     #[test]
     fn ctrl_chords_resolve_identically_in_both_contexts() {
         for (c, expected) in [
-            ('b', Action::Backlinks),
             ('o', Action::RecentFiles),
             ('p', Action::TogglePreview),
-            ('l', Action::FollowLink),
+            ('g', Action::ShowOutline),
+            ('e', Action::ShowExplorer),
         ] {
             let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
             assert_eq!(lookup(&key, false, false), Some(expected), "Ctrl+{} in tree", c);

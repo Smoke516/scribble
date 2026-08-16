@@ -44,7 +44,6 @@ pub enum AppMode {
     ThemeBrowser,
     Rename,
     NoteSearch,
-    Backlinks,
     Visual,
     TemplatePicker,
     SpellSuggest,
@@ -55,12 +54,6 @@ pub enum AppMode {
     Explorer,
 }
 
-/// Which section of the links panel keyboard navigation currently acts on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BacklinkFocus {
-    Incoming,
-    Outgoing,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FocusedPane {
@@ -228,28 +221,6 @@ pub struct NoteSearchState {
     pub active: bool,
 }
 
-/// The links panel: notes pointing here, links pointing out, and which of the
-/// two sections keyboard navigation currently drives.
-#[derive(Debug)]
-pub struct LinksState {
-    pub incoming: Vec<(Uuid, String)>,
-    pub incoming_selected: usize,
-    pub outgoing: Vec<(Option<Uuid>, String)>,
-    pub outgoing_selected: usize,
-    pub focus: BacklinkFocus,
-}
-
-impl Default for LinksState {
-    fn default() -> Self {
-        Self {
-            incoming: Vec::new(),
-            incoming_selected: 0,
-            outgoing: Vec::new(),
-            outgoing_selected: 0,
-            focus: BacklinkFocus::Incoming,
-        }
-    }
-}
 
 /// One row of the "where you left off" list.
 #[derive(Debug, Clone)]
@@ -342,7 +313,6 @@ fn humanize_age(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
 }
 
 pub struct App {
-    pub links: LinksState,
     pub note_search: NoteSearchState,
     pub spell: SpellState,
     pub should_quit: bool,
@@ -488,7 +458,6 @@ pub struct App {
 
     // In-note search
 
-    // Backlinks panel
 
     // Outline panel
     pub outline_headings: Vec<(usize, u8, String)>, // (line_index, level, text)
@@ -570,7 +539,6 @@ impl App {
                 ..SpellState::default()
             },
             note_search: NoteSearchState::default(),
-            links: LinksState::default(),
             save_status: SaveStatus::Saved,
             disk: DiskState::default(),
             last_operation: None,
@@ -1532,108 +1500,11 @@ impl App {
         self.note_search.active = false;
     }
 
-    // -------------------------------------------------------------------------
-    // Backlinks panel
-    // -------------------------------------------------------------------------
 
-    /// Populate backlinks_cache for the current note and enter Backlinks mode.
-    pub fn show_backlinks_panel(&mut self) {
-        if self.current_note.is_none() {
-            self.set_message("No note selected".to_string());
-            return;
-        }
-        self.links.incoming = self.get_backlinks_for_current_note()
-            .into_iter()
-            .filter_map(|title| {
-                self.notebook.find_note_by_title(&title)
-                    .map(|id| (id, title))
-            })
-            .collect();
-        self.links.outgoing = self.get_outgoing_links_for_current_note();
-        if self.links.incoming.is_empty() && self.links.outgoing.is_empty() {
-            self.set_message("No links to or from this note".to_string());
-        } else {
-            self.links.incoming_selected = 0;
-            self.links.outgoing_selected = 0;
-            // Start focus on whichever section has entries (prefer incoming).
-            self.links.focus = if self.links.incoming.is_empty() {
-                BacklinkFocus::Outgoing
-            } else {
-                BacklinkFocus::Incoming
-            };
-            self.mode = AppMode::Backlinks;
-        }
-    }
 
-    pub fn cancel_backlinks(&mut self) {
-        self.mode = AppMode::Normal;
-    }
 
-    /// Toggle navigation focus between the incoming and outgoing sections,
-    /// but only when the other section actually has entries.
-    pub fn backlinks_toggle_focus(&mut self) {
-        self.links.focus = match self.links.focus {
-            BacklinkFocus::Incoming if !self.links.outgoing.is_empty() => BacklinkFocus::Outgoing,
-            BacklinkFocus::Outgoing if !self.links.incoming.is_empty() => BacklinkFocus::Incoming,
-            other => other,
-        };
-    }
 
-    pub fn backlinks_navigate_up(&mut self) {
-        match self.links.focus {
-            BacklinkFocus::Incoming => {
-                self.links.incoming_selected = self.links.incoming_selected.saturating_sub(1);
-            }
-            BacklinkFocus::Outgoing => {
-                self.links.outgoing_selected = self.links.outgoing_selected.saturating_sub(1);
-            }
-        }
-    }
 
-    pub fn backlinks_navigate_down(&mut self) {
-        match self.links.focus {
-            BacklinkFocus::Incoming => {
-                if self.links.incoming_selected < self.links.incoming.len().saturating_sub(1) {
-                    self.links.incoming_selected += 1;
-                }
-            }
-            BacklinkFocus::Outgoing => {
-                if self.links.outgoing_selected < self.links.outgoing.len().saturating_sub(1) {
-                    self.links.outgoing_selected += 1;
-                }
-            }
-        }
-    }
-
-    /// Open the link selected in whichever section currently has focus.
-    /// For an outgoing link whose target note doesn't exist yet, create it first.
-    pub fn open_selected_backlink(&mut self) {
-        match self.links.focus {
-            BacklinkFocus::Incoming => {
-                if let Some(note_id) = self.links.incoming.get(self.links.incoming_selected).map(|(id, _)| *id) {
-                    self.mode = AppMode::Normal;
-                    self.open_note_by_id(note_id);
-                }
-            }
-            BacklinkFocus::Outgoing => {
-                let Some((target_id, title)) = self.links.outgoing.get(self.links.outgoing_selected).cloned() else {
-                    return;
-                };
-                self.mode = AppMode::Normal;
-                match target_id {
-                    Some(id) => self.open_note_by_id(id),
-                    None => {
-                        // Broken link: create the missing note in the same folder, then
-                        // refresh links so the source note's link now resolves.
-                        let folder_id = self.current_note.as_ref().and_then(|n| n.folder_id);
-                        self.create_new_note(title.clone(), folder_id);
-                        self.notebook.rebuild_links();
-                        self.set_message(format!("Created note '{}'", title));
-                    }
-                }
-            }
-        }
-    }
 
     // -------------------------------------------------------------------------
     // Outline panel
@@ -2310,83 +2181,6 @@ mod persistence_tests {
     }
 }
 
-#[cfg(test)]
-mod backlink_graph_tests {
-    use super::*;
-    use crate::models::Note;
-
-    /// Build an app holding `source` (which links out via `[[..]]` in its content)
-    /// with `source` loaded as the current note and its links parsed.
-    fn app_with_source(content: &str) -> (App, Uuid) {
-        let mut app = App::default();
-        let mut source = Note::new("Source".to_string(), None);
-        source.content = content.to_string();
-        let sid = source.id;
-        app.notebook.add_note(source.clone());
-        app.current_note = Some(source);
-        app.notebook.rebuild_links();
-        (app, sid)
-    }
-
-    #[test]
-    fn outgoing_link_to_existing_note_resolves_and_opens() {
-        let (mut app, _) = app_with_source("see [[Target]] for details");
-        let target = Note::new("Target".to_string(), None);
-        let tid = target.id;
-        app.notebook.add_note(target);
-        app.notebook.rebuild_links();
-
-        app.show_backlinks_panel();
-        assert_eq!(app.mode, AppMode::Backlinks);
-        // Incoming empty, so focus lands on the outgoing section.
-        assert_eq!(app.links.focus, BacklinkFocus::Outgoing);
-        assert_eq!(app.links.outgoing, vec![(Some(tid), "Target".to_string())]);
-
-        app.open_selected_backlink();
-        assert_eq!(app.mode, AppMode::Normal);
-        assert_eq!(app.current_note.as_ref().unwrap().id, tid);
-    }
-
-    #[test]
-    fn opening_broken_outgoing_link_creates_the_missing_note() {
-        let (mut app, sid) = app_with_source("a link to [[Ghost]]");
-
-        app.show_backlinks_panel();
-        // Target doesn't exist yet → flagged as broken (None id).
-        assert_eq!(app.links.outgoing, vec![(None, "Ghost".to_string())]);
-
-        app.open_selected_backlink();
-
-        // The missing note now exists and the source link resolves to it.
-        let ghost_id = app.notebook.find_note_by_title("Ghost");
-        assert!(ghost_id.is_some(), "broken link should create the note");
-        let resolved: Vec<_> = app.notebook.get_outgoing_links(sid)
-            .iter()
-            .map(|l| l.target_note_id)
-            .collect();
-        assert_eq!(resolved, vec![ghost_id]);
-    }
-
-    #[test]
-    fn duplicate_outgoing_links_are_deduped_by_title() {
-        let (mut app, _) = app_with_source("[[Target]] and again [[target]]");
-        app.notebook.add_note(Note::new("Target".to_string(), None));
-        app.notebook.rebuild_links();
-
-        let outgoing = app.get_outgoing_links_for_current_note();
-        assert_eq!(outgoing.len(), 1, "case-insensitive duplicate titles collapse to one");
-    }
-
-    #[test]
-    fn tab_only_switches_focus_to_a_non_empty_section() {
-        let (mut app, _) = app_with_source("links to [[Ghost]]");
-        app.show_backlinks_panel();
-        // No incoming links, so Tab must keep focus on outgoing.
-        assert_eq!(app.links.focus, BacklinkFocus::Outgoing);
-        app.backlinks_toggle_focus();
-        assert_eq!(app.links.focus, BacklinkFocus::Outgoing);
-    }
-}
 
 #[cfg(test)]
 mod outline_and_task_tests {

@@ -425,7 +425,6 @@ fn print_help() {
     println!("  • 📝 Rich markdown editing with live preview");
     println!("  • 🗂️  Hierarchical folder organization");
     println!("  • 🔍 Fuzzy search and quick jump navigation");
-    println!("  • 🔗 Wiki-style [[note linking]]");
     println!("  • ⚡ Auto-save and intelligent autocompletion");
     println!("  • 🎨 Beautiful Tokyo Night theme");
     println!("  • 🚀 Vim-inspired keybindings\n");
