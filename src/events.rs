@@ -1762,18 +1762,7 @@ fn handle_vault_switcher_mode(app: &mut App, key: KeyEvent) {
         }
         
         KeyCode::Enter => {
-            // Note: Actual vault switching would need to be implemented
-            // in the main loop since it requires reinitializing storage
-            if let Some(vault) = app.get_selected_vault() {
-                app.set_operation_info(
-                    format!("Vault selected: {}\nRestart scribble with: scribble --vault {:?}", 
-                        vault.file_name().unwrap_or_default().to_string_lossy(),
-                        vault
-                    ),
-                    Some("📁".to_string())
-                );
-            }
-            app.cancel_vault_switcher();
+            app.request_vault_switch();
         }
         
         KeyCode::Up | KeyCode::Char('k') => {
@@ -1790,16 +1779,7 @@ fn handle_vault_switcher_mode(app: &mut App, key: KeyEvent) {
                 let index = (digit as usize).saturating_sub(1);
                 if index < app.available_vaults.len() {
                     app.vault_switcher_selected = index;
-                    if let Some(vault) = app.get_selected_vault() {
-                        app.set_operation_info(
-                            format!("Vault selected: {}\nRestart scribble with: scribble --vault {:?}", 
-                                vault.file_name().unwrap_or_default().to_string_lossy(),
-                                vault
-                            ),
-                            Some("📁".to_string())
-                        );
-                    }
-                    app.cancel_vault_switcher();
+                    app.request_vault_switch();
                 }
             }
         }

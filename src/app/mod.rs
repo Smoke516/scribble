@@ -179,6 +179,9 @@ pub struct DiskState {
     pub force_full_save: bool,
     /// Folder directories to move/rename on disk: (old relative path, new).
     pub pending_folder_relocations: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+    /// A vault to switch to. The main loop owns storage, so switching has to be
+    /// requested rather than done here — the same shape as the relocations above.
+    pub pending_vault_switch: Option<std::path::PathBuf>,
 }
 
 impl DiskState {

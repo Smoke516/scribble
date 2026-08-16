@@ -217,7 +217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| config.vaults.default.clone());
     
     // Initialize storage based on mode
-    let storage: Box<dyn storage::NotebookStorage> = if let Some(vault_path) = final_vault_path.clone() {
+    let mut storage: Box<dyn storage::NotebookStorage> = if let Some(vault_path) = final_vault_path.clone() {
         // Initialize file watcher for vault mode
         app.initialize_file_watcher(vault_path.clone());
         
@@ -359,6 +359,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.mark_disk_saved();
                 }
                 Err(e) => app.report_save_failure(e.to_string()),
+            }
+        }
+
+        // Switch vaults. This runs after the save block on purpose: whatever is
+        // still owed goes to the vault we are leaving, not the one we are joining.
+        if let Some(target) = app.disk.pending_vault_switch.take() {
+            // The save block above only runs when a write is pending, and a
+            // force_full_save can leave work behind, so flush explicitly rather
+            // than assuming. Losing edits to the old vault would be the worst
+            // possible outcome of changing which vault you are looking at.
+            if app.disk.has_pending_work() {
+                let dirty: Vec<_> = app.disk.dirty_note_ids.iter().copied().collect();
+                let flushed = if app.disk.force_full_save {
+                    storage
+                        .save_notebook(&app.notebook)
+                        .map(|_| storage::SaveReport::default())
+                } else {
+                    storage.save_incremental(&app.notebook, &dirty, &app.disk.deleted_note_paths)
+                };
+                if let Err(e) = flushed {
+                    app.report_save_failure(format!("{} — vault not switched", e));
+                    continue;
+                }
+            }
+
+            // Build the new storage before giving anything up: a vault that has
+            // been unmounted or deleted should leave you where you were, with a
+            // message, rather than in a half-switched state.
+            use storage::NotebookStorage as _;
+            match storage::VaultStorage::new(target.clone())
+                .and_then(|s| s.load_notebook().map(|nb| (s, nb)))
+            {
+                Ok((new_storage, notebook)) => {
+                    storage = Box::new(new_storage);
+                    app.initialize_file_watcher(target.clone());
+                    app.adopt_vault(target.clone(), notebook);
+
+                    // Remember it, so the next plain `scribble` opens this vault.
+                    // Nothing wrote `vaults.default` before, which is why picking a
+                    // vault and restarting appeared to do nothing at all.
+                    config.vaults.default = Some(target.clone());
+                    config.add_recent_vault(target);
+                    app.initialize_available_vaults(&config);
+                    if let Err(e) = config.save() {
+                        app.set_message(format!("Switched, but could not save config: {}", e));
+                    }
+                }
+                Err(e) => app.set_message(format!("Could not open that vault: {}", e)),
             }
         }
 

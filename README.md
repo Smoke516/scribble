@@ -305,6 +305,9 @@ Once started, press '?' for in-app help.
 
 ### 📁 Obsidian Vault Integration
 - **Access:** Press `Ctrl+V` to switch between vaults
+- Switching happens immediately — no restart. Anything unsaved is written to the
+  vault you are leaving first, and the vault you pick becomes the default, so a
+  plain `scribble` next time opens it
 - **Auto-detection:** Automatically finds Obsidian vaults in current/parent directories
 - **Full Compatibility:** Seamlessly work with existing Obsidian vaults
 - **YAML Support:** Preserves all metadata and frontmatter
