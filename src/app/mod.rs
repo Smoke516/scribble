@@ -1692,14 +1692,23 @@ impl App {
         self.mark_modified();
     }
 
-    /// Open today's daily note (`YYYY-MM-DD`), creating it at the root if absent.
+    /// Open today's daily note, creating it if absent.
+    ///
+    /// Title and folder come from `[capture]`, the same settings `scribble --today`
+    /// uses, so the two entry points can never disagree about which file today's
+    /// note is. They default to `YYYY-MM-DD` at the vault root, which is what this
+    /// has always done.
     pub fn open_daily_note(&mut self) {
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let today = chrono::Local::now()
+            .format(&self.config.capture.daily_format)
+            .to_string();
         if let Some(id) = self.notebook.find_note_by_title(&today) {
             self.open_note_by_id(id);
             self.set_message(format!("Daily note: {}", today));
         } else {
-            self.create_new_note(today.clone(), None);
+            let folder = self.config.capture.daily_folder.clone();
+            let folder_id = crate::capture::daily_folder_id(&mut self.notebook, &folder);
+            self.create_new_note(today.clone(), folder_id);
             self.focused_pane = FocusedPane::Editor;
             self.set_message(format!("Created daily note: {}", today));
         }
