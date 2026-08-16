@@ -1577,7 +1577,7 @@ fn draw_move_dialog(f: &mut Frame, app: &mut App) {
 
     // Trim the name rather than the key hints: the hints are the part you need
     // when you have never used this dialog before.
-    let hints = "Enter here · h/l fold · Esc";
+    let hints = "Enter here · ~ root · h/l fold · Esc";
     let room = (chunks[0].width as usize).saturating_sub(hints.len() + 10);
     let what = if what.chars().count() > room && room > 1 {
         format!("{}…", what.chars().take(room - 1).collect::<String>())
@@ -1687,6 +1687,7 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from("  u          Undo last delete                dd   Delete line (editor)"),
         Line::from("  Enter      Open note / expand folder"),
         Line::from("  q          Close note → landing page      Q    Quit immediately"),
+        Line::from("  m          Move: j/k pick a folder · ~ vault root · Enter drop · Esc cancel"),
         Line::from("  Pin the sidebar back with  show_sidebar = true  under [ui] in config.toml"),
         Line::from(""),
 

@@ -1458,10 +1458,23 @@ fn handle_move_mode(app: &mut App, key: KeyEvent) {
                 app.cancel_move();
             }
         }
-        
+
+        // The vault root is not a row in the tree, so it needs a key of its own.
+        // Aiming at a root-level note happens to work, but fails outright in a
+        // vault that has none — leaving nothing to move back out of a folder to.
+        KeyCode::Char('~') => {
+            if let Err(e) = app.execute_move_to_root() {
+                app.set_message(e);
+                app.cancel_move();
+            }
+        }
+
         // Help in move mode
         KeyCode::Char('?') => {
-            app.set_message("Move mode: j/k=navigate, Enter=move to selected location, Esc=cancel".to_string());
+            app.set_message(
+                "Move mode: j/k navigate · h/l fold · Enter drop here · ~ vault root · Esc cancel"
+                    .to_string(),
+            );
         }
         
         _ => {}
