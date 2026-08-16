@@ -127,12 +127,23 @@ impl App {
         self.input_buffer.clear();
     }
 
-    /// Tags on the currently open note.
+    /// Tags on the currently open note, from both places a tag can be written.
+    ///
+    /// Reading only the frontmatter field meant the tag dialog could tell you a
+    /// note had no tags while the browser and the palette both listed the
+    /// `#hashtags` in its body — the same disagreement, in the one place you would
+    /// go to check.
     pub fn current_note_tags(&self) -> Vec<String> {
-        self.current_note
-            .as_ref()
-            .map(|n| n.tags.clone())
-            .unwrap_or_default()
+        let Some(note) = self.current_note.as_ref() else {
+            return Vec::new();
+        };
+        let mut tags: Vec<String> = self
+            .tag_manager
+            .extract_tags_from_note(note)
+            .into_iter()
+            .collect();
+        tags.sort();
+        tags
     }
 
     /// Remove the most recently added tag (Backspace on an empty input).
@@ -208,4 +219,56 @@ impl App {
     }
     
     // Theme management methods
+}
+
+#[cfg(test)]
+mod tag_visibility_tests {
+    use super::*;
+    use crate::models::Note;
+
+    fn app_with_note(tags: &[&str], content: &str) -> App {
+        let mut app = App::default();
+        app.notebook.notes.clear();
+        app.notebook.folders.clear();
+        let mut note = Note::new("N".to_string(), None);
+        note.tags = tags.iter().map(|t| t.to_string()).collect();
+        note.content = content.to_string();
+        app.notebook.add_note(note.clone());
+        app.current_note = Some(note);
+        app
+    }
+
+    /// The dialog used to read only the frontmatter field, so it could report no
+    /// tags on a note the browser and palette both listed as tagged.
+    #[test]
+    fn the_open_notes_tags_include_inline_hashtags() {
+        let app = app_with_note(&["work"], "some body with #idea in it\n");
+        assert_eq!(app.current_note_tags(), vec!["idea", "work"]);
+    }
+
+    #[test]
+    fn a_tag_written_both_ways_is_listed_once() {
+        let app = app_with_note(&["work"], "text #work\n");
+        assert_eq!(app.current_note_tags(), vec!["work"]);
+    }
+
+    #[test]
+    fn an_untagged_note_has_no_tags() {
+        let app = app_with_note(&[], "plain text\n");
+        assert!(app.current_note_tags().is_empty());
+    }
+
+    /// Code comments are not tags, here as everywhere else.
+    #[test]
+    fn a_hashtag_inside_a_code_fence_is_not_listed() {
+        let app = app_with_note(&[], "```\n# not a tag\nx = 1  #result\n```\n");
+        assert!(app.current_note_tags().is_empty());
+    }
+
+    #[test]
+    fn with_no_note_open_there_are_no_tags() {
+        let mut app = App::default();
+        app.current_note = None;
+        assert!(app.current_note_tags().is_empty());
+    }
 }
