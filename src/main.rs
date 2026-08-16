@@ -362,6 +362,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        // Hand the note to the external editor. After the save block, so the file
+        // it opens is what was on screen rather than the last flushed version.
+        if app.disk.pending_external_edit {
+            app.disk.pending_external_edit = false;
+
+            let target = app
+                .current_note
+                .as_ref()
+                .and_then(|n| n.file_path.clone().map(|p| (n.id, p)));
+
+            match (target, app.external_editor.clone()) {
+                (Some((id, path)), Some(editor)) => {
+                    // The real file in the vault, not a copy in /tmp. The moment
+                    // you reach for a full editor is the moment you want its file
+                    // tree, its git status and its search to see where the note
+                    // actually lives — and its frontmatter, so tags are editable
+                    // there too.
+                    match app::run_external_editor(&editor, &path) {
+                        // Reload rather than trusting our buffer: the file may have
+                        // gained frontmatter edits, and the note's disk stamp has to
+                        // match what is now on disk or the next save would treat our
+                        // own handoff as somebody else's write.
+                        Ok(()) => app.reload_note_from_disk(id, &path),
+                        Err(e) => app.set_message(e),
+                    }
+                    app.just_returned_from_editor = true;
+                }
+                (None, _) => app.set_message(
+                    "This note has no file yet — save it before editing externally".to_string(),
+                ),
+                (_, None) => app.set_message("No external editor configured".to_string()),
+            }
+        }
+
         // Switch vaults. This runs after the save block on purpose: whatever is
         // still owed goes to the vault we are leaving, not the one we are joining.
         if let Some(target) = app.disk.pending_vault_switch.take() {

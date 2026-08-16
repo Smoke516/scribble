@@ -33,24 +33,6 @@ pub(crate) fn command_exists(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn create_temp_file(title: &str, content: &str) -> std::io::Result<std::path::PathBuf> {
-    use std::io::Write;
-    
-    let temp_dir = std::env::temp_dir();
-    let sanitized_title = title.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
-        .collect::<String>();
-    
-    let temp_file = temp_dir.join(format!("scribble_{}_{}.md", 
-        sanitized_title, 
-        std::process::id()));
-    
-    let mut file = std::fs::File::create(&temp_file)?;
-    file.write_all(content.as_bytes())?;
-    file.flush()?;
-    
-    Ok(temp_file)
-}
 
 pub fn sanitize_filename(filename: &str) -> String {
     filename
@@ -96,49 +78,44 @@ pub(crate) fn parse_datetime(date_str: &str) -> Option<chrono::DateTime<chrono::
     None
 }
 
-pub(crate) fn run_external_editor(editor: &str, file_path: &std::path::PathBuf) -> Result<(), String> {
+/// Hand the terminal to `editor` for the duration, then take it back.
+///
+/// Scribble lives on the alternate screen with raw mode, mouse capture and
+/// bracketed paste on. All of that has to come off before another full-screen
+/// program runs, or the editor draws over scribble's screen and receives mouse
+/// and paste sequences it never asked for. Leaving the alternate screen also puts
+/// the editor session where the user expects it — on the normal screen, with
+/// their scrollback.
+///
+/// Every step is best-effort on the way back: if one fails, the rest must still
+/// run, or the terminal is left in a worse state than the error being reported.
+pub(crate) fn run_external_editor(editor: &str, file_path: &std::path::Path) -> Result<(), String> {
     use crossterm::{
         execute,
-        terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
-        cursor::Show
+        event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     };
     use std::io::{stdout, Write};
-    
-    // Fully reset terminal to normal mode
-    let mut stdout = stdout();
-    
-    // Disable raw mode first
-    disable_raw_mode().map_err(|e| format!("Failed to disable raw mode: {}", e))?;
-    
-    // Clear screen and show cursor
-    execute!(stdout, Clear(ClearType::All), Show)
-        .map_err(|e| format!("Failed to clear screen: {}", e))?;
-    
-    // Flush to ensure terminal is ready
-    stdout.flush().map_err(|e| format!("Failed to flush stdout: {}", e))?;
-    
-    // Run the external editor with proper stdio inheritance
+
+    let mut out = stdout();
+    let _ = disable_raw_mode();
+    let _ = execute!(out, DisableMouseCapture, DisableBracketedPaste, LeaveAlternateScreen);
+    let _ = out.flush();
+
     let status = std::process::Command::new(editor)
         .arg(file_path)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
-        .status()
-        .map_err(|e| format!("Failed to start {}: {}", editor, e))?;
-    
-    // Give terminal a moment to settle after editor exits
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    
-    // Re-enable raw mode for TUI
-    enable_raw_mode().map_err(|e| format!("Failed to re-enable raw mode: {}", e))?;
-    
-    // Clear and reset for our TUI
-    execute!(stdout, Clear(ClearType::All))
-        .map_err(|e| format!("Failed to clear screen for TUI: {}", e))?;
-    
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{} exited with code {:?}", editor, status.code()))
+        .status();
+
+    let _ = enable_raw_mode();
+    let _ = execute!(out, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste);
+    let _ = out.flush();
+
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("{} exited with code {:?}", editor, s.code())),
+        Err(e) => Err(format!("Failed to start {}: {}", editor, e)),
     }
 }

@@ -103,51 +103,80 @@ impl App {
         self.editor_cursor.1 = lines.last().unwrap_or(&"").len() as u16;
     }
 
-    pub fn open_in_external_editor(&mut self) -> Result<(), String> {
-        if let Some(ref note) = self.current_note {
-            if let Some(ref editor) = self.external_editor {
-                // Create a temporary file with the note content
-                let temp_path = create_temp_file(&note.title, &note.content)
-                    .map_err(|e| format!("Failed to create temp file: {}", e))?;
-                
-                // Save the current terminal state and run the external editor
-                let result = run_external_editor(editor, &temp_path);
-                
-                match result {
-                    Ok(()) => {
-                        // Read the content back from the temp file
-                        match std::fs::read_to_string(&temp_path) {
-                            Ok(new_content) => {
-                                self.editor_content = new_content;
-                                // Auto-save the changes
-                                if let Err(e) = self.save_current_note() {
-                                    self.set_message(format!("Failed to save: {}", e));
-                                } else {
-                                    self.set_message("✅ Note updated from external editor".to_string());
-                                }
-                                // Set flag to indicate we just returned from external editor
-                                self.just_returned_from_editor = true;
-                            }
-                            Err(e) => {
-                                self.set_message(format!("Failed to read edited file: {}", e));
-                            }
-                        }
-                        
-                        // Clean up temp file
-                        let _ = std::fs::remove_file(&temp_path);
-                    }
-                    Err(e) => {
-                        self.set_message(format!("External editor failed: {}", e));
-                        let _ = std::fs::remove_file(&temp_path);
-                    }
-                }
-                
-                Ok(())
-            } else {
-                Err("No external editor configured".to_string())
-            }
-        } else {
-            Err("No note selected".to_string())
+    /// Hand the open note to the external editor.
+    ///
+    /// Requested rather than performed here: the buffer does not reach the disk
+    /// until the main loop's save runs, and an editor opened before that would
+    /// show the last saved version and then have its work overwritten on return.
+    pub fn request_external_edit(&mut self) -> Result<(), String> {
+        if self.current_note.is_none() {
+            return Err("No note selected".to_string());
         }
+        if self.external_editor.is_none() {
+            return Err("No external editor configured".to_string());
+        }
+        // Fold the buffer into the note and queue the write the editor will read.
+        self.save_current_note()?;
+        self.disk.pending_external_edit = true;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod external_editor_tests {
+    use super::*;
+    use crate::models::Note;
+
+    fn app_editing(content: &str) -> App {
+        let mut app = App::default();
+        app.notebook.notes.clear();
+        let mut note = Note::new("N".to_string(), None);
+        note.content = content.to_string();
+        app.notebook.add_note(note.clone());
+        app.current_note = Some(note);
+        app.editor_content = content.to_string();
+        app.external_editor = Some("true".to_string()); // a command that exits 0
+        app
+    }
+
+    /// The editor must read what is on screen. The buffer only reaches the disk
+    /// via the main loop's save, so the request has to fold it into the note and
+    /// queue that write before the handoff happens.
+    #[test]
+    fn requesting_an_edit_queues_the_buffer_for_writing_first() {
+        let mut app = app_editing("original");
+        app.editor_content = "typed but not saved".to_string();
+
+        app.request_external_edit().unwrap();
+
+        let id = app.current_note.as_ref().unwrap().id;
+        assert_eq!(
+            app.notebook.notes.get(&id).unwrap().content,
+            "typed but not saved",
+            "the buffer was not folded into the note"
+        );
+        assert!(app.disk.dirty_note_ids.contains(&id), "no write was queued");
+        assert!(app.disk.pending_disk_save, "the write was not requested");
+        assert!(app.disk.pending_external_edit, "the handoff was not requested");
+    }
+
+    /// Requested, not performed — the main loop owns the flush and the terminal.
+    #[test]
+    fn requesting_an_edit_does_not_launch_anything_itself() {
+        let mut app = app_editing("x");
+        app.request_external_edit().unwrap();
+        assert!(!app.just_returned_from_editor, "the handoff ran inside the request");
+    }
+
+    #[test]
+    fn an_edit_needs_a_note_and_an_editor() {
+        let mut app = app_editing("x");
+        app.current_note = None;
+        assert!(app.request_external_edit().is_err(), "edited with no note open");
+
+        let mut app = app_editing("x");
+        app.external_editor = None;
+        assert!(app.request_external_edit().is_err(), "edited with no editor configured");
+        assert!(!app.disk.pending_external_edit, "a handoff was queued anyway");
     }
 }

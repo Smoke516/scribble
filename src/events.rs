@@ -735,7 +735,7 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
             }
         }
         Action::ExternalEditor => {
-            if let Err(e) = app.open_in_external_editor() {
+            if let Err(e) = app.request_external_edit() {
                 app.set_message(e);
             }
         }
