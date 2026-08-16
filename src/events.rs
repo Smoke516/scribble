@@ -2673,6 +2673,52 @@ mod dispatch_tests {
     ///
     /// The source is pulled in with `include_str!` rather than restructuring 251
     /// lines of carefully aligned UI into data.
+    /// The palette prints the chord each command already has, so it teaches the
+    /// shortcut rather than replacing it — which only works if the chord it prints
+    /// is the one the keymap actually binds. It drifted the moment Ctrl+P moved
+    /// from the preview toggle to the palette, and a screenshot caught it rather
+    /// than a test.
+    #[test]
+    fn every_palette_command_prints_the_chord_the_keymap_binds() {
+        use crate::palette::Command;
+
+        // The action each palette command stands for, where the keymap has one.
+        let pairs = [
+            (Command::DailyNote, Action::DailyNote),
+            (Command::Tasks, Action::ShowTasks),
+            (Command::Outline, Action::ShowOutline),
+            (Command::Explorer, Action::ShowExplorer),
+            (Command::RecentFiles, Action::RecentFiles),
+            (Command::TagBrowser, Action::TagBrowser),
+            (Command::ThemeBrowser, Action::ThemeBrowser),
+            (Command::VaultSwitcher, Action::VaultSwitcher),
+            (Command::TogglePreview, Action::TogglePreview),
+            (Command::SaveNote, Action::SaveNote),
+        ];
+
+        for (cmd, action) in pairs {
+            let bound: Vec<String> = NORMAL_BINDINGS
+                .iter()
+                .filter(|b| b.action == action)
+                .filter_map(|b| match (b.code, b.mods) {
+                    (KeyCode::Char(c), KeyModifiers::CONTROL) => {
+                        Some(format!("Ctrl+{}", c.to_ascii_uppercase()))
+                    }
+                    (KeyCode::F(n), _) => Some(format!("F{}", n)),
+                    (KeyCode::Char(c), KeyModifiers::NONE) => Some(c.to_string()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                bound.iter().any(|k| k == cmd.chord()),
+                "palette shows {:?} for {:?}, but the keymap binds {:?}",
+                cmd.chord(),
+                cmd,
+                bound
+            );
+        }
+    }
+
     #[test]
     fn every_ctrl_chord_and_fkey_is_documented_in_help() {
         const UI_SRC: &str = include_str!("ui.rs");
