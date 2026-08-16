@@ -1,8 +1,8 @@
-# Scribble ✏️ v2.1.0
+# Scribble ✏️ v3.0.0
 
-A powerful terminal-based note-taking app with advanced tag management, Obsidian vault integration, real-time file watching, folder organization, markdown support, and syntax highlighting.
+A terminal note-taking app for Obsidian-style markdown vaults. Fast to open, quick to capture into, vim-like to edit, and careful never to overwrite work it did not write.
 
-![Version](https://img.shields.io/badge/version-2.1.0-brightgreen)
+![Version](https://img.shields.io/badge/version-3.0.0-brightgreen)
 ![Terminal Interface](https://img.shields.io/badge/interface-terminal-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)
@@ -13,7 +13,7 @@ A powerful terminal-based note-taking app with advanced tag management, Obsidian
 ### Core Features
 - **🏷️ Advanced Tag System** - Comprehensive tag management with YAML frontmatter and inline hashtag support (`Ctrl+T`)
 - **📁 Obsidian Vault Integration** - Native compatibility with Obsidian vaults and seamless vault switching (`Ctrl+V`)
-- **🔄 Real-time File Watching** - Live sync with external changes and file system monitoring
+- **🔄 Safe by default** - A note changed on disk is picked up when you have nothing unsaved, and preserved beside yours when you do — scribble never overwrites a file it cannot account for
 - **📁 Folder organization** - Hierarchical folder structure to organize your notes
 - **📝 Markdown support** - Write notes in markdown with live syntax highlighting
 - **🎨 Theme System** - Multiple beautiful themes with interactive browser (`F3` or `:theme list`)
@@ -29,7 +29,7 @@ A powerful terminal-based note-taking app with advanced tag management, Obsidian
 - **🎨 Theme Browser** - Interactive theme selection with live preview (`F3` or `:theme list`)
 - **✏️ Quick Rename** - Rename folders and notes instantly with `r` key
 - **📁 Vault Management** - Switch between multiple Obsidian vaults instantly (`Ctrl+V`)
-- **🔔 Change Notifications** - Real-time alerts for external file modifications
+- **⚡ Quick capture** - `scribble -n "buy milk"` or `scribble -t "..."` writes a note from the shell without opening the app
 - **🔍 Fuzzy Search** - Intelligent search that finds matches even with typos (`Ctrl+F`)
 - **⚡ Quick Jump** - Instant note navigation with `Ctrl+J` - like VS Code's quick open
 - **🗂️ Outline Panel** - Jump to any heading in the current note (`Ctrl+G`)
@@ -43,7 +43,6 @@ A powerful terminal-based note-taking app with advanced tag management, Obsidian
 - **🔁 Search & Replace** - Find-and-replace across notes (`Ctrl+R`)
 - **📑 Templates** - Create notes from Blank/Daily/Meeting/Project templates (`N`)
 - **💾 Session Persistence** - Remembers your last opened note and editor state
-- **🆔 Version Display** - Always know what version you're running (`--version` or in-app help)
 - **🎯 Smart Autocompletion** - Intelligent markdown completion with context awareness
 - **📖 Scrollable Help** - Navigate help with `j/k`, `g/G`, PageUp/Down (`?`)
 
@@ -127,7 +126,7 @@ cargo install --path .
 ```bash
 # Check version
 scribble --version
-# Output: scribble 2.1.0
+# Output: scribble 3.0.0
 
 # View help
 scribble --help
@@ -195,7 +194,7 @@ timestamp_entries = true    # prefix each entry with HH:MM
 
 ### Command Line Help Output
 ```
-scribble v2.1.0
+scribble v3.0.0
 
 A powerful terminal-based note-taking app with folder organization,
 markdown support, and syntax highlighting.
@@ -231,7 +230,7 @@ Once started, press '?' for in-app help.
    ```
 
 2. **First time setup:**
-   - The app starts with an enhanced welcome screen showing version 2.1.0
+   - The app starts with a landing page showing recent notes, open tasks and today's note
    - The welcome screen provides organized quick-start categories:
      - 📝 **Creating Content**: `n` (new note), `f` (folder), `i` (edit)
      - 🧭 **Navigation**: `Tab` (switch panes), `j/k` (move), `Enter` (open)
@@ -255,68 +254,40 @@ Once started, press '?' for in-app help.
    - Supports Helix (`hx`), Neovim, Vim, and more
    - Changes are automatically saved back to Scribble
 
-## 🆕 What's New in v2.1.0
+## 🆕 What's New in v3.0.0
 
-### 🗂️ Outline Panel (`Ctrl+G`)
-- Jump to any heading in the current note; navigate with `j/k`, `Enter` to jump
-- Skips headings inside fenced code blocks
+### 🔦 Go to — one door for finding anything (`Ctrl+P`)
+There were six ways to find a note. Now there is one door in front of all of
+them: notes, tags, headings and commands, ranked together. `>` commands, `#`
+tags, `?` full text, `@` headings. The original six still work as shortcuts.
 
-### ☑️ Task Checkboxes (`Space`)
-- Toggle `- [ ]` / `- [x]` on the current editor line with a single keystroke
+### ⌨️ Real vim operators
+`d`, `c` and `y` compose with motions, text objects and counts — `dw`, `ciw`,
+`d$`, `3dd`, `d3w`, `dG`, `daw`, and `D`/`C`/`Y`. Counts work on plain motions
+too, and a yank remembers whether it was linewise.
 
-### 📅 Daily Notes (`F4` or `:daily`)
-- Open or create today's `YYYY-MM-DD` note in one step (no duplicates)
+### ☑️ Task panel (`Ctrl+K`)
+Every open task in the vault in one list, grouped by note. `Enter` jumps to it,
+`Space` ticks it where it lives, `a` shows completed ones.
 
-### 🔎 Folder-scoped search (`Ctrl+A` → `folder:Name term`)
-- Restrict advanced search to a folder; an empty term lists the whole folder
+### ⚡ Quick capture from the shell
+`scribble -n "buy milk"`, `scribble -t "..."` to append to today's daily note,
+`scribble -t` to open it, or pipe stdin. Each prints the path it wrote.
 
-### 🐛 Fixes
-- Live preview decorations (heading underlines, code-block borders, horizontal
-  rules) now size to the pane width instead of wrapping into stray stub lines
-- Advanced search no longer hangs on an empty query
+### 📁 Live vault switching (`Ctrl+V`)
+Switches immediately instead of asking for a restart, and remembers your choice.
 
-## 🆕 What's New in v2.0.0
+### 🛡️ Your notes are not overwritten
+Scribble assumes it is not the only thing writing to your vault. It never
+overwrites a file it cannot account for — see
+[External Changes and Conflicts](#external-changes-and-conflicts).
 
-### 🎨 Theme System
-- **Access:** Press `F3` or use `:theme list` to open the theme browser
-- **11 Themes:** Tokyo Night, Gruvbox (Dark/Light), Dracula, Nord, Solarized (Dark/Light), Monokai, One Dark, Catppuccin, and Ayu
-- **Live Preview:** See theme changes instantly as you navigate
-- **Persistent:** Theme selection is saved across sessions
-- **Commands:** `:theme <name>` to switch directly, `:theme current` to see active theme
-- **See:** [THEMES.md](THEMES.md) for complete theme showcase
+### ⚠️ Breaking
+- **Wiki links removed.** `[[ ]]` parsing, the backlinks panel, `[[`
+  autocomplete, `Ctrl+B` and `Ctrl+L` are gone. Note content is untouched.
+- **`Ctrl+P` is now the Go to palette.** Live preview keeps `F2`.
 
-### ✏️ Quick Rename
-- **Access:** Press `r` on any folder or note
-- **Smart Validation:** Prevents duplicate names at the same level
-- **Live Feedback:** Shows old and new names side-by-side
-- **Safe Updates:** Properly updates all references when renaming
-
-### 📖 Scrollable Help System
-- **Navigation:** Use `j/k`, arrow keys, `g/G`, PageUp/PageDown in help dialog
-- **Organized:** Well-structured sections for easy reference
-- **Complete:** All features and shortcuts documented in-app
-
-### 🏷️ Advanced Tag Management
-- **Access:** Press `Ctrl+T` to open the tag browser
-- **Dual Support:** Use YAML frontmatter (`tags: [work, project]`) or inline hashtags (`#work #project`)
-- **Smart Filtering:** Filter notes by single or multiple tags
-- **Analytics:** View tag frequency and usage statistics
-- **Quick Selection:** Use number keys (1-9) for instant tag selection
-
-### 📁 Obsidian Vault Integration
-- **Access:** Press `Ctrl+V` to switch between vaults
-- Switching happens immediately — no restart. Anything unsaved is written to the
-  vault you are leaving first, and the vault you pick becomes the default, so a
-  plain `scribble` next time opens it
-- **Auto-detection:** Automatically finds Obsidian vaults in current/parent directories
-- **Full Compatibility:** Seamlessly work with existing Obsidian vaults
-- **YAML Support:** Preserves all metadata and frontmatter
-
-### 🔄 Real-time File Watching
-- **Live Sync:** External file changes appear instantly
-- **Smart Notifications:** Visual alerts for file modifications
-- **Status Indicators:** File watcher status shown in status bar
-- **Multi-format Support:** Handles create, modify, delete, and rename events
+Earlier releases are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Usage
 
@@ -478,7 +449,6 @@ Either way, changes are written to disk continuously — on edit, on a periodic 
 - `e` - Open in external editor
 - `/` - Search
 <<<<<<< HEAD
-- `Ctrl+B` - Links panel (backlinks + outgoing)
 - `Ctrl+P` - Go to: notes, tags, headings, commands
 =======
 >>>>>>> master
