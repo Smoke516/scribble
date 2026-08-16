@@ -408,6 +408,15 @@ code blocks
 
 ## External Editor Integration
 
+`e` hands the note to `$EDITOR` — the **real file in your vault**, frontmatter and
+all, so your editor's file tree, git status, project search and LSP all see where
+the note actually lives, and tags are editable there too. Anything unsaved is
+written first, and the note is reloaded when you come back.
+
+Scribble is the vault, not the text editor. Editing is a commodity that Helix and
+Neovim have spent fifteen years on; `e` is the deliberate line — anything that
+would be "make scribble's editor more like vim" is answered with `e` instead.
+
 Scribble can seamlessly integrate with your favorite external editor for enhanced editing capabilities.
 
 ### Supported Editors

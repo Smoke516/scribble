@@ -266,7 +266,7 @@ impl App {
 
     /// Replace a note with what is now on disk, refreshing the editor if that note
     /// happens to be open.
-    fn reload_note_from_disk(&mut self, note_id: uuid::Uuid, path: &std::path::Path) {
+    pub(crate) fn reload_note_from_disk(&mut self, note_id: uuid::Uuid, path: &std::path::Path) {
         let Some(vault) = self.vault_path.clone() else {
             return;
         };

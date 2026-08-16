@@ -22,6 +22,7 @@ mod theme;
 mod edit_ops;
 use helpers::*;
 pub use helpers::sanitize_filename;
+pub(crate) use helpers::run_external_editor;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppMode {
@@ -182,6 +183,10 @@ pub struct DiskState {
     /// A vault to switch to. The main loop owns storage, so switching has to be
     /// requested rather than done here — the same shape as the relocations above.
     pub pending_vault_switch: Option<std::path::PathBuf>,
+    /// Hand the open note to the external editor. Requested rather than done
+    /// here because the editor must read what is on screen, and the buffer does
+    /// not reach the disk until the main loop's save runs.
+    pub pending_external_edit: bool,
 }
 
 impl DiskState {
