@@ -1559,6 +1559,8 @@ fn paint_cursor_in_line(line: &mut Line<'_>, col: usize, cursor_style: Style) {
 fn draw_move_dialog(f: &mut Frame, app: &mut App) {
     let area = centered_rect(56, 76, f.area());
     f.render_widget(Clear, area);
+    // Opaque, like every other dialog — see draw_explorer_dialog.
+    f.render_widget(Block::default().style(TokyoNightTheme::popup()), area);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1608,6 +1610,12 @@ fn draw_move_dialog(f: &mut Frame, app: &mut App) {
 fn draw_explorer_dialog(f: &mut Frame, app: &mut App) {
     let area = centered_rect(52, 74, f.area());
     f.render_widget(Clear, area);
+    // draw_folder_tree styles itself for the sidebar, which sits on the app
+    // background and so sets no background of its own. As an overlay that leaves
+    // the note behind it showing through — and, on a transparent terminal, the
+    // desktop. Lay the popup background down first; the tree paints over it with
+    // foreground colours only, so it survives.
+    f.render_widget(Block::default().style(TokyoNightTheme::popup()), area);
     draw_folder_tree(f, app, area);
 }
 
