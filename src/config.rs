@@ -55,7 +55,10 @@ pub struct BehaviorConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptureConfig {
-    /// Vault-relative folder for daily notes. Empty means the vault root.
+    /// Vault-relative folder for *new* daily notes. Empty — the default — means the
+    /// vault root, which is where F4 has always put them. Existing daily notes are
+    /// found by title wherever they already live, so changing this never orphans
+    /// the ones you already have.
     pub daily_folder: String,
     /// strftime pattern for a daily note's title, resolved against *local* time —
     /// a daily note that rolls over at UTC midnight is the wrong day's note for
@@ -69,7 +72,7 @@ pub struct CaptureConfig {
 impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
-            daily_folder: "daily".to_string(),
+            daily_folder: String::new(),
             daily_format: "%Y-%m-%d".to_string(),
             timestamp_entries: true,
         }

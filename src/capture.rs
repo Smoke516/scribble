@@ -138,7 +138,7 @@ pub fn new_note(vault: &Path, text: &str) -> Result<PathBuf, CaptureError> {
 ///
 /// An empty `daily_folder` means the vault root, which is the escape hatch for
 /// anyone who does not want their dailies filed away.
-fn daily_folder_id(notebook: &mut NotebookData, folder_name: &str) -> Option<uuid::Uuid> {
+pub fn daily_folder_id(notebook: &mut NotebookData, folder_name: &str) -> Option<uuid::Uuid> {
     if folder_name.is_empty() {
         return None;
     }
@@ -172,17 +172,16 @@ pub fn today_note(
 
     let now = Local::now();
     let title = now.format(&config.capture.daily_format).to_string();
-    let folder_id = daily_folder_id(&mut notebook, &config.capture.daily_folder);
 
-    let existing = notebook
-        .notes
-        .values()
-        .find(|n| n.title == title && n.folder_id == folder_id)
-        .map(|n| n.id);
-
-    let id = match existing {
+    // Match by title wherever the note lives, exactly as F4 does in the app. Keying
+    // on the folder as well would mean that a daily note started with F4 (at the
+    // root) is invisible to `--today`, which would then cheerfully create a second
+    // note for the same day — and daily_folder could never be changed without
+    // orphaning every daily note already written.
+    let id = match notebook.find_note_by_title(&title) {
         Some(id) => id,
         None => {
+            let folder_id = daily_folder_id(&mut notebook, &config.capture.daily_folder);
             let mut note = Note::new(title, folder_id);
             note.content = String::new();
             let id = note.id;
@@ -304,8 +303,11 @@ mod tests {
         assert_eq!(note.content, "buy milk\nand eggs\n");
     }
 
+    /// By default the daily note goes to the vault root, which is where F4 has
+    /// always put it. Anything else would split one day across two files depending
+    /// on which entry point got there first.
     #[test]
-    fn today_creates_the_daily_note_in_its_folder() {
+    fn today_creates_the_daily_note_at_the_root_by_default() {
         let dir = scratch("today");
         let config = Config::default();
         let path = today_note(&dir, &config, Some("first thought")).unwrap();
@@ -313,11 +315,58 @@ mod tests {
         let body = fs::read_to_string(&path).unwrap();
         let _ = fs::remove_dir_all(&dir);
 
-        assert_eq!(path.parent().unwrap().file_name().unwrap(), "daily");
+        assert_eq!(path.parent().unwrap(), dir, "daily note was not at the vault root");
         let today = Local::now().format("%Y-%m-%d").to_string();
         assert_eq!(path.file_name().unwrap().to_string_lossy(), format!("{}.md", today));
         assert!(body.contains("first thought"), "entry missing: {:?}", body);
         assert!(body.contains("- "), "entry was not bulleted: {:?}", body);
+    }
+
+    /// Setting `daily_folder` files new daily notes away, creating the folder on
+    /// the first one.
+    #[test]
+    fn daily_folder_is_configurable() {
+        let dir = scratch("dailyfolder");
+        let mut config = Config::default();
+        config.capture.daily_folder = "daily".to_string();
+        let path = today_note(&dir, &config, Some("filed away")).unwrap();
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(path.parent().unwrap().file_name().unwrap(), "daily");
+    }
+
+    /// A daily note started with F4 lives at the root. `--today` has to find *that*
+    /// note rather than starting a second one, and must keep doing so even once
+    /// daily_folder has been set — otherwise changing the setting orphans every
+    /// daily note already written.
+    #[test]
+    fn today_finds_an_existing_daily_note_outside_the_configured_folder() {
+        let dir = scratch("existing");
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        // Stand in for what F4 leaves behind: the daily note, at the vault root.
+        fs::write(
+            dir.join(format!("{}.md", today)),
+            format!("---\ntitle: {}\n---\nwritten in the app\n", today),
+        )
+        .unwrap();
+
+        let mut config = Config::default();
+        config.capture.daily_folder = "daily".to_string();
+        let path = today_note(&dir, &config, Some("captured from the shell")).unwrap();
+
+        let body = fs::read_to_string(&path).unwrap();
+        let md_count = walkdir::WalkDir::new(&dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+            .count();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(md_count, 1, "a second daily note was created for the same day");
+        assert_eq!(path.parent().unwrap(), dir, "the note moved out from under the app");
+        assert!(body.contains("written in the app"), "existing content lost: {:?}", body);
+        assert!(body.contains("captured from the shell"), "entry missing: {:?}", body);
     }
 
     /// The second capture of the day must land in the same note, under the first —

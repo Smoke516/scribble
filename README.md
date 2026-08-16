@@ -163,12 +163,14 @@ scribble -t                  # Open today's daily note in the app
 git log -1 | scribble -n     # Capture piped stdin
 ```
 
-Daily notes go in `daily/` and are titled `YYYY-MM-DD` in **local** time. Entries
-are appended as timestamped bullets. All three are configurable:
+`-t` and the in-app `F4` are the same note: both resolve today's daily note from
+the settings below, and both find an existing one by title wherever it already
+lives. Titles are `YYYY-MM-DD` in **local** time, at the vault root, and captured
+entries are appended as timestamped bullets.
 
 ```toml
 [capture]
-daily_folder = "daily"      # "" puts daily notes at the vault root
+daily_folder = ""           # vault root; set e.g. "daily" to file them away
 daily_format = "%Y-%m-%d"   # strftime, resolved against local time
 timestamp_entries = true    # prefix each entry with HH:MM
 ```
