@@ -13,7 +13,7 @@ pub struct Config {
     pub capture: CaptureConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct EditorConfig {
     pub default: Option<String>,
@@ -77,13 +77,6 @@ impl Default for CaptureConfig {
     }
 }
 
-impl Default for EditorConfig {
-    fn default() -> Self {
-        Self {
-            default: None,
-        }
-    }
-}
 
 impl Default for VaultConfig {
     fn default() -> Self {
