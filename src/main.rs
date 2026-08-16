@@ -13,6 +13,7 @@ mod syntax;
 mod tags;
 mod theme;
 mod ui;
+mod vim;
 mod watcher;
 
 use app::App;

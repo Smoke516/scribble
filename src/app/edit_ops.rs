@@ -156,59 +156,7 @@ impl App {
         }
     }
 
-    /// Delete the current line and store it in the yank buffer (dd).
-    pub fn delete_current_line(&mut self) {
-        let row = self.editor_cursor.0 as usize;
-        // Collect owned data before any mutable operations
-        let line_info: Option<(usize, String, usize)> = {
-            let lines: Vec<&str> = self.editor_content.lines().collect();
-            lines.get(row).map(|l| (lines.len(), l.to_string(), l.len()))
-        };
-        let (line_count, line_content, line_len) = match line_info {
-            Some(v) => v,
-            None => return,
-        };
 
-        self.push_undo_snapshot();
-        self.yank_buffer = line_content;
-
-        let start = self.get_line_start_position(row);
-        if row + 1 < line_count {
-            // Remove line including its trailing newline
-            let end = start + line_len + 1;
-            self.editor_content.drain(start..end);
-        } else if start > 0 {
-            // Last line: also remove the preceding newline
-            self.editor_content.truncate(start.saturating_sub(1));
-            self.editor_cursor.0 = self.editor_cursor.0.saturating_sub(1);
-        } else {
-            self.editor_content.clear();
-            self.editor_cursor = (0, 0);
-            self.mark_modified();
-            self.update_preview_content();
-            return;
-        }
-
-        let new_line_count = self.editor_content.lines().count() as u16;
-        if self.editor_cursor.0 >= new_line_count && new_line_count > 0 {
-            self.editor_cursor.0 = new_line_count - 1;
-        }
-        self.editor_cursor.1 = 0;
-        self.mark_modified();
-        self.update_preview_content();
-    }
-
-    /// Copy the current line into the yank buffer (yy).
-    pub fn yank_current_line(&mut self) {
-        let row = self.editor_cursor.0 as usize;
-        // Collect to owned String before any mutable operations
-        let yanked: Option<String> = self.editor_content.lines().nth(row).map(|l| l.to_string());
-        if let Some(line) = yanked {
-            self.yank_buffer = line;
-            let preview: String = self.yank_buffer.chars().take(40).collect();
-            self.set_operation_info(format!("Yanked: \"{}\"", preview), Some("📋".to_string()));
-        }
-    }
 
     /// Read text from the system clipboard.
     pub fn read_system_clipboard(&self) -> Option<String> {
@@ -292,6 +240,36 @@ impl App {
             return;
         }
         self.push_undo_snapshot();
+
+        // A charwise yank — anything from `dw`, `yiw`, `d$` — goes back in inline,
+        // just after the cursor. Pasting it onto a line of its own, the way a
+        // linewise yank goes, would mangle the sentence it came out of.
+        if !self.yank_linewise {
+            let insert_pos = {
+                let lines: Vec<&str> = self.editor_content.lines().collect();
+                let row = self.editor_cursor.0 as usize;
+                let col = self.editor_cursor.1 as usize;
+                let line_start = self.get_line_start_position(row);
+                let byte_in_line = lines
+                    .get(row)
+                    .map(|l| {
+                        l.char_indices()
+                            .nth(col + 1)
+                            .map(|(b, _)| b)
+                            .unwrap_or(l.len())
+                    })
+                    .unwrap_or(0);
+                (line_start + byte_in_line).min(self.editor_content.len())
+            };
+            let yanked = self.yank_buffer.clone();
+            self.editor_content.insert_str(insert_pos, &yanked);
+            self.editor_cursor.1 += yanked.chars().count() as u16;
+            self.clamp_cursor_to_content();
+            self.mark_modified();
+            self.update_preview_content();
+            return;
+        }
+
         // Compute insert position and drop borrow before mutating
         let insert_pos = {
             let lines: Vec<&str> = self.editor_content.lines().collect();
@@ -309,6 +287,71 @@ impl App {
         self.adjust_scroll_to_cursor();
         self.mark_modified();
         self.update_preview_content();
+    }
+
+    /// Run an operator over the span a motion or text object selects.
+    ///
+    /// A motion with nowhere to go resolves to nothing and this does nothing at all
+    /// — no undo snapshot, no modified flag. `dw` at the very end of a note should
+    /// not cost the user an undo step for a keystroke that did not change anything.
+    pub fn apply_operator(
+        &mut self,
+        operator: crate::vim::Operator,
+        target: crate::vim::Target,
+        count: usize,
+    ) {
+        use crate::vim::{cut, resolve, Operator, Span};
+
+        let cursor = (self.editor_cursor.0 as usize, self.editor_cursor.1 as usize);
+        let Some(span) = resolve(&self.editor_content, cursor, count, target, operator) else {
+            return;
+        };
+        let (removed, remaining, new_cursor) = cut(&self.editor_content, span);
+        if removed.is_empty() {
+            return;
+        }
+
+        let linewise = matches!(span, Span::Lines { .. });
+        // A linewise yank is stored without its trailing newline, because that is
+        // the shape `paste_below` has always expected.
+        self.yank_buffer = if linewise {
+            removed.trim_end_matches('\n').to_string()
+        } else {
+            removed.clone()
+        };
+        self.yank_linewise = linewise;
+
+        if operator == Operator::Yank {
+            let preview: String = self.yank_buffer.chars().take(40).collect();
+            self.set_operation_info(format!("Yanked: \"{}\"", preview), Some("📋".to_string()));
+            return;
+        }
+
+        self.push_undo_snapshot();
+        self.editor_content = remaining;
+        self.editor_cursor = (new_cursor.0 as u16, new_cursor.1 as u16);
+
+        if operator == Operator::Change {
+            // `cc` empties the line rather than removing it: vim leaves you an empty
+            // line to type on, it does not pull the next line up under the cursor.
+            if linewise {
+                let at = self.get_line_start_position(self.editor_cursor.0 as usize);
+                self.editor_content.insert(at, '\n');
+                self.editor_cursor.1 = 0;
+            }
+            self.mode = AppMode::Insert;
+        }
+
+        self.clamp_cursor_to_content();
+        self.mark_modified();
+        self.update_preview_content();
+    }
+
+    /// Forget any half-typed operator sequence.
+    pub fn clear_pending_operator(&mut self) {
+        self.pending_op = None;
+        self.pending_count = None;
+        self.pending_op_prefix = None;
     }
 
     /// Open a new blank line below the cursor and prepare for insert (o).

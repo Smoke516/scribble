@@ -22,7 +22,7 @@ A powerful terminal-based note-taking app with advanced tag management, Obsidian
 - **💾 Crash-safe auto-save** - Notes are persisted to disk continuously (on edit, periodic autosave, and structural changes like move/rename/delete) — not just on exit, so your work survives an unexpected exit
 - **🔍 Full-text search** - Search through all your notes by title or content, with advanced regex/field search (`Ctrl+A`) and search & replace (`Ctrl+R`)
 - **🔤 Spell check** - Optional aspell-backed spell checking with inline error highlighting and Vim-style `z=` suggestions
-- **⌨️ Vim-like navigation** - Familiar keyboard shortcuts, including a Visual selection mode (`v`)
+- **⌨️ Real vim operators** - `d`, `c` and `y` compose with motions, text objects and counts (`dw`, `ciw`, `3dd`, `d$`), plus a Visual selection mode (`v`)
 
 ### 🚀 Productivity Features
 - **🏷️ Tag Filtering** - Filter notes by tags with interactive browser and analytics (`Ctrl+T`)
@@ -490,6 +490,31 @@ Either way, changes are written to disk continuously — on edit, on a periodic 
 - `Ctrl+S` - Save
 - `q` - Quit
 - `?` - Help
+
+### Operators (editor)
+
+`d` (delete), `c` (change) and `y` (yank) combine with any motion, rather than
+only with themselves:
+
+| | |
+|---|---|
+| `dw` `cw` `yw` | by word |
+| `db` `de` | word back / to word end |
+| `d$` `d0` `d^` | to line end / start / first non-blank |
+| `dd` `cc` `yy` | the whole line |
+| `dj` `dk` | this line and the one below / above |
+| `dG` `dgg` | to the end / start of the note |
+| `diw` `daw` | the word under the cursor, without / with its whitespace |
+| `3dd` `d3w` | with a count, either side of the operator |
+| `D` `C` `Y` | shorthand for `d$`, `c$`, `yy` |
+
+Counts work on plain motions too (`3j`, `5w`). `c` leaves you in insert mode, and
+`cc` empties the line rather than removing it. A yank remembers whether it was
+linewise: `yy` then `p` puts the line on its own line, while `yiw` then `p` pastes
+inline.
+
+One deviation: `e` is a motion only *after* an operator. Plain `e` keeps its
+existing meaning of opening the note in your external editor.
 
 ### Insert Mode
 - `Esc` - Return to normal mode (auto-saves and runs spell check)

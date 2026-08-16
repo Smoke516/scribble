@@ -112,7 +112,10 @@ enum Action {
     ToggleTaskCheckbox,
     PasteBelow,
     PasteClipboardBelow,
-    YankLineSequence,
+    DeleteToLineEnd,
+    ChangeToLineEnd,
+    YankLine,
+    NoOp,
     DeleteLineOrConfirm,
     EnterInsert,
     EnterVisual,
@@ -222,13 +225,17 @@ const NORMAL_BINDINGS: &[Binding] = &[
     k(KeyCode::Char(' '), Ctx::Editor, Action::ToggleTaskCheckbox, "Toggle task checkbox"),
     k(KeyCode::Char('p'), Ctx::Editor, Action::PasteBelow, "Paste line below"),
     k(KeyCode::Char('P'), Ctx::Editor, Action::PasteClipboardBelow, "Paste clipboard below"),
-    k(KeyCode::Char('y'), Ctx::Editor, Action::YankLineSequence, "yy: yank line"),
+    k(KeyCode::Char('D'), Ctx::Editor, Action::DeleteToLineEnd, "D: delete to end of line"),
+    k(KeyCode::Char('C'), Ctx::Editor, Action::ChangeToLineEnd, "C: change to end of line"),
+    k(KeyCode::Char('Y'), Ctx::Editor, Action::YankLine, "Y: yank line"),
     k(KeyCode::Char('v'), Ctx::Editor, Action::EnterVisual, "Visual selection"),
     k(KeyCode::Char('z'), Ctx::Editor, Action::PendingSpellPrefix, "z=: spelling prefix"),
     k(KeyCode::Char('='), Ctx::Editor, Action::SpellSuggestions, "z=: spelling suggestions"),
     ctrl(KeyCode::Char('z'), Ctx::Editor, Action::UndoText, "Undo edit"),
     ctrl(KeyCode::Char('y'), Ctx::Editor, Action::RedoText, "Redo edit"),
-    k(KeyCode::Char('d'), Ctx::Any, Action::DeleteLineOrConfirm, "dd: delete line / delete item"),
+    k(KeyCode::Char('d'), Ctx::Any, Action::DeleteLineOrConfirm, "d{motion}: delete / delete item"),
+    k(KeyCode::Char('c'), Ctx::Editor, Action::NoOp, "c{motion}: change"),
+    k(KeyCode::Char('y'), Ctx::Editor, Action::NoOp, "y{motion}: yank"),
     k(KeyCode::Char('i'), Ctx::Any, Action::EnterInsert, "Insert mode"),
     k(KeyCode::Char('u'), Ctx::Any, Action::UndoLastDelete, "Undo last delete"),
 
@@ -347,11 +354,120 @@ fn lookup(key: &KeyEvent, editor_focused: bool, on_welcome: bool) -> Option<Acti
     None
 }
 
+/// Feed a key to the operator-pending state machine.
+///
+/// Returns true when the key was consumed by an operator sequence, in which case
+/// the keymap must not also see it — the `w` of `dw` is a motion for the operator,
+/// not a cursor movement.
+///
+/// This exists because `dd` and `yy` used to be hard-coded two-key sequences, so
+/// the only thing either operator could combine with was itself. Modelling the
+/// operator as pending state instead means every operator gets every motion from
+/// one table, rather than needing a binding per pair.
+fn feed_operator_pending(app: &mut App, key: &KeyEvent) -> bool {
+    use crate::vim::{Motion, Operator, Target, TextObject};
+
+    let KeyCode::Char(c) = key.code else {
+        // Esc abandons a half-typed sequence; any other non-character key is not
+        // part of one, so it clears the state and falls through to the keymap.
+        if key.code == KeyCode::Esc && app.pending_op.is_some() {
+            app.clear_pending_operator();
+            return true;
+        }
+        app.clear_pending_operator();
+        return false;
+    };
+
+    // Counts. A leading `0` is the start-of-line motion, not a digit — it only
+    // becomes one once a count is already being typed.
+    if c.is_ascii_digit() && !(c == '0' && app.pending_count.is_none()) {
+        let digit = c.to_digit(10).unwrap() as usize;
+        app.pending_count = Some(app.pending_count.unwrap_or(0) * 10 + digit);
+        return true;
+    }
+
+    let Some(operator) = app.pending_op else {
+        // Not pending yet: an operator key arms one, anything else is a normal key.
+        let operator = match c {
+            'd' => Operator::Delete,
+            'c' => Operator::Change,
+            'y' => Operator::Yank,
+            _ => return false,
+        };
+        app.pending_op = Some(operator);
+        app.pending_op_prefix = None;
+        return true;
+    };
+
+    let count = app.pending_count.unwrap_or(1);
+
+    // Mid-sequence keys: the `i`/`a` of `diw`, the `g` of `dgg`.
+    match (app.pending_op_prefix, c) {
+        (Some('i'), 'w') => {
+            app.clear_pending_operator();
+            app.apply_operator(operator, Target::Object(TextObject::InnerWord), count);
+            return true;
+        }
+        (Some('a'), 'w') => {
+            app.clear_pending_operator();
+            app.apply_operator(operator, Target::Object(TextObject::AWord), count);
+            return true;
+        }
+        (Some('g'), 'g') => {
+            app.clear_pending_operator();
+            app.apply_operator(operator, Target::Motion(Motion::FileStart), count);
+            return true;
+        }
+        (Some(_), _) => {
+            // A prefix that led nowhere — abandon the whole sequence rather than
+            // guessing at what was meant.
+            app.clear_pending_operator();
+            return true;
+        }
+        (None, 'i') | (None, 'a') | (None, 'g') => {
+            app.pending_op_prefix = Some(c);
+            return true;
+        }
+        _ => {}
+    }
+
+    // The doubled form: dd, cc, yy.
+    let doubled = matches!(
+        (operator, c),
+        (Operator::Delete, 'd') | (Operator::Change, 'c') | (Operator::Yank, 'y')
+    );
+    let motion = if doubled {
+        Some(Motion::WholeLine)
+    } else {
+        match c {
+            'w' => Some(Motion::WordForward),
+            'b' => Some(Motion::WordBackward),
+            'e' => Some(Motion::WordEnd),
+            '$' => Some(Motion::LineEnd),
+            '0' => Some(Motion::LineStart),
+            '^' => Some(Motion::FirstNonBlank),
+            'j' => Some(Motion::Down),
+            'k' => Some(Motion::Up),
+            'G' => Some(Motion::FileEnd),
+            _ => None,
+        }
+    };
+
+    app.clear_pending_operator();
+    if let Some(motion) = motion {
+        app.apply_operator(operator, Target::Motion(motion), count);
+    }
+    // Consumed either way: a key that is not a motion cancels the operator rather
+    // than acting on its own, which is what vim does and what stops a mistyped `dq`
+    // from quitting.
+    true
+}
+
 fn handle_normal_mode(app: &mut App, key: KeyEvent) {
     // Clear pending vim key if current key doesn't continue the sequence
     let continues_sequence = matches!(
         (app.pending_key, &key.code),
-        (Some('d'), KeyCode::Char('d')) | (Some('y'), KeyCode::Char('y')) | (Some('z'), KeyCode::Char('='))
+        (Some('z'), KeyCode::Char('='))
     );
     if app.pending_key.is_some() && !continues_sequence {
         app.pending_key = None;
@@ -361,8 +477,40 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
     // The landing page shows exactly when no note is open.
     let on_welcome = app.current_note.is_none();
 
+    // Operators only exist in the editor. Outside it `d` still means delete-item,
+    // and a stray count would swallow the digit shortcuts on the landing page.
+    // Modified keys are never part of a sequence — Ctrl+Y is redo, not a yank.
+    if editor_focused && key.modifiers.is_empty() && feed_operator_pending(app, &key) {
+        return;
+    }
+    if !editor_focused {
+        app.clear_pending_operator();
+    }
+
+    // A count that reaches the keymap belongs to a plain motion — `3w`, `5j`. Take
+    // it and clear it here: leaving it armed made the next operator silently
+    // inherit it, so `3w` followed by `dd` deleted three lines.
+    let count = app.pending_count.take().unwrap_or(1);
+
     if let Some(action) = lookup(&key, editor_focused, on_welcome) {
-        run_action(app, action, editor_focused);
+        // Only movement repeats. Repeating anything else would turn `3` followed by
+        // a mistyped key into three of whatever that key does.
+        let repeats = if matches!(
+            action,
+            Action::CursorUp
+                | Action::CursorDown
+                | Action::CursorLeft
+                | Action::CursorRight
+                | Action::WordForward
+                | Action::WordBackward
+        ) {
+            count.clamp(1, 1000)
+        } else {
+            1
+        };
+        for _ in 0..repeats {
+            run_action(app, action, editor_focused);
+        }
     }
 }
 
@@ -481,29 +629,36 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
             app.mark_modified();
         }
         Action::PasteClipboardBelow => app.paste_clipboard_below(),
-        Action::YankLineSequence => {
-            if app.pending_key == Some('y') {
-                app.pending_key = None;
-                app.yank_current_line();
-                app.set_message("Line yanked".to_string());
-            } else {
-                app.pending_key = Some('y');
-            }
-        }
+        // D, C and Y are vim's shorthand for d$, c$ and yy. They earn their own
+        // bindings because they are single keystrokes, not operator sequences.
+        Action::DeleteToLineEnd => app.apply_operator(
+            crate::vim::Operator::Delete,
+            crate::vim::Target::Motion(crate::vim::Motion::LineEnd),
+            1,
+        ),
+        Action::ChangeToLineEnd => app.apply_operator(
+            crate::vim::Operator::Change,
+            crate::vim::Target::Motion(crate::vim::Motion::LineEnd),
+            1,
+        ),
+        Action::YankLine => app.apply_operator(
+            crate::vim::Operator::Yank,
+            crate::vim::Target::Motion(crate::vim::Motion::WholeLine),
+            1,
+        ),
+        // In the editor `d` is an operator and never reaches here — the pending
+        // layer consumes it. Outside it, it still confirms deleting the selected
+        // note or folder.
         Action::DeleteLineOrConfirm => {
-            if editor_focused {
-                if app.pending_key == Some('d') {
-                    app.pending_key = None;
-                    app.push_undo_snapshot();
-                    app.delete_current_line();
-                    app.mark_modified();
-                } else {
-                    app.pending_key = Some('d');
+            if !editor_focused {
+                if let Err(e) = app.start_delete_confirmation() {
+                    app.set_message(e);
                 }
-            } else if let Err(e) = app.start_delete_confirmation() {
-                app.set_message(e);
             }
         }
+        // Present only so the help screen can document the operator; the pending
+        // layer handles the key itself.
+        Action::NoOp => {}
         Action::EnterInsert => {
             if app.current_note.is_some() {
                 app.push_undo_snapshot();
@@ -2110,7 +2265,7 @@ mod dispatch_tests {
     fn ctrl_y_is_not_swallowed_by_the_yank_pending_key() {
         let mut app = editor_focused_app();
         press(&mut app, 'y', KeyModifiers::CONTROL);
-        assert_ne!(app.pending_key, Some('y'), "Ctrl+Y set the 'yy' pending key instead of redoing");
+        assert_ne!(app.pending_op, Some(crate::vim::Operator::Yank), "Ctrl+Y armed the yank operator instead of redoing");
     }
 
     // --- the plain motions these share a letter with must still work ---
@@ -2123,10 +2278,195 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn plain_y_still_arms_the_yank_sequence() {
+    fn plain_y_arms_the_yank_operator() {
         let mut app = editor_focused_app();
         press(&mut app, 'y', KeyModifiers::NONE);
-        assert_eq!(app.pending_key, Some('y'), "plain 'y' should arm the 'yy' sequence");
+        assert_eq!(
+            app.pending_op,
+            Some(crate::vim::Operator::Yank),
+            "plain 'y' should arm the yank operator"
+        );
+    }
+
+    // --- operator sequences, driven the way a user types them ---
+
+    /// An editor with `content`, cursor at (row, col), ready for normal-mode keys.
+    fn editor_with(content: &str, cursor: (u16, u16)) -> App {
+        let mut app = editor_focused_app();
+        app.editor_content = content.to_string();
+        app.editor_cursor = cursor;
+        app
+    }
+
+    fn type_keys(app: &mut App, keys: &str) {
+        for c in keys.chars() {
+            press(app, c, KeyModifiers::NONE);
+        }
+    }
+
+    #[test]
+    fn dw_deletes_a_word() {
+        let mut app = editor_with("alpha beta gamma\n", (0, 6));
+        type_keys(&mut app, "dw");
+        assert_eq!(app.editor_content, "alpha gamma\n");
+    }
+
+    #[test]
+    fn dd_deletes_the_line() {
+        let mut app = editor_with("one\ntwo\nthree\n", (1, 0));
+        type_keys(&mut app, "dd");
+        assert_eq!(app.editor_content, "one\nthree\n");
+    }
+
+    /// The whole point of the operator-pending model: a count typed between the
+    /// operator and the motion, which the old two-key sequences could not express.
+    #[test]
+    fn a_count_between_operator_and_motion_works() {
+        let mut app = editor_with("alpha beta gamma delta\n", (0, 0));
+        type_keys(&mut app, "d3w");
+        assert_eq!(app.editor_content, "delta\n");
+    }
+
+    #[test]
+    fn a_count_before_the_operator_works_too() {
+        let mut app = editor_with("one\ntwo\nthree\nfour\n", (0, 0));
+        type_keys(&mut app, "3dd");
+        assert_eq!(app.editor_content, "four\n");
+    }
+
+    #[test]
+    fn ciw_changes_the_word_and_enters_insert() {
+        let mut app = editor_with("alpha beta gamma\n", (0, 7));
+        type_keys(&mut app, "ciw");
+        assert_eq!(app.editor_content, "alpha  gamma\n");
+        assert_eq!(app.mode, AppMode::Insert, "c should leave you in insert mode");
+    }
+
+    /// `cc` empties the line rather than removing it — vim leaves you a line to
+    /// type on rather than pulling the next one up under the cursor.
+    #[test]
+    fn cc_empties_the_line_without_removing_it() {
+        let mut app = editor_with("one\ntwo\nthree\n", (1, 1));
+        type_keys(&mut app, "cc");
+        assert_eq!(app.editor_content, "one\n\nthree\n");
+        assert_eq!(app.mode, AppMode::Insert);
+    }
+
+    #[test]
+    fn yank_leaves_the_text_alone_and_fills_the_register() {
+        let mut app = editor_with("alpha beta gamma\n", (0, 6));
+        type_keys(&mut app, "yw");
+        assert_eq!(app.editor_content, "alpha beta gamma\n", "yank must not edit");
+        assert_eq!(app.yank_buffer, "beta ");
+        assert!(!app.yank_linewise, "a word yank is charwise");
+    }
+
+    /// A charwise yank pastes back inline. Pasting it onto its own line — the way a
+    /// linewise yank goes — would mangle the sentence it came out of.
+    #[test]
+    fn a_charwise_yank_pastes_inline() {
+        let mut app = editor_with("alpha beta\n", (0, 0));
+        type_keys(&mut app, "yiw");
+        app.editor_cursor = (0, 4);
+        app.paste_below();
+        assert_eq!(app.editor_content, "alphaalpha beta\n");
+    }
+
+    #[test]
+    fn yy_still_yanks_a_whole_line_and_pastes_as_one() {
+        let mut app = editor_with("one\ntwo\n", (0, 0));
+        type_keys(&mut app, "yy");
+        assert_eq!(app.yank_buffer, "one");
+        assert!(app.yank_linewise);
+        app.paste_below();
+        assert_eq!(app.editor_content, "one\none\ntwo\n");
+    }
+
+    #[test]
+    fn shift_d_deletes_to_the_end_of_the_line() {
+        let mut app = editor_with("keep this drop this\n", (0, 10));
+        press(&mut app, 'D', KeyModifiers::NONE);
+        assert_eq!(app.editor_content, "keep this \n");
+    }
+
+    /// Esc has to abandon a half-typed operator, or the next motion key silently
+    /// deletes something.
+    #[test]
+    fn esc_abandons_a_pending_operator() {
+        let mut app = editor_with("alpha beta\n", (0, 0));
+        press(&mut app, 'd', KeyModifiers::NONE);
+        handle_normal_mode(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.pending_op.is_none(), "Esc left the operator armed");
+        type_keys(&mut app, "w");
+        assert_eq!(app.editor_content, "alpha beta\n", "the w after Esc deleted something");
+    }
+
+    /// A key that is not a motion cancels the operator rather than acting on its
+    /// own — otherwise a mistyped `dq` quits the app.
+    #[test]
+    fn a_non_motion_cancels_the_operator_instead_of_acting() {
+        let mut app = editor_with("alpha beta\n", (0, 0));
+        type_keys(&mut app, "dq");
+        assert!(app.pending_op.is_none());
+        assert!(!app.should_quit, "the q of a mistyped dq quit the app");
+        assert_eq!(app.editor_content, "alpha beta\n");
+    }
+
+    /// Outside the editor `d` still means "delete the selected item", and digits
+    /// still belong to the landing page rather than to a count.
+    #[test]
+    fn operators_do_not_leak_outside_the_editor() {
+        let mut app = editor_focused_app();
+        app.focused_pane = FocusedPane::Folders;
+        press(&mut app, 'd', KeyModifiers::NONE);
+        assert!(app.pending_op.is_none(), "an operator armed outside the editor");
+    }
+
+    /// A motion with nowhere to go must not register as an edit, or `dw` at the end
+    /// of a note costs an undo step for having done nothing.
+    #[test]
+    fn an_operator_that_does_nothing_pushes_no_undo_snapshot() {
+        let mut app = editor_with("word", (0, 4));
+        let before = app.undo_stack.len();
+        type_keys(&mut app, "dw");
+        assert_eq!(app.editor_content, "word");
+        assert_eq!(app.undo_stack.len(), before, "a no-op edit pushed an undo snapshot");
+    }
+
+    /// A count typed for a plain motion must be consumed by that motion. Leaving it
+    /// armed made the *next* operator silently inherit it: `3w` then `dd` deleted
+    /// three lines instead of one. Caught by driving the real binary, not by the
+    /// unit tests, because each piece behaved correctly on its own.
+    #[test]
+    fn a_count_used_by_a_plain_motion_does_not_leak_into_the_next_operator() {
+        let mut app = editor_with("one\ntwo\nthree\nfour\n", (0, 0));
+        type_keys(&mut app, "3j");
+        assert_eq!(app.editor_cursor.0, 3, "3j should move three lines down");
+        assert!(app.pending_count.is_none(), "the count survived the motion");
+
+        app.editor_cursor = (0, 0);
+        type_keys(&mut app, "dd");
+        assert_eq!(app.editor_content, "two\nthree\nfour\n", "dd deleted more than one line");
+    }
+
+    /// Even a count that goes nowhere must not linger.
+    #[test]
+    fn a_count_on_a_non_motion_key_is_still_cleared() {
+        let mut app = editor_with("one\ntwo\nthree\nfour\n", (0, 0));
+        type_keys(&mut app, "3");
+        press(&mut app, 'x', KeyModifiers::NONE);
+        assert!(app.pending_count.is_none(), "the count survived a non-motion key");
+        type_keys(&mut app, "dd");
+        assert_eq!(app.editor_content, "two\nthree\nfour\n");
+    }
+
+    #[test]
+    fn an_operator_edit_can_be_undone_in_one_step() {
+        let mut app = editor_with("alpha beta gamma\n", (0, 0));
+        type_keys(&mut app, "d2w");
+        assert_eq!(app.editor_content, "gamma\n");
+        app.undo_text();
+        assert_eq!(app.editor_content, "alpha beta gamma\n");
     }
 
     /// The structural guarantee the table exists to provide: no two bindings can

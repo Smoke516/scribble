@@ -450,6 +450,18 @@ pub struct App {
 
     // Yank buffer for y/p operations
     pub yank_buffer: String,
+    /// Whether the yank buffer holds whole lines. `p` pastes a linewise yank onto
+    /// its own line and a charwise one inline, which is the difference between `yy`
+    /// and `yw` behaving like vim and behaving like a surprise.
+    pub yank_linewise: bool,
+
+    /// The operator waiting for a motion, if any — the `d` of a half-typed `dw`.
+    pub pending_op: Option<crate::vim::Operator>,
+    /// A count being typed, for `3dd` and `d3w`.
+    pub pending_count: Option<usize>,
+    /// A key that only makes sense as the middle of a longer sequence: the `i` of
+    /// `diw`, the `g` of `dgg`.
+    pub pending_op_prefix: Option<char>,
 
     // Redo stack (mirror of undo_stack, cleared on new edits)
     pub redo_stack: Vec<(String, (u16, u16))>,
@@ -599,6 +611,10 @@ impl App {
             // Vim motions
             pending_key: None,
             yank_buffer: String::new(),
+            yank_linewise: true,
+            pending_op: None,
+            pending_count: None,
+            pending_op_prefix: None,
 
             // Redo
             redo_stack: Vec::new(),
@@ -1388,13 +1404,12 @@ impl App {
         self.editor_scroll = content_lines.saturating_sub(1);
     }
     
-    /// Ensure cursor is visible after scrolling
     /// Pull the cursor back inside the buffer.
     ///
     /// Needed whenever the content changes underneath the cursor rather than
-    /// because of it — a reload from disk, say. `get_cursor_byte_index` trusts the
-    /// row and column it is given, so a cursor left past the end of a shortened note
-    /// indexes into nothing.
+    /// because of it — a reload from disk, or an operator that deleted the rest of
+    /// the line. `get_cursor_byte_index` trusts the row and column it is given, so
+    /// a cursor left past the end of a shortened note indexes into nothing.
     pub fn clamp_cursor_to_content(&mut self) {
         let lines: Vec<&str> = self.editor_content.lines().collect();
         let last_row = lines.len().saturating_sub(1) as u16;
@@ -1407,6 +1422,7 @@ impl App {
         self.adjust_scroll_to_cursor();
     }
 
+    /// Ensure cursor is visible after scrolling
     pub fn adjust_scroll_to_cursor(&mut self) {
         let visible_height = 20; // Approximate visible lines in editor
         
@@ -1775,6 +1791,8 @@ impl App {
             }
         }
         self.yank_buffer = selected;
+        // Existing behaviour: a visual yank pastes onto its own line.
+        self.yank_linewise = true;
         let preview: String = self.yank_buffer.chars().take(40).collect();
         self.set_operation_info(format!("Yanked: \"{}\"", preview), Some("📋".to_string()));
         self.mode = AppMode::Normal;
