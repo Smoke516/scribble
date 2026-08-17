@@ -29,6 +29,7 @@ pub fn handle_event(app: &mut App, event: Event) -> Result<(), Box<dyn std::erro
         AppMode::Outline => handle_outline_mode(app, key),
         AppMode::Palette => handle_palette_mode(app, key),
         AppMode::Tasks => handle_tasks_mode(app, key),
+        AppMode::Conflicts => handle_conflicts_mode(app, key),
         AppMode::Explorer => handle_explorer_mode(app, key),
         }
     }
@@ -1997,6 +1998,7 @@ fn run_palette_command(app: &mut App, cmd: crate::palette::Command) {
     match cmd {
         Command::DailyNote => app.open_daily_note(),
         Command::Tasks => app.show_task_panel(),
+        Command::Conflicts => app.show_conflicts(),
         Command::Outline => app.show_outline(),
         Command::Explorer => {
             app.mode = AppMode::Explorer;
@@ -2031,6 +2033,21 @@ fn handle_outline_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => app.outline_select(),
         KeyCode::Up | KeyCode::Char('k') => app.outline_navigate_up(),
         KeyCode::Down | KeyCode::Char('j') => app.outline_navigate_down(),
+        _ => {}
+    }
+}
+
+/// The resolve view: a list of conflicts, and three answers for the selected one.
+fn handle_conflicts_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.cancel_conflicts(),
+        KeyCode::Up | KeyCode::Char('k') => app.conflict_navigate_up(),
+        KeyCode::Down | KeyCode::Char('j') => app.conflict_navigate_down(),
+        // Tab picks the answer, Enter commits it. Two keys rather than one so a
+        // stray keystroke cannot rewrite a note that took work to get right.
+        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => app.conflict_cycle_action(true),
+        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => app.conflict_cycle_action(false),
+        KeyCode::Enter => app.resolve_selected_conflict(),
         _ => {}
     }
 }

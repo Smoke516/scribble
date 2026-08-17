@@ -87,6 +87,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         AppMode::Outline => draw_outline_dialog(f, app),
         AppMode::Palette => draw_palette_dialog(f, app),
         AppMode::Tasks => draw_tasks_dialog(f, app),
+        AppMode::Conflicts => draw_conflicts_dialog(f, app),
         AppMode::TemplatePicker => draw_template_picker_dialog(f, app),
         AppMode::SpellSuggest => draw_spell_suggest_dialog(f, app),
         _ => {}
@@ -861,6 +862,23 @@ fn draw_welcome_screen(f: &mut Frame, app: &App, area: Rect, block: Block) {
         blank(&mut lines);
     }
 
+    // Conflicts are worth interrupting for: unlike tasks, they are the app asking
+    // you to decide something, and nothing else will bring them up.
+    if d.conflicts > 0 {
+        let text = format!(
+            "{} conflict{} to resolve  —  Ctrl+P, \"conflicts\"",
+            d.conflicts,
+            if d.conflicts == 1 { "" } else { "s" }
+        );
+        let len = text.chars().count() + 2;
+        lines.push(Line::from(vec![
+            pad(left + (col.saturating_sub(len)) / 2),
+            Span::styled("▸ ", Style::default().fg(TokyoNightTheme::RED)),
+            Span::styled(text, Style::default().fg(TokyoNightTheme::RED)),
+        ]));
+        blank(&mut lines);
+    }
+
     let mut parts: Vec<String> = Vec::new();
     parts.push(format!("{} notes", d.note_count));
     parts.push(format!("{} folders", d.folder_count));
@@ -907,6 +925,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::Outline => "OUTLINE",
         AppMode::Palette => "PALETTE",
         AppMode::Tasks => "TASKS",
+        AppMode::Conflicts => "CONFLICTS",
         AppMode::Explorer => "EXPLORER",
     };
 
@@ -940,6 +959,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::Outline => app.theme_manager.mode_command(),
         AppMode::Palette => app.theme_manager.mode_command(),
         AppMode::Tasks => app.theme_manager.mode_command(),
+        AppMode::Conflicts => app.theme_manager.mode_command(),
     };
     
     // Create enhanced message display with operation result feedback
@@ -2630,6 +2650,123 @@ fn draw_palette_dialog(f: &mut Frame, app: &App) {
 /// Grouped rather than flat because the note is most of what tells you what a
 /// bare "- [ ] follow up" actually means, and repeating the title on every row
 /// would crowd out the task text it is there to explain.
+/// Unresolved conflicts: the list, the two versions side by side, and the answer.
+///
+/// Differing lines are marked rather than the two versions being shown whole and
+/// unaligned — the question you are answering is "what changed", and an unaligned
+/// pair makes you find that yourself.
+fn draw_conflicts_dialog(f: &mut Frame, app: &App) {
+    use crate::conflicts::Row;
+
+    let total = app.conflict_items.len();
+    let area = centered_rect(80, 80, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(format!("🔀  Conflicts — {} to resolve", total))
+        .borders(Borders::ALL)
+        .border_style(TokyoNightTheme::border_focused())
+        .style(TokyoNightTheme::popup());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length((total.min(4) + 1) as u16), // the list
+            Constraint::Min(4),                            // the comparison
+            Constraint::Length(2),                         // answer + keys
+        ])
+        .split(inner);
+
+    let items: Vec<ListItem> = app
+        .conflict_items
+        .iter()
+        .map(|c| {
+            let origin = if c.original.is_some() {
+                format!("from {}", c.producer.label())
+            } else {
+                format!("from {} — original missing", c.producer.label())
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:<28.28} ", c.base_title),
+                    Style::default().fg(TokyoNightTheme::FG),
+                ),
+                Span::styled(origin, Style::default().fg(TokyoNightTheme::COMMENT)),
+            ]))
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(app.conflict_selected));
+    f.render_stateful_widget(
+        List::new(items)
+            .highlight_style(TokyoNightTheme::selected())
+            .highlight_symbol("▶ "),
+        rows[0],
+        &mut list_state,
+    );
+
+    // The comparison.
+    let diff_lines: Vec<Line> = match app.conflict_versions() {
+        Some((mine, theirs)) => {
+            let compared = crate::conflicts::diff(&mine, &theirs);
+            let changed = crate::conflicts::changed_lines(&compared);
+            let mut out = vec![Line::from(Span::styled(
+                if changed == 0 {
+                    "The two versions are identical.".to_string()
+                } else {
+                    format!("{} line{} differ", changed, if changed == 1 { "" } else { "s" })
+                },
+                Style::default().fg(TokyoNightTheme::COMMENT),
+            ))];
+            out.extend(compared.iter().map(|row| match row {
+                Row::Same(text) => Line::from(Span::styled(
+                    format!("  {}", text),
+                    Style::default().fg(TokyoNightTheme::COMMENT),
+                )),
+                Row::Mine(text) => Line::from(Span::styled(
+                    format!("- {}", text),
+                    Style::default().fg(TokyoNightTheme::RED),
+                )),
+                Row::Theirs(text) => Line::from(Span::styled(
+                    format!("+ {}", text),
+                    Style::default().fg(TokyoNightTheme::GREEN),
+                )),
+            }));
+            out
+        }
+        None => vec![Line::from("")],
+    };
+    f.render_widget(
+        Paragraph::new(diff_lines).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .title("  - yours   + preserved  ")
+                .border_style(TokyoNightTheme::border_inactive()),
+        ),
+        rows[1],
+    );
+
+    let action = App::conflict_actions()[app.conflict_action];
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                format!("▸ {}", action.label()),
+                Style::default()
+                    .fg(TokyoNightTheme::YELLOW)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "↑↓: Conflict   Tab: Answer   Enter: Apply   Esc: Close",
+                Style::default().fg(TokyoNightTheme::COMMENT),
+            )),
+        ]),
+        rows[2],
+    );
+}
+
 fn draw_tasks_dialog(f: &mut Frame, app: &App) {
     let shown = app.task_items.len();
     let notes = crate::tasks::notes_covered(&app.task_items);

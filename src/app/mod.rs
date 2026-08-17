@@ -53,6 +53,8 @@ pub enum AppMode {
     Palette,
     /// Every open task in the vault, in one list.
     Tasks,
+    /// Unresolved conflict files, side by side.
+    Conflicts,
     /// The folder tree as an overlay, for when the sidebar is not on screen.
     Explorer,
 }
@@ -281,6 +283,9 @@ pub struct Dashboard {
     pub recent_count: usize,
     pub open_tasks: usize,
     pub notes_with_tasks: usize,
+    /// Unresolved conflict files. Surfaced here rather than behind a chord: a
+    /// conflict you never notice is a conflict that quietly accumulates.
+    pub conflicts: usize,
     pub note_count: usize,
     pub folder_count: usize,
     pub tag_count: usize,
@@ -478,6 +483,11 @@ pub struct App {
     pub palette_items: Vec<crate::palette::Item>,
     pub palette_selected: usize,
     /// Every task in the vault, as of the last time the panel was opened.
+    pub conflict_items: Vec<crate::conflicts::Conflict>,
+    pub conflict_selected: usize,
+    /// Which of the three answers is highlighted.
+    pub conflict_action: usize,
+
     pub task_items: Vec<crate::tasks::Task>,
     pub task_selected: usize,
     /// Whether the panel is also listing completed tasks. Off by default: the
@@ -638,6 +648,9 @@ impl App {
             palette_query: String::new(),
             palette_items: Vec::new(),
             palette_selected: 0,
+            conflict_items: Vec::new(),
+            conflict_selected: 0,
+            conflict_action: 0,
             task_items: Vec::new(),
             task_selected: 0,
             tasks_show_done: false,
@@ -1031,6 +1044,7 @@ impl App {
         let open = crate::tasks::collect(&self.notebook, false);
         let open_tasks = open.len();
         let notes_with_tasks = crate::tasks::notes_covered(&open);
+        let conflicts = crate::conflicts::detect(&self.notebook).len();
 
         let recent: Vec<RecentEntry> = recent;
         let mut menu: Vec<MenuItem> = recent
@@ -1076,6 +1090,7 @@ impl App {
             recent,
             open_tasks,
             notes_with_tasks,
+            conflicts,
             note_count: self.notebook.notes.len(),
             folder_count: self.notebook.folders.len(),
             tag_count: self.tag_manager.get_tags_alphabetical().len(),
@@ -1591,6 +1606,160 @@ impl App {
             self.mode = AppMode::Normal;
             self.focused_pane = FocusedPane::Editor;
             self.jump_to_line(line_idx + 1); // jump_to_line is 1-based
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Conflict resolution
+    // -------------------------------------------------------------------------
+
+    /// Collect unresolved conflicts and enter the resolve view.
+    pub fn show_conflicts(&mut self) {
+        self.conflict_items = crate::conflicts::detect(&self.notebook);
+        if self.conflict_items.is_empty() {
+            self.set_message("No conflicts to resolve".to_string());
+            return;
+        }
+        self.conflict_selected = self.conflict_selected.min(self.conflict_items.len() - 1);
+        self.conflict_action = 0;
+        self.mode = AppMode::Conflicts;
+    }
+
+    pub fn cancel_conflicts(&mut self) {
+        self.mode = AppMode::Normal;
+    }
+
+    pub fn conflict_navigate_up(&mut self) {
+        self.conflict_selected = self.conflict_selected.saturating_sub(1);
+        self.conflict_action = 0;
+    }
+
+    pub fn conflict_navigate_down(&mut self) {
+        if self.conflict_selected < self.conflict_items.len().saturating_sub(1) {
+            self.conflict_selected += 1;
+            self.conflict_action = 0;
+        }
+    }
+
+    /// Cycle which of the three answers is highlighted.
+    pub fn conflict_cycle_action(&mut self, forward: bool) {
+        let count = Self::conflict_actions().len();
+        self.conflict_action = if forward {
+            (self.conflict_action + 1) % count
+        } else {
+            (self.conflict_action + count - 1) % count
+        };
+    }
+
+    pub fn conflict_actions() -> [crate::conflicts::Resolution; 3] {
+        use crate::conflicts::Resolution::*;
+        [KeepMine, KeepTheirs, KeepBoth]
+    }
+
+    /// The two versions of the selected conflict, as `(mine, theirs)`.
+    pub fn conflict_versions(&self) -> Option<(String, String)> {
+        let conflict = self.conflict_items.get(self.conflict_selected)?;
+        let theirs = self.notebook.notes.get(&conflict.artefact)?.content.clone();
+        let mine = conflict
+            .original
+            .and_then(|id| self.notebook.notes.get(&id))
+            .map(|n| n.content.clone())
+            .unwrap_or_default();
+        Some((mine, theirs))
+    }
+
+    /// Carry out the highlighted answer for the selected conflict.
+    ///
+    /// Every outcome ends with no conflict marker left in the vault, because a
+    /// resolution that leaves the artefact in place would show up in this list
+    /// again tomorrow and the work would not feel done.
+    pub fn resolve_selected_conflict(&mut self) {
+        use crate::conflicts::Resolution;
+
+        let Some(conflict) = self.conflict_items.get(self.conflict_selected).cloned() else {
+            return;
+        };
+        let action = Self::conflict_actions()[self.conflict_action];
+
+        // Keeping theirs needs an original to copy into; without one the only
+        // sensible reading of "keep theirs" is to promote it.
+        let action = match (action, conflict.original) {
+            (Resolution::KeepTheirs, None) => Resolution::KeepBoth,
+            (other, _) => other,
+        };
+
+        let artefact_path = self
+            .notebook
+            .notes
+            .get(&conflict.artefact)
+            .and_then(|n| n.file_path.clone());
+
+        let message = match action {
+            Resolution::KeepMine => {
+                self.discard_note(conflict.artefact, artefact_path);
+                format!("Kept your version of '{}'", conflict.base_title)
+            }
+            Resolution::KeepTheirs => {
+                let theirs = self
+                    .notebook
+                    .notes
+                    .get(&conflict.artefact)
+                    .map(|n| n.content.clone())
+                    .unwrap_or_default();
+                if let Some(original) = conflict.original {
+                    if let Some(note) = self.notebook.notes.get_mut(&original) {
+                        note.update_content(theirs.clone());
+                    }
+                    if self.current_note.as_ref().map(|n| n.id) == Some(original) {
+                        self.current_note = self.notebook.notes.get(&original).cloned();
+                        self.editor_content = theirs;
+                        self.clamp_cursor_to_content();
+                    }
+                    self.mark_note_dirty(original);
+                }
+                self.discard_note(conflict.artefact, artefact_path);
+                format!("Took the preserved version of '{}'", conflict.base_title)
+            }
+            Resolution::KeepBoth => {
+                let taken: Vec<String> =
+                    self.notebook.notes.values().map(|n| n.title.clone()).collect();
+                let title = crate::conflicts::promoted_title(&conflict.base_title, &taken);
+                if let Some(note) = self.notebook.notes.get_mut(&conflict.artefact) {
+                    note.title = title.clone();
+                    // Clearing the path is what renames the file, dropping the
+                    // marker with it — the same mechanism a rename uses.
+                    note.file_path = None;
+                }
+                if let Some(path) = artefact_path {
+                    self.mark_note_deleted(path);
+                }
+                self.mark_note_dirty(conflict.artefact);
+                format!("Kept both; the copy is now '{}'", title)
+            }
+        };
+
+        self.refresh_tree_view();
+        self.conflict_items = crate::conflicts::detect(&self.notebook);
+        if self.conflict_items.is_empty() {
+            self.mode = AppMode::Normal;
+        } else {
+            self.conflict_selected = self
+                .conflict_selected
+                .min(self.conflict_items.len() - 1);
+        }
+        self.conflict_action = 0;
+        self.set_operation_success(message, Some("🔀".to_string()));
+    }
+
+    /// Remove a note and its file.
+    fn discard_note(&mut self, id: Uuid, path: Option<std::path::PathBuf>) {
+        self.notebook.remove_note(id);
+        if let Some(path) = path {
+            self.mark_note_deleted(path);
+        }
+        if self.current_note.as_ref().map(|n| n.id) == Some(id) {
+            self.current_note = None;
+            self.editor_content.clear();
         }
     }
 
@@ -2806,5 +2975,131 @@ mod dashboard_tests {
 
         assert!(!app.focus_tree_on_current_note());
         assert_eq!(app.selected_folder_index, 0);
+    }
+}
+
+#[cfg(test)]
+mod conflict_resolution_tests {
+    use super::*;
+    use crate::conflicts::Resolution;
+    use crate::models::Note;
+
+    /// A note and the version preserved beside it.
+    fn app_with_conflict() -> (App, Uuid, Uuid) {
+        let mut app = App::default();
+        app.notebook.notes.clear();
+        app.notebook.folders.clear();
+
+        let mut mine = Note::new("Meeting".to_string(), None);
+        mine.content = "agenda\nmine\n".to_string();
+        mine.file_path = Some(std::path::PathBuf::from("/v/Meeting.md"));
+        let mine_id = mine.id;
+
+        let mut theirs = Note::new("Meeting".to_string(), None);
+        theirs.content = "agenda\ntheirs\nextra\n".to_string();
+        theirs.file_path = Some(std::path::PathBuf::from(
+            "/v/Meeting (scribble conflict 2026-08-16 131829).md",
+        ));
+        let theirs_id = theirs.id;
+
+        app.notebook.add_note(mine);
+        app.notebook.add_note(theirs);
+        app.show_conflicts();
+        (app, mine_id, theirs_id)
+    }
+
+    fn choose(app: &mut App, want: Resolution) {
+        let index = App::conflict_actions().iter().position(|a| *a == want).unwrap();
+        app.conflict_action = index;
+    }
+
+    #[test]
+    fn the_panel_finds_the_conflict_and_pairs_it() {
+        let (app, mine_id, theirs_id) = app_with_conflict();
+        assert_eq!(app.mode, AppMode::Conflicts);
+        assert_eq!(app.conflict_items.len(), 1);
+        assert_eq!(app.conflict_items[0].artefact, theirs_id);
+        assert_eq!(app.conflict_items[0].original, Some(mine_id));
+    }
+
+    #[test]
+    fn keeping_mine_discards_the_preserved_copy() {
+        let (mut app, mine_id, theirs_id) = app_with_conflict();
+        choose(&mut app, Resolution::KeepMine);
+        app.resolve_selected_conflict();
+
+        assert!(app.notebook.notes.contains_key(&mine_id), "the note was removed");
+        assert!(!app.notebook.notes.contains_key(&theirs_id), "the copy survived");
+        assert_eq!(app.notebook.notes.get(&mine_id).unwrap().content, "agenda\nmine\n");
+        assert!(
+            app.disk.deleted_note_paths.iter().any(|p| p.to_string_lossy().contains("scribble conflict")),
+            "the conflict file was never queued for removal"
+        );
+        assert!(app.conflict_items.is_empty(), "the conflict is still listed");
+    }
+
+    #[test]
+    fn keeping_theirs_takes_the_text_and_discards_the_copy() {
+        let (mut app, mine_id, theirs_id) = app_with_conflict();
+        choose(&mut app, Resolution::KeepTheirs);
+        app.resolve_selected_conflict();
+
+        assert_eq!(
+            app.notebook.notes.get(&mine_id).unwrap().content,
+            "agenda\ntheirs\nextra\n",
+            "the preserved text was not taken"
+        );
+        assert!(!app.notebook.notes.contains_key(&theirs_id), "the copy survived");
+        assert!(app.disk.dirty_note_ids.contains(&mine_id), "no write was queued");
+    }
+
+    /// Keeping both has to strip the marker, or the promoted note is still a
+    /// conflict as far as everything else is concerned and comes back tomorrow.
+    #[test]
+    fn keeping_both_promotes_the_copy_to_an_ordinary_note() {
+        let (mut app, mine_id, theirs_id) = app_with_conflict();
+        choose(&mut app, Resolution::KeepBoth);
+        app.resolve_selected_conflict();
+
+        assert!(app.notebook.notes.contains_key(&mine_id));
+        let promoted = app.notebook.notes.get(&theirs_id).expect("the copy was removed");
+        assert_eq!(promoted.title, "Meeting (conflict copy)");
+        assert!(
+            promoted.file_path.is_none(),
+            "the copy kept its old path, so the file keeps the marker"
+        );
+        assert!(app.disk.dirty_note_ids.contains(&theirs_id));
+        assert!(
+            app.conflict_items.is_empty(),
+            "the promoted note is still being reported as a conflict"
+        );
+    }
+
+    /// With no original to copy into, "keep theirs" can only mean "promote it".
+    #[test]
+    fn keeping_theirs_with_no_original_promotes_instead() {
+        let mut app = App::default();
+        app.notebook.notes.clear();
+        let mut orphan = Note::new("Gone".to_string(), None);
+        orphan.content = "only copy\n".to_string();
+        orphan.file_path = Some(std::path::PathBuf::from(
+            "/v/Gone (conflicted copy 2026-08-16 120000).md",
+        ));
+        let id = orphan.id;
+        app.notebook.add_note(orphan);
+        app.show_conflicts();
+
+        choose(&mut app, Resolution::KeepTheirs);
+        app.resolve_selected_conflict();
+
+        let kept = app.notebook.notes.get(&id).expect("the only copy was deleted");
+        assert_eq!(kept.title, "Gone (conflict copy)");
+        assert_eq!(kept.content, "only copy\n", "the only copy's text was lost");
+    }
+
+    #[test]
+    fn the_landing_page_reports_unresolved_conflicts() {
+        let (app, _, _) = app_with_conflict();
+        assert_eq!(app.dashboard().conflicts, 1);
     }
 }
