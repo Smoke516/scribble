@@ -27,12 +27,6 @@ echo "🖥️  Creating desktop entry..."
 DESKTOP_DIR="$HOME/.local/share/applications"
 mkdir -p "$DESKTOP_DIR"
 
-if [[ "$SHELL" == *"zsh"* ]]; then
-    SHELL_CMD="$HOME/.local/bin/x-terminal-emulator || gnome-terminal || konsole || xfce4-terminal"
-else
-    SHELL_CMD="gnome-terminal"
-fi
-
 cat > "$DESKTOP_DIR/scribble.desktop" << EOF
 [Desktop Entry]
 Version=1.0
