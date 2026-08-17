@@ -67,15 +67,6 @@ pub fn strip_marker(stem: &str) -> Option<(String, Producer)> {
     None
 }
 
-/// Whether a note is a conflict artefact rather than a note somebody wrote.
-pub fn is_artefact(notebook: &NotebookData, id: Uuid) -> bool {
-    notebook
-        .notes
-        .get(&id)
-        .and_then(|n| file_stem(n))
-        .and_then(|stem| strip_marker(&stem))
-        .is_some()
-}
 
 fn file_stem(note: &crate::models::Note) -> Option<String> {
     note.file_path
@@ -181,6 +172,11 @@ pub fn changed_lines(rows: &[Row]) -> usize {
 }
 
 /// What to do with a conflict.
+///
+/// The shared `Keep` prefix is deliberate: these are the three answers to one
+/// question, and `Resolution::Mine` reads as a fact about ownership rather than
+/// as the instruction it is.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
     /// Keep the note as it stands; discard the preserved version.

@@ -288,7 +288,7 @@ fn notes(matcher: &SkimMatcherV2, text: &str, ctx: &Context) -> Vec<Item> {
             })
         })
         .collect();
-    out.sort_by(|a, b| b.score.cmp(&a.score));
+    out.sort_by_key(|i| std::cmp::Reverse(i.score));
     out.truncate(PER_POOL);
     out
 }
@@ -346,7 +346,7 @@ fn tags(matcher: &SkimMatcherV2, text: &str, ctx: &Context) -> Vec<Item> {
             })
         })
         .collect();
-    out.sort_by(|a, b| b.score.cmp(&a.score));
+    out.sort_by_key(|i| std::cmp::Reverse(i.score));
     out.truncate(PER_POOL);
     out
 }
@@ -413,7 +413,7 @@ fn content(matcher: &SkimMatcherV2, text: &str, ctx: &Context) -> Vec<Item> {
             score,
         });
     }
-    out.sort_by(|a, b| b.score.cmp(&a.score));
+    out.sort_by_key(|i| std::cmp::Reverse(i.score));
     out.truncate(PER_POOL);
     out
 }
