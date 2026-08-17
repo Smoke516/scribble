@@ -769,9 +769,15 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
             }
         }
         Action::SearchPrevOrTemplates => {
+            // `N` steps backwards through an in-note search while one is running,
+            // and otherwise offers a template. It used to require NOT being focused
+            // on the editor, while the picker itself required a note to be open —
+            // and having a note open is most of what "editor focused" means. The
+            // obvious route in (`n` to create a note, `N` to fill it) hit that gap
+            // and silently did nothing.
             if editor_focused && app.note_search.active {
                 app.note_search_prev();
-            } else if !editor_focused {
+            } else {
                 app.show_template_picker();
             }
         }

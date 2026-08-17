@@ -108,7 +108,28 @@ impl App {
     // Undo delete functionality
     pub fn undo_last_delete(&mut self) -> Result<(), String> {
         match self.notebook.undo_last_delete() {
-            Ok(message) => {
+            Ok((message, restored)) => {
+                match restored {
+                    // Put the file back. Deleting queued its removal, so that has to
+                    // be cancelled too — otherwise the same save would delete the
+                    // file and then rewrite it.
+                    crate::models::Restored::Note(id) => {
+                        if let Some(path) = self
+                            .notebook
+                            .notes
+                            .get(&id)
+                            .and_then(|n| n.file_path.clone())
+                        {
+                            self.disk.deleted_note_paths.retain(|p| p != &path);
+                        }
+                        self.mark_note_dirty(id);
+                    }
+                    // A folder is a directory, and only a full save recreates those.
+                    crate::models::Restored::Folder => {
+                        self.disk.force_full_save = true;
+                        self.disk.pending_disk_save = true;
+                    }
+                }
                 self.refresh_tree_view();
                 self.set_operation_success(message, Some("↩️".to_string()));
                 Ok(())
