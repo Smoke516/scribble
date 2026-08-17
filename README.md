@@ -60,7 +60,7 @@ A terminal note-taking app for Obsidian-style markdown vaults. Fast to open, qui
 - **↩️ Undo/Delete Safety** - Safely delete with full undo capability (`u` to undo)
 - **🔎 Advanced Search** - Regex and scoped search like `case:`/`folder:Name` (`Ctrl+A`), plus in-note search with `/` and `n`/`N` to step through matches
 - **🔁 Search & Replace** - Find-and-replace across notes (`Ctrl+R`)
-- **📑 Templates** - Create notes from Blank/Daily/Meeting/Project templates (`N`)
+- **📑 Templates** - Fill the open note from a Blank/Daily/Meeting/Project template (`N`); `{date}` is substituted, and `u` undoes it
 - **🎯 Smart Autocompletion** - Intelligent markdown completion with context awareness
 - **📖 Scrollable Help** - Navigate help with `j/k`, `g/G`, PageUp/Down (`?`)
 

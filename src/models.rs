@@ -215,6 +215,13 @@ impl TrashBin {
     }
 }
 
+/// What `undo_last_delete` brought back, so the caller can put it on disk again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Restored {
+    Note(Uuid),
+    Folder,
+}
+
 impl NotebookData {
     pub fn new() -> Self {
         Self {
@@ -273,13 +280,19 @@ impl NotebookData {
         }
     }
 
-    pub fn undo_last_delete(&mut self) -> Result<String, String> {
+    /// Restore the most recent deletion.
+    ///
+    /// Returns the message and, for a note, its id — the caller needs it to queue
+    /// the file back onto disk. Without that the note returned to the list and
+    /// nowhere else, and was gone again at the next launch.
+    pub fn undo_last_delete(&mut self) -> Result<(String, Restored), String> {
         if let Some(deleted_item) = self.trash_bin.restore_latest() {
             match deleted_item.item {
                 DeletedItemType::Note(note) => {
                     let title = note.title.clone();
-                    self.notes.insert(note.id, note);
-                    Ok(format!("Restored note: {}", title))
+                    let id = note.id;
+                    self.notes.insert(id, note);
+                    Ok((format!("Restored note: {}", title), Restored::Note(id)))
                 }
                 DeletedItemType::Folder(folder) => {
                     let name = folder.name.clone();
@@ -291,7 +304,7 @@ impl NotebookData {
                     }
                     
                     self.folders.insert(folder_id, folder);
-                    Ok(format!("Restored folder: {}", name))
+                    Ok((format!("Restored folder: {}", name), Restored::Folder))
                 }
             }
         } else {

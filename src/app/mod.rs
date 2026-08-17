@@ -2284,6 +2284,36 @@ mod persistence_tests {
     /// Renaming a folder relocated its directory, but renaming a note left the
     /// file under its old name — so the filename and the title diverged
     /// permanently, which everything outside scribble sees and scribble does not.
+    /// Undo restored the note to the list and nowhere else: the file stayed
+    /// deleted, so the note was gone again at the next launch.
+    #[test]
+    fn undoing_a_delete_puts_the_file_back() {
+        let mut app = App::default();
+        app.notebook.notes.clear();
+        let mut note = Note::new("Gone".to_string(), None);
+        note.file_path = Some(std::path::PathBuf::from("/vault/Gone.md"));
+        let id = note.id;
+        app.notebook.add_note(note);
+
+        // Delete it the way the app does: file queued for removal.
+        let path = app.notebook.notes.get(&id).unwrap().file_path.clone().unwrap();
+        app.notebook.remove_note(id);
+        app.mark_note_deleted(path.clone());
+        assert!(app.disk.deleted_note_paths.contains(&path));
+
+        app.undo_last_delete().unwrap();
+
+        assert!(app.notebook.notes.contains_key(&id), "the note did not come back");
+        assert!(
+            app.disk.dirty_note_ids.contains(&id),
+            "the file was never queued to be written again"
+        );
+        assert!(
+            !app.disk.deleted_note_paths.contains(&path),
+            "the queued deletion survived, so the same save would delete then rewrite it"
+        );
+    }
+
     #[test]
     fn renaming_a_note_renames_its_file() {
         let mut app = App::default();
