@@ -38,6 +38,7 @@ pub enum PaletteAction {
 pub enum Command {
     DailyNote,
     Tasks,
+    Conflicts,
     Outline,
     Explorer,
     RecentFiles,
@@ -54,9 +55,10 @@ pub enum Command {
 impl Command {
     /// Every command, in the order they appear when the palette is opened with `>`
     /// and nothing typed.
-    pub const ALL: [Command; 13] = [
+    pub const ALL: [Command; 14] = [
         Command::DailyNote,
         Command::Tasks,
+        Command::Conflicts,
         Command::Outline,
         Command::Explorer,
         Command::RecentFiles,
@@ -75,6 +77,7 @@ impl Command {
         match self {
             Command::DailyNote => "Open today's daily note",
             Command::Tasks => "Show open tasks",
+            Command::Conflicts => "Resolve conflicts",
             Command::Outline => "Jump to a heading in this note",
             Command::Explorer => "Browse the vault",
             Command::RecentFiles => "Open a recent note",
@@ -95,6 +98,8 @@ impl Command {
         match self {
             Command::DailyNote => "F4",
             Command::Tasks => "Ctrl+K",
+            // Reached by name and from the landing page, not by a chord of its own.
+            Command::Conflicts => "",
             Command::Outline => "Ctrl+G",
             Command::Explorer => "Ctrl+E",
             Command::RecentFiles => "Ctrl+O",
@@ -283,7 +288,7 @@ fn notes(matcher: &SkimMatcherV2, text: &str, ctx: &Context) -> Vec<Item> {
             })
         })
         .collect();
-    out.sort_by(|a, b| b.score.cmp(&a.score));
+    out.sort_by_key(|i| std::cmp::Reverse(i.score));
     out.truncate(PER_POOL);
     out
 }
@@ -341,7 +346,7 @@ fn tags(matcher: &SkimMatcherV2, text: &str, ctx: &Context) -> Vec<Item> {
             })
         })
         .collect();
-    out.sort_by(|a, b| b.score.cmp(&a.score));
+    out.sort_by_key(|i| std::cmp::Reverse(i.score));
     out.truncate(PER_POOL);
     out
 }
@@ -408,7 +413,7 @@ fn content(matcher: &SkimMatcherV2, text: &str, ctx: &Context) -> Vec<Item> {
             score,
         });
     }
-    out.sort_by(|a, b| b.score.cmp(&a.score));
+    out.sort_by_key(|i| std::cmp::Reverse(i.score));
     out.truncate(PER_POOL);
     out
 }

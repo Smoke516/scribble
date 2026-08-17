@@ -171,7 +171,14 @@ files. The rule is simple: **it never overwrites a file it cannot account for.**
   the file exists.
 
 Nothing is ever merged or discarded automatically — which version wins is your
-call, made whenever you get to it. Conflict files are recognised as artefacts, so
+call, made whenever you get to it. **`Ctrl+P` → "resolve conflicts"** shows the
+two versions with the differing lines marked, and offers three answers: keep
+yours, take theirs, or keep both (the copy becomes an ordinary note). Whichever
+you pick, no conflict marker is left behind. The landing page tells you when any
+are waiting.
+
+Nextcloud's `(conflicted copy)` and Syncthing's `.sync-conflict-` files are
+recognised the same way, so conflicts from outside scribble resolve here too. Conflict files are recognised as artefacts, so
 they never displace the note they were forked from in the sidebar.
 
 ## Command Line Options

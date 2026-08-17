@@ -2,6 +2,7 @@ mod app;
 mod autocomplete;
 mod capture;
 mod config;
+mod conflicts;
 mod error;
 mod events;
 mod models;
