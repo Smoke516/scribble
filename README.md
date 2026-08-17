@@ -1,8 +1,8 @@
-# Scribble ✏️ v3.0.1
+# Scribble ✏️ v3.1.0
 
 A terminal note-taking app for Obsidian-style markdown vaults. Fast to open, quick to capture into, vim-like to edit, and careful never to overwrite work it did not write.
 
-![Version](https://img.shields.io/badge/version-3.0.1-brightgreen)
+![Version](https://img.shields.io/badge/version-3.1.0-brightgreen)
 ![Terminal Interface](https://img.shields.io/badge/interface-terminal-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)
@@ -144,7 +144,7 @@ cargo install --path .
 ```bash
 # Check version
 scribble --version
-# Output: scribble 3.0.1
+# Output: scribble 3.1.0
 
 # View help
 scribble --help
@@ -219,7 +219,7 @@ timestamp_entries = true    # prefix each entry with HH:MM
 
 ### Command Line Help Output
 ```
-scribble v3.0.1
+scribble v3.1.0
 
 A powerful terminal-based note-taking app with folder organization,
 markdown support, and syntax highlighting.
@@ -279,38 +279,24 @@ Once started, press '?' for in-app help.
    - Supports Helix (`hx`), Neovim, Vim, and more
    - Changes are automatically saved back to Scribble
 
-## 🆕 What's New in v3.0.0
+## 🆕 What's New in v3.1.0
 
-### 🔦 Go to — one door for finding anything (`Ctrl+P`)
-There were six ways to find a note. Now there is one door in front of all of
-them: notes, tags, headings and commands, ranked together. `>` commands, `#`
-tags, `?` full text, `@` headings. The original six still work as shortcuts.
+### 🔀 Resolve conflicts in the app (`Ctrl+P` → "resolve conflicts")
+Scribble already refused to overwrite work it didn't write, preserving what it
+found beside your note. Now you can reconcile the two: the versions side by side
+with differing lines marked, and three answers — keep yours, take theirs, or keep
+both. Nextcloud and Syncthing conflicts resolve here too.
 
-### ⌨️ Real vim operators
-`d`, `c` and `y` compose with motions, text objects and counts — `dw`, `ciw`,
-`d$`, `3dd`, `d3w`, `dG`, `daw`, and `D`/`C`/`Y`. Counts work on plain motions
-too, and a yank remembers whether it was linewise.
+### 🩺 An audit of everything that claimed to work
+Fifteen features didn't do what they said. Five were losing data silently:
+search and replace, undo-delete and import all reported success and wrote nothing
+to disk. Renaming a note left the file under its old name. Eight config settings
+were ignored entirely. See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
-### ☑️ Task panel (`Ctrl+K`)
-Every open task in the vault in one list, grouped by note. `Enter` jumps to it,
-`Space` ticks it where it lives, `a` shows completed ones.
-
-### ⚡ Quick capture from the shell
-`scribble -n "buy milk"`, `scribble -t "..."` to append to today's daily note,
-`scribble -t` to open it, or pipe stdin. Each prints the path it wrote.
-
-### 📁 Live vault switching (`Ctrl+V`)
-Switches immediately instead of asking for a restart, and remembers your choice.
-
-### 🛡️ Your notes are not overwritten
-Scribble assumes it is not the only thing writing to your vault. It never
-overwrites a file it cannot account for — see
-[External Changes and Conflicts](#external-changes-and-conflicts).
-
-### ⚠️ Breaking
-- **Wiki links removed.** `[[ ]]` parsing, the backlinks panel, `[[`
-  autocomplete, `Ctrl+B` and `Ctrl+L` are gone. Note content is untouched.
-- **`Ctrl+P` is now the Go to palette.** Live preview keeps `F2`.
+### ✏️ The external editor gets the real file
+`e` used to hand your editor a copy in `/tmp` with no frontmatter. It now opens
+the actual note in your vault, so your file tree, git status, project search and
+LSP all see where it lives.
 
 Earlier releases are in [CHANGELOG.md](CHANGELOG.md).
 

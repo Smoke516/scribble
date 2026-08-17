@@ -5,6 +5,69 @@ All notable changes to Scribble will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-08-16
+
+Conflicts can be resolved in the app, and an audit of everything that already
+claimed to work found fifteen features that did not. Five of those were losing
+data.
+
+### ✨ Added
+
+- **Resolve conflicts** (`Ctrl+P` → "resolve conflicts"). The two versions side by
+  side with differing lines marked, and three answers: keep yours, take theirs, or
+  keep both with the copy promoted to an ordinary note. Every outcome leaves no
+  marker behind, so a resolved conflict stays resolved. Nextcloud's
+  `(conflicted copy)` and Syncthing's `.sync-conflict-` files resolve here too.
+  Unresolved conflicts are announced on the landing page.
+- The open note's tags in the status line.
+
+### 🐛 Fixed — silent data loss
+
+Each of these reported success and wrote nothing to disk:
+
+- **Search and replace** said "Replaced N occurrences" and queued no write. It
+  persisted only when something else had already marked the note dirty, so it
+  worked most of the time.
+- **Undo delete** said "Restored note: X" and put it back in the list while the
+  file stayed deleted — the note was gone at the next launch.
+- **Import** said "Import completed: N successful" and left the vault untouched.
+
+### 🐛 Fixed — doing the wrong thing quietly
+
+- **Renaming a note** rewrote the frontmatter title but left the file under its old
+  name, so filename and title diverged permanently.
+- **The external editor** was handed a copy in `/tmp` without frontmatter, so its
+  file tree, git status, project search and LSP saw nothing of the vault. It now
+  opens the real file, with anything unsaved flushed first and the note reloaded
+  after.
+- **Eight config settings were ignored entirely** — `editor.default`,
+  `ui.preview_width`, `behavior.auto_save`, `file_watching`, `spell_check` and
+  `backup_on_import` (whose backup ran unconditionally), plus two governing
+  features that no longer exist, now removed.
+- **Templates** were gated so the obvious route in — create a note, then press `N`
+  — did nothing at all.
+- **The palette** printed `Ctrl+P` as the shortcut for live preview, after 3.0.0
+  moved preview to `F2`.
+- The help screen taught `:spell on`, which the parser rejected.
+- `:export` could panic while reporting success.
+- The status bar measured its width in bytes, so a multi-byte tag pushed the
+  left-hand side off screen.
+
+### 🗑️ Removed
+
+- The **session persistence** claim from the README. Nothing restored a note at
+  startup; the feature never existed.
+
+### 🛡️ Guards
+
+Three new tests, each verified to fail when the thing it guards is broken: every
+config setting must be read somewhere, every palette command must print the chord
+the keymap binds, and every Ctrl chord must appear in the help screen.
+
+### 🧪 Internal
+
+- Tests 217 → 234 in this release; 67 → 234 across the day.
+
 ## [3.0.1] - 2026-08-16
 
 Fixes for two things 3.0.0 shipped broken.
