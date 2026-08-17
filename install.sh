@@ -59,7 +59,9 @@ cat > "$WRAPPER_SCRIPT" << 'EOF'
 #!/bin/bash
 # Scribble GUI wrapper - opens scribble in a new terminal window
 
-if command -v gnome-terminal &> /dev/null; then
+if command -v ghostty &> /dev/null; then
+    ghostty --title="Scribble" -e scribble "$@"
+elif command -v gnome-terminal &> /dev/null; then
     gnome-terminal --title="Scribble" -- scribble "$@"
 elif command -v konsole &> /dev/null; then
     konsole --title "Scribble" -e scribble "$@"
