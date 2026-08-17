@@ -138,7 +138,12 @@ impl App {
             note.tags = parsed_note.tags;
         }
         
+        // Queue the write. Import used to add notes to memory only, so a run
+        // reporting "Import completed: 2 successful" left nothing in the vault and
+        // the notes were gone at the next launch.
+        let imported_id = note.id;
         self.notebook.add_note(note);
+        self.mark_note_dirty(imported_id);
         
         // Track if the title was changed due to conflict
         if final_title != parsed_note.title {
@@ -252,5 +257,42 @@ impl App {
         
         storage.list_backups()
             .map_err(|e| format!("Failed to list backups: {}", e))
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+    use std::fs;
+
+    /// Import added notes to memory and requested no write, so a run reporting
+    /// "Import completed: 2 successful" left nothing in the vault and the notes
+    /// were gone at the next launch.
+    #[test]
+    fn importing_queues_the_new_notes_for_writing() {
+        let dir = std::env::temp_dir().join(format!("scribble_import_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("one.md"), "# Imported One\n\ntext\n").unwrap();
+        fs::write(dir.join("two.md"), "# Imported Two\n\nmore\n").unwrap();
+
+        let mut app = App::default();
+        app.notebook.notes.clear();
+        // Backups are a separate concern and would write outside the test.
+        app.config.behavior.backup_on_import = false;
+
+        let result = app
+            .import_notes_from_directory(dir.to_str().unwrap())
+            .expect("import should succeed");
+
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(app.notebook.notes.len(), 2, "notes were not imported: {:?}", result);
+        assert_eq!(
+            app.disk.dirty_note_ids.len(),
+            2,
+            "imported notes were never queued for writing"
+        );
+        assert!(app.disk.pending_disk_save, "no disk write was requested");
     }
 }
