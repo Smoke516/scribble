@@ -14,51 +14,42 @@ impl App {
     }
     
     /// Apply the selected autocompletion
+    ///
+    /// The template's `$0` decides where the cursor lands, rather than an offset
+    /// counted back from the end — every one of those offsets was wrong, and
+    /// nothing noticed because the suggestions carrying them could not fire.
     pub fn apply_autocomplete(&mut self) -> bool {
         if !self.autocomplete_state.active {
             return false;
         }
-        
-        if let Some(suggestion) = self.autocomplete_state.get_selected_suggestion() {
-            let lines: Vec<&str> = self.editor_content.lines().collect();
-            if self.editor_cursor.0 as usize >= lines.len() {
-                return false;
-            }
-            
-            let _current_line = lines[self.editor_cursor.0 as usize];
-            let line_start = self.get_line_start_position(self.editor_cursor.0 as usize);
-            
-            // Calculate the absolute position in the content
-            let trigger_abs_pos = line_start + self.autocomplete_state.trigger_start_pos;
-            let cursor_abs_pos = self.cursor_byte_index();
-            
-            // Remove the trigger text and insert the completion
-            let mut new_content = String::new();
-            new_content.push_str(&self.editor_content[..trigger_abs_pos]);
-            new_content.push_str(&suggestion.completion);
-            new_content.push_str(&self.editor_content[cursor_abs_pos..]);
-            
-            self.editor_content = new_content;
-            
-            // Update cursor position
-            let completion_end_pos = trigger_abs_pos + suggestion.completion.len();
-            let new_cursor_pos = if suggestion.cursor_offset >= 0 {
-                completion_end_pos + suggestion.cursor_offset as usize
-            } else {
-                completion_end_pos.saturating_sub((-suggestion.cursor_offset) as usize)
-            };
-            
-            // Convert absolute position back to line/column
-            self.update_cursor_from_absolute_position(new_cursor_pos);
-            
-            self.autocomplete_state.deactivate();
-            self.mark_modified();
-            return true;
+
+        let Some(suggestion) = self.autocomplete_state.get_selected_suggestion().copied() else {
+            return false;
+        };
+        if self.editor_cursor.0 as usize >= self.editor_content.lines().count() {
+            return false;
         }
-        
-        false
+
+        let line_start = self.get_line_start_position(self.editor_cursor.0 as usize);
+        let trigger_abs_pos = line_start + self.autocomplete_state.trigger_start_pos;
+        let cursor_abs_pos = self.cursor_byte_index();
+        if trigger_abs_pos > cursor_abs_pos || cursor_abs_pos > self.editor_content.len() {
+            return false;
+        }
+
+        let (insert, cursor_in_insert) = suggestion.expand();
+        let mut new_content = String::with_capacity(self.editor_content.len() + insert.len());
+        new_content.push_str(&self.editor_content[..trigger_abs_pos]);
+        new_content.push_str(&insert);
+        new_content.push_str(&self.editor_content[cursor_abs_pos..]);
+        self.editor_content = new_content;
+
+        self.update_cursor_from_absolute_position(trigger_abs_pos + cursor_in_insert);
+        self.autocomplete_state.deactivate();
+        self.mark_modified();
+        true
     }
-    
+
     /// Move to next autocomplete suggestion
     pub fn next_autocomplete_suggestion(&mut self) {
         self.autocomplete_state.next_suggestion();

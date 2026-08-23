@@ -1802,7 +1802,8 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
             Span::styled("Insert Mode", Style::default().fg(TokyoNightTheme::GREEN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
         ]),
         Line::from(""),
-        Line::from("  Tab        Accept autocomplete suggestion  ↑/↓   Navigate suggestions"),
+        Line::from("  Tab        Accept snippet / indent list    ↑/↓   Navigate suggestions"),
+        Line::from("  Shift+Tab  Outdent the list item"),
         Line::from("  Ctrl+Z     Undo                           Ctrl+Y  Redo"),
         Line::from("  Ctrl+S     Save                           F2      Toggle preview"),
         Line::from("  Ctrl+V     Paste system clipboard"),
@@ -1993,22 +1994,14 @@ fn draw_autocomplete_popup(f: &mut Frame, app: &App, editor_area: Rect) {
         .map(|(i, suggestion)| {
             let is_selected = i == app.autocomplete_state.selected_index;
             
-            let icon = if suggestion.trigger.starts_with("#") {
-                "#"
-            } else if suggestion.trigger == "-" || suggestion.trigger == "*" {
-                "•"
-            } else if suggestion.trigger.contains("`") {
-                "`"
-            } else if suggestion.trigger == "[" || suggestion.trigger == "![" {
-                "🔗"
-            } else if suggestion.trigger == "**" || suggestion.trigger == "*" {
-                "*"
-            } else if suggestion.trigger == "|" {
-                "📋"
-            } else {
-                "📝"
+            let icon = match suggestion.trigger {
+                "```" | "`" => "`",
+                "[" | "![" => "🔗",
+                "**" | "*" => "*",
+                "|" => "📋",
+                _ => "📝",
             };
-            
+
             let style = if is_selected {
                 Style::default().fg(TokyoNightTheme::BG).bg(TokyoNightTheme::BLUE)
             } else {
@@ -2017,7 +2010,7 @@ fn draw_autocomplete_popup(f: &mut Frame, app: &App, editor_area: Rect) {
             
             let line = Line::from(vec![
                 Span::styled(format!("{} ", icon), Style::default().fg(TokyoNightTheme::CYAN)),
-                Span::styled(&suggestion.description, style),
+                Span::styled(suggestion.description, style),
             ]);
             
             ListItem::new(line).style(style)

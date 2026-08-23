@@ -39,6 +39,27 @@ footnote definitions rendered as bare paragraphs.
   the conversion right; everything now goes through the same one. Eleven tests,
   and a twelfth that renders a note full of multi-byte text in every mode.
 
+### ✨ Changed — markdown snippets
+
+Autocomplete offered seventeen suggestions and helped with none of them.
+
+- **Seven could never fire.** The scan required the text before the cursor to end
+  in a space, and `[`, `![`, `**`, `*`, `` ` ``, ```` ``` ```` and `---` do not —
+  so the only suggestions that inserted anything useful were unreachable.
+- **Ten replaced the trigger with itself.** Typing `- ` offered "Bullet list
+  item"; accepting it turned `- ` into `- `.
+- Because a popup sat over every list item and every heading, **`Tab` could not
+  indent a list item**, **`Enter` would not break the line**, and the first `Esc`
+  dismissed a popup instead of leaving insert mode.
+- Every cursor offset among the unreachable suggestions was wrong. Nothing
+  noticed, because nothing could reach them.
+
+The table now holds seven snippets, each of which leaves the note different from
+what you typed, and each carrying a `$0` marking where the cursor goes rather
+than an offset counted back from the end. `Tab` accepts a snippet, or indents the
+list item you are on (`Shift+Tab` outdents, two spaces, matching what the preview
+renders). `Enter` always breaks the line.
+
 ### 🐛 Fixed — silent data loss
 
 - **`Enter` in the editor jumped to another note**, and took up to two seconds of
