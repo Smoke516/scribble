@@ -74,6 +74,30 @@ renders). `Enter` always breaks the line.
 
 ### 🐛 Fixed — silent data loss
 
+- **Switching notes threw away the buffer.** `select_note` replaced
+  `editor_content` with the target note's stored text without folding the current
+  buffer back into the notebook first, and the autosave is a two-second debounce
+  — so everything typed since it last fired was gone, undo included. Every route
+  that opens a note went through it. Re-opening the note already open did the
+  same thing in place, which the tree now makes easy to do: `Tab` into it and
+  press `Enter` on the note you are already reading, and the buffer reverted to
+  the last thing written to disk.
+- **`r` and `m` from the folder tree acted on the note on screen**, not the row
+  highlighted. Highlight a note, press `r`, and you are renaming a different one.
+  They retargeted unconditionally, which is right when the tree is hidden and
+  wrong when it is the thing you are looking at.
+- **`d` from the preview pane offered to delete the tree's highlight** — a note
+  that may not be the one on screen — while `r` in that same pane renamed the one
+  that was. All three now agree: the highlight when the tree is focused and
+  drawn, the open note otherwise.
+- **`Tab` moved focus into the folder tree even when it is not drawn**, which is
+  the default (`ui.show_sidebar = false` makes it a `Ctrl+E` overlay). `j`/`k`
+  then moved a highlight nobody could see, and `Enter` opened whatever it landed
+  on. A pane that is not on screen is no longer in the cycle.
+- **`PageUp`/`PageDown` and `Ctrl+U`/`Ctrl+D` scrolled the editor while the
+  preview pane had focus**, and `PageUp` there reset the editor to the top. `j`
+  and `k` scroll the preview, so paging now does too.
+
 - **`Enter` in the editor jumped to another note**, and took up to two seconds of
   typing with it. The binding activated whatever the folder tree had selected
   regardless of which pane had focus — and the tree's selection does not follow
