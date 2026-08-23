@@ -44,7 +44,6 @@ pub struct UiConfig {
 #[serde(default)]
 pub struct BehaviorConfig {
     pub auto_save: bool,
-    pub backup_on_import: bool,
     pub file_watching: bool,
     pub spell_check: bool,
 }
@@ -104,7 +103,6 @@ impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
             auto_save: true,
-            backup_on_import: true,
             file_watching: true,
             spell_check: false,
         }
@@ -191,7 +189,9 @@ mod tests {
     ///
     /// Eight of them were not: the config promised control over the editor, the
     /// preview width, autosave, file watching, spell check and import backups, and
-    /// changing any of them did nothing at all. A setting that is ignored is worse
+    /// changing any of them did nothing at all. (`backup_on_import` is gone
+    /// entirely now — the backup it governed copied the JSON notebook, which no
+    /// longer exists.) A setting that is ignored is worse
     /// than one that is absent, because you believe you turned something off.
     ///
     /// Source-scanning is crude, but it is the only check that fails when someone
@@ -213,7 +213,7 @@ mod tests {
         // Field names as they appear in a read: `.field`.
         let fields = [
             "default", "auto_detect", "recent", "theme", "show_sidebar", "preview_width",
-            "show_line_numbers", "relative_line_numbers", "auto_save", "backup_on_import",
+            "show_line_numbers", "relative_line_numbers", "auto_save",
             "file_watching", "spell_check", "daily_folder", "daily_format", "timestamp_entries",
         ];
 

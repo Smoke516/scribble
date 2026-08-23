@@ -508,6 +508,27 @@ pub struct App {
     // Spell check
 }
 
+/// Where `:export` and `:export html` write when no path is given.
+pub fn default_export_dir() -> std::path::PathBuf {
+    dirs::document_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("scribble_export")
+}
+
+/// The vault used when nothing else names one.
+///
+/// Notes are markdown files in a directory, always — there is no second way to
+/// store them, so a first run with no configuration needs a directory rather
+/// than a fallback format.
+pub fn default_vault_dir() -> std::path::PathBuf {
+    dirs::data_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("scribble")
+        .join("vault")
+}
+
 impl App {
     pub fn new(config: &Config) -> Self {
         let mut app = Self {

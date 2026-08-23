@@ -1260,41 +1260,15 @@ fn execute_command(app: &mut App, command: &str) {
             }
         }
         "export" => {
-            match app.export_all_notes() {
-                Ok(count) => {
-                    let where_to = crate::storage::Storage::new()
-                        .map(|s| s.get_notes_dir().display().to_string())
-                        .unwrap_or_else(|_| "the notes directory".to_string());
-                    app.set_operation_success(
-                        format!("Exported {} notes to {}", count, where_to),
-                        Some("📦".to_string()),
-                    );
-                },
+            // Same destination the HTML export defaults to, rather than the data
+            // directory the deleted JSON backend happened to own.
+            let dest = crate::app::default_export_dir();
+            match app.export_notes_to_directory(&dest.to_string_lossy()) {
+                Ok(count) => app.set_operation_success(
+                    format!("Exported {} notes to {}", count, dest.display()),
+                    Some("📦".to_string()),
+                ),
                 Err(e) => app.set_operation_error(format!("Export failed: {}", e), Some("🚨".to_string())),
-            }
-        },
-        "backup" => {
-            match app.create_backup() {
-                Ok(_) => app.set_operation_success("Backup created successfully".to_string(), Some("💾".to_string())),
-                Err(e) => app.set_operation_error(format!("Backup failed: {}", e), Some("🚨".to_string())),
-            }
-        },
-        "list-backups" | "backups" => {
-            match app.list_backups() {
-                Ok(backups) => {
-                    if backups.is_empty() {
-                        app.set_message("No backups found".to_string());
-                    } else {
-                        app.set_message(format!("Found {} backup(s)", backups.len()));
-                        for (i, backup) in backups.iter().enumerate().take(5) {
-                            app.message_history.push_back(format!("{}: {}", i + 1, backup.display()));
-                        }
-                        if backups.len() > 5 {
-                            app.message_history.push_back(format!("... and {} more", backups.len() - 5));
-                        }
-                    }
-                },
-                Err(e) => app.set_operation_error(format!("Failed to list backups: {}", e), Some("🚨".to_string())),
             }
         },
         "help" | "h" => {

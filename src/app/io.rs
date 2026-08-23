@@ -2,36 +2,6 @@ use super::*;
 use crate::models::Note;
 
 impl App {
-    pub fn export_all_notes(&self) -> Result<usize, String> {
-        let storage = crate::storage::Storage::new()
-            .map_err(|e| format!("Failed to initialize storage: {}", e))?;
-        
-        let export_dir = storage.get_notes_dir();
-        std::fs::create_dir_all(&export_dir)
-            .map_err(|e| format!("Failed to create export directory: {}", e))?;
-        
-        let mut exported_count = 0;
-        for note in self.notebook.notes.values() {
-            let filename = sanitize_filename(&note.title);
-            let file_path = export_dir.join(format!("{}.md", filename));
-            
-            let content = format!("# {}\n\nCreated: {}\nModified: {}\nTags: {}\n\n---\n\n{}", 
-                note.title,
-                note.created_at.format("%Y-%m-%d %H:%M:%S"),
-                note.modified_at.format("%Y-%m-%d %H:%M:%S"),
-                note.tags.join(", "),
-                note.content
-            );
-            
-            std::fs::write(&file_path, content)
-                .map_err(|e| format!("Failed to export note '{}': {}", note.title, e))?;
-            
-            exported_count += 1;
-        }
-        
-        Ok(exported_count)
-    }
-    
     pub fn export_notes_to_directory(&self, directory: &str) -> Result<usize, String> {
         use std::fs;
         use std::path::Path;
@@ -69,14 +39,6 @@ impl App {
         let import_dir = Path::new(directory);
         if !import_dir.exists() {
             return Err("Import directory does not exist".to_string());
-        }
-        
-        // Create backup before importing. `behavior.backup_on_import` was never
-        // consulted, so this happened however the config was written.
-        if self.config.behavior.backup_on_import {
-            if let Err(e) = self.create_backup() {
-                return Err(format!("Failed to create backup before import: {}", e));
-            }
         }
         
         let mut result = ImportResult::new();
@@ -239,25 +201,6 @@ impl App {
         title
     }
     
-    pub fn create_backup(&self) -> Result<(), String> {
-        let storage = crate::storage::Storage::new()
-            .map_err(|e| format!("Failed to initialize storage: {}", e))?;
-        
-        match storage.backup_data() {
-            Ok(_backup_path) => {
-                Ok(())
-            }
-            Err(e) => Err(format!("Backup failed: {}", e))
-        }
-    }
-    
-    pub fn list_backups(&self) -> Result<Vec<std::path::PathBuf>, String> {
-        let storage = crate::storage::Storage::new()
-            .map_err(|e| format!("Failed to initialize storage: {}", e))?;
-        
-        storage.list_backups()
-            .map_err(|e| format!("Failed to list backups: {}", e))
-    }
 }
 
 #[cfg(test)]
@@ -267,6 +210,33 @@ mod import_tests {
 
     /// Import added notes to memory and requested no write, so a run reporting
     /// "Import completed: 2 successful" left nothing in the vault and the notes
+    /// `:export` with no path used to write into the JSON backend's data
+    /// directory, which is a strange place to look for your notes and is gone.
+    #[test]
+    fn the_default_export_directory_is_the_documented_one() {
+        let dir = crate::app::default_export_dir();
+        assert!(
+            dir.ends_with("scribble_export"),
+            "unexpected export directory: {}",
+            dir.display()
+        );
+        assert!(dir.is_absolute(), "export directory is not absolute");
+    }
+
+    /// With no second storage format, a first run with no configuration needs a
+    /// directory to put markdown in.
+    #[test]
+    fn the_default_vault_is_a_directory_path() {
+        let dir = crate::app::default_vault_dir();
+        assert!(dir.is_absolute(), "default vault is not absolute: {}", dir.display());
+        assert!(dir.ends_with("vault"), "unexpected default vault: {}", dir.display());
+        assert_ne!(
+            dir,
+            crate::app::default_export_dir(),
+            "the vault and the export directory are the same place"
+        );
+    }
+
     /// were gone at the next launch.
     #[test]
     fn importing_queues_the_new_notes_for_writing() {
@@ -278,8 +248,6 @@ mod import_tests {
 
         let mut app = App::default();
         app.notebook.notes.clear();
-        // Backups are a separate concern and would write outside the test.
-        app.config.behavior.backup_on_import = false;
 
         let result = app
             .import_notes_from_directory(dir.to_str().unwrap())

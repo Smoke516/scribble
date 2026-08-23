@@ -64,6 +64,36 @@ fn detect_obsidian_vault() -> Option<PathBuf> {
 /// Put the terminal back the way we found it. Best-effort and idempotent: it runs
 /// from the panic hook as well as the normal exit path, and a failure here must
 /// not mask whatever error is already unwinding.
+/// How many notes a legacy JSON notebook still holds.
+///
+/// Split out from the check below so it can be tested without a file: the whole
+/// point of the notice is that it fires for someone whose notes are in there,
+/// and that is a case this machine cannot produce.
+fn legacy_note_count(json: &str) -> usize {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("notes").and_then(|n| n.as_object()).map(|m| m.len()))
+        .unwrap_or(0)
+}
+
+/// Say something if notes are still sitting in the JSON store that used to be a
+/// second storage backend. It is no longer read, and starting up empty without a
+/// word would look exactly like losing them.
+fn warn_about_legacy_notebook() {
+    let Some(dir) = dirs::data_dir() else { return };
+    let path = dir.join("scribble").join("notebook.json");
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let count = legacy_note_count(&text);
+    if count > 0 {
+        eprintln!(
+            "scribble: {} notes are still in the old JSON store at {}",
+            count,
+            path.display()
+        );
+        eprintln!("scribble: it is no longer read — notes now live as markdown in a vault.");
+    }
+}
+
 fn restore_terminal() {
     let _ = disable_raw_mode();
     let _ = execute!(
@@ -218,7 +248,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| config.vaults.default.clone());
     
     // Initialize storage based on mode
-    let mut storage: Box<dyn storage::NotebookStorage> = if let Some(vault_path) = final_vault_path.clone() {
+    let mut storage: storage::VaultStorage = if let Some(vault_path) = final_vault_path.clone() {
         // `behavior.file_watching` was never consulted, so the watcher could not be
         // turned off however the config was written.
         if config.behavior.file_watching {
@@ -232,10 +262,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         
         app.vault_path = Some(vault_path.clone());
-        Box::new(storage::VaultStorage::new(vault_path)?)
+        storage::VaultStorage::new(vault_path)?
     } else {
-        // Regular JSON storage
-        Box::new(storage::Storage::new()?)
+        // Nothing named a vault, so make one. Notes are markdown files in a
+        // directory; there is no second format to fall back to.
+        let vault_path = app::default_vault_dir();
+        std::fs::create_dir_all(&vault_path)?;
+        if config.behavior.file_watching {
+            app.initialize_file_watcher(vault_path.clone());
+        }
+        config.add_recent_vault(vault_path.clone());
+        config.vaults.default = Some(vault_path.clone());
+        if let Err(e) = config.save() {
+            eprintln!("Warning: Failed to save config: {}", e);
+        }
+        app.vault_path = Some(vault_path.clone());
+        storage::VaultStorage::new(vault_path)?
     };
     
     // Load existing notebook data
@@ -425,12 +467,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Build the new storage before giving anything up: a vault that has
             // been unmounted or deleted should leave you where you were, with a
             // message, rather than in a half-switched state.
-            use storage::NotebookStorage as _;
             match storage::VaultStorage::new(target.clone())
                 .and_then(|s| s.load_notebook().map(|nb| (s, nb)))
             {
                 Ok((new_storage, notebook)) => {
-                    storage = Box::new(new_storage);
+                    storage = new_storage;
                     app.initialize_file_watcher(target.clone());
                     app.adopt_vault(target.clone(), notebook);
 
@@ -491,6 +532,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     restore_terminal();
     let _ = terminal.show_cursor();
 
+    warn_about_legacy_notebook();
+
     result
 }
 
@@ -516,4 +559,22 @@ fn print_help() {
     println!("  • 🎨 Beautiful Tokyo Night theme");
     println!("  • 🚀 Vim-inspired keybindings\n");
     println!("Once started, press '?' for in-app help.");
+}
+
+#[cfg(test)]
+mod legacy_notebook_tests {
+    use super::legacy_note_count;
+
+    #[test]
+    fn an_empty_json_store_says_nothing() {
+        assert_eq!(legacy_note_count(r#"{"notes":{},"folders":{}}"#), 0);
+        assert_eq!(legacy_note_count("not json at all"), 0);
+        assert_eq!(legacy_note_count("{}"), 0);
+    }
+
+    #[test]
+    fn a_store_with_notes_is_counted() {
+        let json = r#"{"notes":{"a":{"title":"One"},"b":{"title":"Two"}},"folders":{}}"#;
+        assert_eq!(legacy_note_count(json), 2);
+    }
 }

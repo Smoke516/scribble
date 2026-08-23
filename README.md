@@ -357,10 +357,9 @@ hidden.
 | `:q` | Quit application |
 | `:wq` | Save and quit |
 | `:N` | Jump to line number N |
-| `:export [path]` | Export all notes as markdown files |
+| `:export [path]` | Export all notes as markdown files (default `~/Documents/scribble_export`) |
 | `:export html [path]` | Export all notes as HTML (default `~/Documents/scribble_export`) |
 | `:import <dir>` | Import markdown files from a directory |
-| `:backup` / `:backups` | Create a backup / list existing backups |
 | `:spell` / `:nospell` | Enable / disable spell check |
 | `:theme list` | Open theme browser |
 | `:theme <name>` | Switch to specific theme |
@@ -564,7 +563,6 @@ already answered to.
 - `:N` - Jump to line N
 - `:export [path]` / `:export html [path]` - Export as markdown / HTML
 - `:import <dir>` - Import markdown files
-- `:backup` / `:backups` - Create / list backups
 - `:spell` / `:nospell` - Toggle spell check
 - `:theme list|<name>|current` - Theme browser / switch / show active
 - `:vault` - Vault switcher
