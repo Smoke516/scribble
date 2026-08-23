@@ -5,6 +5,43 @@ All notable changes to Scribble will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### 🐛 Fixed — the markdown preview
+
+An audit of the preview renderer, which had no tests, found eleven defects.
+Three made a documented feature useless:
+
+- **Nested lists collapsed onto one line.** Three levels of `-` rendered as
+  `• abc`; nested task lists went the same way.
+- **Obsidian-style callouts never rendered.** `[!note]` is a link reference to
+  CommonMark, so the parser splits it and the marker was matched against the
+  first fragment alone. Every callout showed its raw marker.
+- **Table columns were not aligned**, and inline code in a cell leaked out of the
+  table as a stray line beneath it.
+
+The rest were visible but survivable: doubled blockquote bars (`▌ ▌ text`, and
+four at depth two), a code fence that opened `╭──────── rust` and never lined up
+with its own foot, two blank lines after every heading, a missing bullet on any
+item starting with inline code or a link, a bullet on the second paragraph of an
+item, inline code padding itself with spaces that doubled the ones around it, and
+footnote definitions rendered as bare paragraphs.
+
+### ✨ Changed
+
+- Frontmatter is hidden in the preview rather than rendered as a rule and a
+  heading.
+- Smart punctuation is off: the preview shows the quotes and dashes you typed.
+- A blockquote spanning two paragraphs keeps its bar across the gap.
+
+### 🧹 Removed
+
+- A second markdown formatter, `App::render_markdown_preview`, whose output no
+  one read. It ran from seventeen call sites including every keystroke in insert
+  mode, reformatted the whole note, and threw the result away.
+
+Tests went 235 → 260.
+
 ## [3.1.0] - 2026-08-16
 
 Conflicts can be resolved in the app, and an audit of everything that already

@@ -345,6 +345,11 @@ Earlier releases are in [CHANGELOG.md](CHANGELOG.md).
 |-----|--------|
 | `F2` | Toggle live markdown preview (split-screen) |
 
+The preview renders headings, nested lists, task lists, tables with aligned
+columns, fenced code, footnotes, and Obsidian-style callouts (`> [!note]`,
+`> [!warning]`, …). Punctuation is shown as you typed it, and frontmatter is
+hidden.
+
 ### File Operations & Commands
 | Key | Action |
 |-----|--------|
