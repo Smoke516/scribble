@@ -1746,7 +1746,7 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from("  n          New note                        N    New note from template"),
         Line::from("  r          Rename current note             m    Move current note"),
         Line::from("  u          Undo last delete                dd   Delete line (editor)"),
-        Line::from("  Enter      Open note / expand folder"),
+        Line::from("  Enter      Open note / expand folder (in the tree; in the editor: next line)"),
         Line::from("  q          Close note → landing page       Q       Quit immediately"),
         Line::from("  m          Move: j/k pick a folder · ~ vault root · Enter drop · Esc cancel"),
         Line::from("  Pin the sidebar back with  show_sidebar = true  under [ui] in config.toml"),

@@ -107,6 +107,8 @@ enum Action {
     OpenLineAbove,
     CursorLineStart,
     CursorLineEnd,
+    /// Vim's `<CR>`: down a line, to its first non-blank character.
+    CursorNextLineStart,
     WordForward,
     WordBackward,
     DeleteCharAtCursor,
@@ -213,6 +215,7 @@ const NORMAL_BINDINGS: &[Binding] = &[
     k(KeyCode::Right, Ctx::Editor, Action::CursorRight, "Move cursor right"),
     k(KeyCode::Tab, Ctx::Any, Action::CyclePane, "Switch pane"),
     k(KeyCode::Enter, Ctx::Any, Action::ActivateSelected, "Open note / expand folder"),
+    k(KeyCode::Enter, Ctx::Editor, Action::CursorNextLineStart, "Next line"),
 
     // --- editor motions and edits ---
     k(KeyCode::Char('A'), Ctx::Editor, Action::AppendAtLineEnd, "Append at end of line"),
@@ -587,13 +590,20 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
             };
         }
         Action::ActivateSelected => {
-            if let Some(item) = app.get_selected_item() {
-                match item.item_type {
-                    TreeItemType::Note => {
-                        app.select_note(item.id);
-                    }
-                    TreeItemType::Folder => {
-                        app.toggle_folder_expansion();
+            // Only from the tree. With a note open, the tree's selection is
+            // usually some other note — it does not follow the palette, the task
+            // panel or the landing page — so activating it from the editor or the
+            // preview jumped you somewhere you never asked to go, and took the
+            // unsaved buffer with it.
+            if app.focused_pane == FocusedPane::Folders {
+                if let Some(item) = app.get_selected_item() {
+                    match item.item_type {
+                        TreeItemType::Note => {
+                            app.select_note(item.id);
+                        }
+                        TreeItemType::Folder => {
+                            app.toggle_folder_expansion();
+                        }
                     }
                 }
             }
@@ -616,6 +626,7 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
             app.mode = AppMode::Insert;
         }
         Action::CursorLineStart => app.cursor_to_line_start(),
+        Action::CursorNextLineStart => app.cursor_to_next_line_start(),
         Action::CursorLineEnd => app.cursor_to_line_end(),
         Action::WordForward => app.cursor_word_forward(),
         Action::WordBackward => app.cursor_word_backward(),
@@ -2263,6 +2274,7 @@ fn handle_explorer_mode(app: &mut App, key: KeyEvent) {
 mod dispatch_tests {
     use super::*;
     use crate::models::Note;
+    use uuid::Uuid;
 
     /// An app with a note open and the editor pane focused.
     fn editor_focused_app() -> App {
@@ -2280,6 +2292,97 @@ mod dispatch_tests {
 
     fn press(app: &mut App, c: char, mods: KeyModifiers) {
         handle_normal_mode(app, KeyEvent::new(KeyCode::Char(c), mods));
+    }
+
+    /// Two notes, the first one open with unsaved edits, the tree's selection
+    /// still sitting on the second — which is the ordinary state after opening a
+    /// note from the palette, the task panel or the landing page.
+    fn two_notes_with_selection_elsewhere() -> (App, Uuid, Uuid) {
+        let mut app = App::default();
+        let mut open = Note::new("Open".to_string(), None);
+        open.content = "first line\nsecond line".to_string();
+        let mut other = Note::new("Other".to_string(), None);
+        other.content = "somewhere else".to_string();
+        app.notebook.add_note(open.clone());
+        app.notebook.add_note(other.clone());
+        app.refresh_tree_view();
+        app.select_note(open.id);
+        // Point the tree at the note that is *not* open.
+        app.selected_folder_index = app
+            .folder_tree_items
+            .iter()
+            .position(|i| i.id == other.id)
+            .expect("other note missing from the tree");
+        app.mode = AppMode::Normal;
+        (app, open.id, other.id)
+    }
+
+    fn press_enter(app: &mut App) {
+        handle_normal_mode(app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    /// Enter with the editor focused used to activate whatever the tree had
+    /// selected, throwing away up to two seconds of typing with it — the autosave
+    /// debounce had not fired, and select_note overwrites the buffer.
+    #[test]
+    fn enter_in_the_editor_does_not_jump_to_another_note() {
+        let (mut app, open_id, _) = two_notes_with_selection_elsewhere();
+        app.focused_pane = FocusedPane::Editor;
+        app.editor_content.push_str(" and an unsaved edit");
+        app.mark_modified();
+
+        press_enter(&mut app);
+
+        assert_eq!(
+            app.current_note.as_ref().map(|n| n.id),
+            Some(open_id),
+            "Enter jumped to the note the tree had selected"
+        );
+        assert!(
+            app.editor_content.ends_with("and an unsaved edit"),
+            "unsaved edits were discarded: {:?}",
+            app.editor_content
+        );
+    }
+
+    /// Same surprise from the preview pane, which is not the editor as far as the
+    /// keymap is concerned.
+    #[test]
+    fn enter_in_the_preview_does_not_jump_to_another_note() {
+        let (mut app, open_id, _) = two_notes_with_selection_elsewhere();
+        app.focused_pane = FocusedPane::Preview;
+
+        press_enter(&mut app);
+
+        assert_eq!(app.current_note.as_ref().map(|n| n.id), Some(open_id));
+    }
+
+    /// The binding still has to do its job where it was meant to.
+    #[test]
+    fn enter_in_the_tree_opens_the_selected_note() {
+        let (mut app, _, other_id) = two_notes_with_selection_elsewhere();
+        app.focused_pane = FocusedPane::Folders;
+
+        press_enter(&mut app);
+
+        assert_eq!(
+            app.current_note.as_ref().map(|n| n.id),
+            Some(other_id),
+            "Enter no longer opens the selected note from the tree"
+        );
+    }
+
+    /// Vim's `<CR>`: down a line, to its first non-blank character.
+    #[test]
+    fn enter_in_the_editor_moves_to_the_next_line() {
+        let (mut app, _, _) = two_notes_with_selection_elsewhere();
+        app.focused_pane = FocusedPane::Editor;
+        app.editor_content = "first line\n    indented".to_string();
+        app.editor_cursor = (0, 8);
+
+        press_enter(&mut app);
+
+        assert_eq!(app.editor_cursor, (1, 4), "Enter should land on the first non-blank");
     }
 
     /// Global Ctrl-shortcuts must keep working while the editor pane is focused.

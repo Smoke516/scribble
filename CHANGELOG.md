@@ -27,6 +27,18 @@ item starting with inline code or a link, a bullet on the second paragraph of an
 item, inline code padding itself with spaces that doubled the ones around it, and
 footnote definitions rendered as bare paragraphs.
 
+### 🐛 Fixed — silent data loss
+
+- **`Enter` in the editor jumped to another note**, and took up to two seconds of
+  typing with it. The binding activated whatever the folder tree had selected
+  regardless of which pane had focus — and the tree's selection does not follow
+  the palette, the task panel, the outline or the landing page, so it usually
+  pointed at some other note. `select_note` overwrites the buffer and clears the
+  undo stack, and the autosave debounce is two seconds, so anything typed inside
+  that window was gone. Activating the tree's selection is now the tree's
+  business; in the editor `Enter` moves down a line to its first non-blank, as
+  vim's `<CR>` does.
+
 ### ✨ Changed
 
 - Frontmatter is hidden in the preview rather than rendered as a rule and a
