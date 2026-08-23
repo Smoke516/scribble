@@ -1,9 +1,10 @@
-use pulldown_cmark::{Parser, Event, Tag, TagEnd, CodeBlockKind, HeadingLevel};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    style::{Style, Modifier, Color},
 };
-use crate::theme::{ThemeManager, ThemeColors};
+
+use crate::theme::{ThemeColors, ThemeManager};
 
 /// Callout type with display info
 struct CalloutInfo {
@@ -12,7 +13,12 @@ struct CalloutInfo {
     color: Color,
 }
 
-/// Parse an Obsidian-style callout marker from text like "[!note] Optional title"
+/// Parse an Obsidian-style callout marker from text like "[!note] Optional title".
+///
+/// The text handed here is a whole rendered line rather than a single parser
+/// event: `[!note]` is a link reference as far as CommonMark is concerned, so the
+/// parser hands it back in pieces (`[`, `!note`, `]`) and matching on the first
+/// piece alone never fires.
 fn parse_callout(text: &str, c: &ThemeColors) -> Option<CalloutInfo> {
     let trimmed = text.trim();
     if !trimmed.starts_with("[!") {
@@ -55,475 +61,739 @@ fn parse_callout(text: &str, c: &ThemeColors) -> Option<CalloutInfo> {
     Some(CalloutInfo { icon, label, color })
 }
 
+/// Display width of a string in terminal columns.
+fn dwidth(s: &str) -> usize {
+    Span::raw(s).width()
+}
+
+/// Pad to `width` columns; longer strings are returned untouched.
+fn pad_to(s: &str, width: usize) -> String {
+    let w = dwidth(s);
+    if w >= width {
+        s.to_string()
+    } else {
+        format!("{}{}", s, " ".repeat(width - w))
+    }
+}
+
+/// Truncate to `width` columns, marking the cut with an ellipsis.
+fn truncate_to(s: &str, width: usize) -> String {
+    if dwidth(s) <= width {
+        return s.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut w = 0;
+    for ch in s.chars() {
+        let cw = dwidth(ch.encode_utf8(&mut [0u8; 4]));
+        if w + cw > width - 1 {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
+/// One level of list nesting.
+struct ListLevel {
+    ordered: bool,
+    counter: u64,
+}
+
+/// Builds the preview one line at a time.
+///
+/// Every line is `prefix + content`: the prefix carries blockquote bars, the list
+/// bullet or checkbox, and the indent that keeps a wrapped or continued line under
+/// the text it belongs to. It is laid down once, when the line opens, so nothing
+/// can prepend it a second time on the way out.
+struct Renderer<'a> {
+    theme: &'a ThemeManager,
+    c: ThemeColors,
+    width: usize,
+
+    lines: Vec<Line<'static>>,
+    prefix: Vec<Span<'static>>,
+    pending: Vec<Span<'static>>,
+    line_open: bool,
+
+    // Inline styling — counted, so nesting closes in the right order.
+    emphasis: usize,
+    strong: usize,
+    strike: usize,
+    in_link: bool,
+    link_url: String,
+    in_heading: bool,
+    heading_level: u8,
+
+    // Blockquotes and callouts
+    bq_depth: usize,
+    bq_first_line: bool,
+    callout_color: Option<Color>,
+
+    // Lists
+    lists: Vec<ListLevel>,
+    /// Marker waiting for the item's first line to open.
+    item_marker: Option<Vec<Span<'static>>>,
+    /// Column the item's text starts at, so continuation lines line up under it.
+    item_indent: usize,
+    in_item: bool,
+    checked_item: bool,
+
+    // Code blocks
+    in_code: bool,
+    code_buf: String,
+
+    // Tables
+    in_table: bool,
+    in_head: bool,
+    cell: String,
+    row: Vec<String>,
+    head: Vec<String>,
+    rows: Vec<Vec<String>>,
+
+    // Frontmatter
+    in_metadata: bool,
+}
+
+impl<'a> Renderer<'a> {
+    fn new(theme: &'a ThemeManager, width: usize) -> Self {
+        Self {
+            theme,
+            c: theme.colors(),
+            // Clamp to a sane floor so very narrow panes still render a short rule.
+            width: width.clamp(4, 400),
+            lines: Vec::new(),
+            prefix: Vec::new(),
+            pending: Vec::new(),
+            line_open: false,
+            emphasis: 0,
+            strong: 0,
+            strike: 0,
+            in_link: false,
+            link_url: String::new(),
+            in_heading: false,
+            heading_level: 1,
+            bq_depth: 0,
+            bq_first_line: false,
+            callout_color: None,
+            lists: Vec::new(),
+            item_marker: None,
+            item_indent: 0,
+            in_item: false,
+            checked_item: false,
+            in_code: false,
+            code_buf: String::new(),
+            in_table: false,
+            in_head: false,
+            cell: String::new(),
+            row: Vec::new(),
+            head: Vec::new(),
+            rows: Vec::new(),
+            in_metadata: false,
+        }
+    }
+
+    // ── Line building ───────────────────────────────────────────
+
+    /// Lay down the prefix for a line that is about to receive content.
+    fn open_line(&mut self) {
+        if self.line_open {
+            return;
+        }
+        self.line_open = true;
+        let mut prefix: Vec<Span<'static>> = Vec::new();
+        if self.bq_depth > 0 {
+            let clr = self.callout_color.unwrap_or(self.c.comment);
+            prefix.push(Span::styled(
+                "▌ ".repeat(self.bq_depth),
+                Style::default().fg(clr),
+            ));
+        }
+        if let Some(marker) = self.item_marker.take() {
+            prefix.extend(marker);
+        } else if self.in_item || !self.lists.is_empty() {
+            prefix.push(Span::raw(" ".repeat(self.item_indent)));
+        }
+        self.prefix = prefix;
+    }
+
+    /// Drop trailing lines that carry no content — an empty line, or one holding
+    /// nothing but blockquote bars.
+    fn trim_trailing_blanks(&mut self) {
+        while let Some(last) = self.lines.last() {
+            let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
+            if text.chars().all(|ch| ch == '▌' || ch.is_whitespace()) {
+                self.lines.pop();
+            } else {
+                return;
+            }
+        }
+    }
+
+    fn push_span(&mut self, span: Span<'static>) {
+        self.open_line();
+        self.pending.push(span);
+    }
+
+    /// Emit the line under construction, if there is one.
+    fn flush(&mut self) {
+        if !self.line_open && self.pending.is_empty() {
+            return;
+        }
+        if self.bq_depth > 0 && self.bq_first_line && !self.pending.is_empty() {
+            self.bq_first_line = false;
+            let text: String = self.pending.iter().map(|s| s.content.as_ref()).collect();
+            if let Some(info) = parse_callout(&text, &self.c) {
+                // A callout replaces its own first line with a titled header, and
+                // recolors the bar for the rest of the quote.
+                self.callout_color = Some(info.color);
+                self.lines.push(Line::from(vec![
+                    Span::styled("▌ ".repeat(self.bq_depth), Style::default().fg(info.color)),
+                    Span::styled(format!("{} ", info.icon), Style::default().fg(info.color)),
+                    Span::styled(
+                        info.label,
+                        Style::default().fg(info.color).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                self.pending.clear();
+                self.prefix.clear();
+                self.line_open = false;
+                return;
+            }
+        }
+        let mut spans = std::mem::take(&mut self.prefix);
+        spans.append(&mut self.pending);
+        self.lines.push(Line::from(spans));
+        self.line_open = false;
+    }
+
+    /// A single blank line between blocks — never two, never one at the top.
+    ///
+    /// Inside a blockquote the separator keeps the bar, so a quote with two
+    /// paragraphs reads as one quote rather than two.
+    fn blank(&mut self) {
+        self.flush();
+        let content = if self.bq_depth > 0 {
+            "▌ ".repeat(self.bq_depth).trim_end().to_string()
+        } else {
+            String::new()
+        };
+        match self.lines.last() {
+            None => return,
+            Some(last) => {
+                let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
+                if text.trim_end() == content {
+                    return;
+                }
+            }
+        }
+        let line = if content.is_empty() {
+            Line::from("")
+        } else {
+            let color = self.callout_color.unwrap_or(self.c.comment);
+            Line::from(Span::styled(content, Style::default().fg(color)))
+        };
+        self.lines.push(line);
+    }
+
+    fn rule(&self, ch: char, style: Style) -> Line<'static> {
+        Line::from(Span::styled(
+            ch.to_string().repeat(self.width),
+            style,
+        ))
+    }
+
+    // ── Styling ─────────────────────────────────────────────────
+
+    fn text_style(&self) -> Style {
+        if self.in_heading {
+            return match self.heading_level {
+                1 => self.theme.markdown_h1(),
+                2 => self.theme.markdown_h2(),
+                _ => self.theme.markdown_h3(),
+            };
+        }
+        if self.checked_item {
+            // Obsidian-style: completed tasks are dimmed and struck through.
+            return Style::default()
+                .fg(self.c.comment)
+                .add_modifier(Modifier::CROSSED_OUT);
+        }
+        let mut style = if self.in_link {
+            self.theme.markdown_link()
+        } else if self.bq_depth > 0 {
+            Style::default()
+                .fg(self.c.fg_dark)
+                .add_modifier(Modifier::ITALIC)
+        } else {
+            Style::default().fg(self.c.fg)
+        };
+        if self.strong > 0 {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if self.emphasis > 0 {
+            style = style.add_modifier(Modifier::ITALIC);
+        }
+        if self.strike > 0 {
+            style = style.add_modifier(Modifier::CROSSED_OUT);
+        }
+        style
+    }
+
+    // ── Blocks ──────────────────────────────────────────────────
+
+    fn start_item(&mut self) {
+        self.flush();
+        self.in_item = true;
+        self.checked_item = false;
+        let indent = "  ".repeat(self.lists.len().saturating_sub(1));
+        let marker = match self.lists.last() {
+            Some(level) if level.ordered => format!("{}. ", level.counter),
+            _ => "• ".to_string(),
+        };
+        self.item_indent = dwidth(&indent) + dwidth(&marker);
+        self.item_marker = Some(vec![Span::styled(
+            format!("{}{}", indent, marker),
+            self.theme.markdown_list(),
+        )]);
+    }
+
+    fn task_marker(&mut self, checked: bool) {
+        self.checked_item = checked;
+        let indent = "  ".repeat(self.lists.len().saturating_sub(1));
+        let (icon, color) = if checked {
+            ("☑ ", self.c.green)
+        } else {
+            ("☐ ", self.c.fg_dark)
+        };
+        self.item_indent = dwidth(&indent) + dwidth(icon);
+        self.item_marker = Some(vec![Span::styled(
+            format!("{}{}", indent, icon),
+            Style::default().fg(color),
+        )]);
+    }
+
+    fn open_code_block(&mut self, kind: CodeBlockKind) {
+        self.flush();
+        self.in_code = true;
+        self.code_buf.clear();
+        let lang = match kind {
+            CodeBlockKind::Fenced(lang) => lang.to_string(),
+            CodeBlockKind::Indented => String::new(),
+        };
+        let label = if lang.is_empty() {
+            " code ".to_string()
+        } else {
+            format!(" {} ", lang)
+        };
+        // ╭─ rust ────────────…  sized to the pane, so it lines up with the foot.
+        let used = 2 + dwidth(&label);
+        let fill = self.width.saturating_sub(used).max(1);
+        self.lines.push(Line::from(vec![
+            Span::styled("╭─", Style::default().fg(self.c.comment)),
+            Span::styled(
+                label,
+                Style::default().fg(self.c.cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("─".repeat(fill), Style::default().fg(self.c.comment)),
+        ]));
+    }
+
+    fn close_code_block(&mut self) {
+        let body = std::mem::take(&mut self.code_buf);
+        let body = body.strip_suffix('\n').unwrap_or(&body);
+        if !body.is_empty() {
+            for code_line in body.split('\n') {
+                self.lines.push(Line::from(vec![
+                    Span::styled("│ ", Style::default().fg(self.c.comment)),
+                    Span::styled(code_line.to_string(), self.theme.markdown_code_block()),
+                ]));
+            }
+        }
+        let foot = format!("╰{}", "─".repeat(self.width.saturating_sub(1)));
+        self.lines.push(Line::from(Span::styled(
+            foot,
+            Style::default().fg(self.c.comment),
+        )));
+        self.in_code = false;
+        self.blank();
+    }
+
+    /// Emit the buffered table with its columns aligned.
+    ///
+    /// Rows are held until the table ends because a column's width is not known
+    /// until every cell in it has been seen.
+    fn emit_table(&mut self) {
+        let cols = self
+            .rows
+            .iter()
+            .map(|r| r.len())
+            .chain(std::iter::once(self.head.len()))
+            .max()
+            .unwrap_or(0);
+        if cols == 0 {
+            return;
+        }
+
+        let cell = |row: &Vec<String>, i: usize| row.get(i).cloned().unwrap_or_default();
+        let mut widths: Vec<usize> = (0..cols)
+            .map(|i| {
+                let head_w = dwidth(&cell(&self.head, i));
+                self.rows
+                    .iter()
+                    .map(|r| dwidth(&cell(r, i)))
+                    .chain(std::iter::once(head_w))
+                    .max()
+                    .unwrap_or(0)
+                    .max(1)
+            })
+            .collect();
+
+        // Shrink the widest column until the table fits the pane.
+        let gaps = 3 * cols.saturating_sub(1);
+        while widths.iter().sum::<usize>() + gaps > self.width {
+            let (idx, &max) = widths.iter().enumerate().max_by_key(|(_, w)| **w).unwrap();
+            if max <= 3 {
+                break;
+            }
+            widths[idx] = max - 1;
+        }
+
+        let render_row = |row: &Vec<String>, style: Style| -> Line<'static> {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (i, w) in widths.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw(" │ "));
+                }
+                spans.push(Span::styled(pad_to(&truncate_to(&cell(row, i), *w), *w), style));
+            }
+            Line::from(spans)
+        };
+
+        if !self.head.is_empty() {
+            let head = self.head.clone();
+            self.lines.push(render_row(
+                &head,
+                Style::default()
+                    .fg(self.c.cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            let sep: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
+            self.lines.push(Line::from(Span::styled(
+                sep.join("─┼─"),
+                Style::default().fg(self.c.fg_dark),
+            )));
+        }
+        let body = std::mem::take(&mut self.rows);
+        for row in &body {
+            self.lines
+                .push(render_row(row, Style::default().fg(self.c.fg)));
+        }
+        self.head.clear();
+    }
+
+    // ── Event loop ──────────────────────────────────────────────
+
+    fn run(&mut self, content: &str) {
+        // Smart punctuation is deliberately off: the preview should show the
+        // quotes and dashes you typed, not prettier ones you did not.
+        let options = Options::ENABLE_TABLES
+            | Options::ENABLE_FOOTNOTES
+            | Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_TASKLISTS
+            | Options::ENABLE_HEADING_ATTRIBUTES
+            | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS;
+
+        for event in Parser::new_ext(content, options) {
+            match event {
+                Event::Start(tag) => self.start(tag),
+                Event::End(tag) => self.end(tag),
+                Event::Text(text) => {
+                    if self.in_metadata {
+                    } else if self.in_table {
+                        self.cell.push_str(&text);
+                    } else if self.in_code {
+                        self.code_buf.push_str(&text);
+                    } else {
+                        let style = self.text_style();
+                        self.push_span(Span::styled(text.to_string(), style));
+                    }
+                }
+                Event::Code(code) => {
+                    if self.in_table {
+                        self.cell.push_str(&code);
+                    } else {
+                        // No padding: the code style carries its own background,
+                        // and spaces here double up with the ones around it.
+                        let style = self.theme.markdown_code();
+                        self.push_span(Span::styled(code.to_string(), style));
+                    }
+                }
+                Event::Html(html) => {
+                    self.flush();
+                    for html_line in html.trim_end().lines() {
+                        let line = Line::from(Span::styled(
+                            html_line.to_string(),
+                            Style::default().fg(self.c.orange),
+                        ));
+                        self.lines.push(line);
+                    }
+                }
+                Event::InlineHtml(html) => {
+                    if self.in_table {
+                        self.cell.push_str(&html);
+                    } else {
+                        self.push_span(Span::styled(
+                            html.to_string(),
+                            Style::default().fg(self.c.orange),
+                        ));
+                    }
+                }
+                Event::FootnoteReference(name) => {
+                    if self.in_table {
+                        self.cell.push_str(&format!("[{}]", name));
+                    } else {
+                        self.push_span(Span::styled(
+                            format!("[{}]", name),
+                            Style::default().fg(self.c.cyan).add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                }
+                Event::SoftBreak | Event::HardBreak => {
+                    if self.in_table {
+                        self.cell.push(' ');
+                    } else {
+                        self.flush();
+                    }
+                }
+                Event::Rule => {
+                    self.blank();
+                    let line = self.rule('━', Style::default().fg(self.c.comment));
+                    self.lines.push(line);
+                    self.lines.push(Line::from(""));
+                }
+                Event::TaskListMarker(checked) => self.task_marker(checked),
+            }
+        }
+        self.flush();
+    }
+
+    fn start(&mut self, tag: Tag<'_>) {
+        match tag {
+            Tag::Paragraph => {
+                // A second paragraph in the same list item continues under the
+                // marker rather than claiming one of its own.
+                if self.in_item && self.item_marker.is_none() {
+                    self.blank();
+                }
+            }
+            Tag::Heading { level, .. } => {
+                self.blank();
+                self.in_heading = true;
+                self.heading_level = match level {
+                    HeadingLevel::H1 => 1,
+                    HeadingLevel::H2 => 2,
+                    HeadingLevel::H3 => 3,
+                    HeadingLevel::H4 => 4,
+                    HeadingLevel::H5 => 5,
+                    HeadingLevel::H6 => 6,
+                };
+            }
+            Tag::CodeBlock(kind) => self.open_code_block(kind),
+            Tag::List(start) => {
+                self.flush();
+                self.lists.push(ListLevel {
+                    ordered: start.is_some(),
+                    counter: start.unwrap_or(1),
+                });
+            }
+            Tag::Item => self.start_item(),
+            Tag::Emphasis => self.emphasis += 1,
+            Tag::Strong => self.strong += 1,
+            Tag::Strikethrough => self.strike += 1,
+            Tag::Link { dest_url, .. } => {
+                self.in_link = true;
+                self.link_url = dest_url.to_string();
+            }
+            Tag::Image { dest_url, .. } => {
+                if !self.in_table {
+                    self.push_span(Span::styled("🖼 ", Style::default().fg(self.c.purple)));
+                }
+                self.in_link = true;
+                self.link_url = dest_url.to_string();
+            }
+            Tag::BlockQuote => {
+                self.flush();
+                if self.bq_depth == 0 {
+                    self.blank();
+                }
+                self.bq_depth += 1;
+                self.bq_first_line = true;
+            }
+            Tag::FootnoteDefinition(name) => {
+                self.blank();
+                let marker = format!("[{}]: ", name);
+                self.item_indent = dwidth(&marker);
+                self.item_marker = Some(vec![Span::styled(
+                    marker,
+                    Style::default().fg(self.c.cyan).add_modifier(Modifier::BOLD),
+                )]);
+                self.in_item = true;
+            }
+            Tag::Table(_) => {
+                self.blank();
+                self.in_table = true;
+                self.head.clear();
+                self.rows.clear();
+                self.row.clear();
+            }
+            Tag::TableHead => {
+                self.in_head = true;
+                self.row.clear();
+            }
+            Tag::TableRow => self.row.clear(),
+            Tag::TableCell => self.cell.clear(),
+            Tag::MetadataBlock(_) => self.in_metadata = true,
+            Tag::HtmlBlock => {}
+        }
+    }
+
+    fn end(&mut self, tag: TagEnd) {
+        match tag {
+            TagEnd::Paragraph => {
+                self.flush();
+                if !self.in_item {
+                    self.blank();
+                }
+            }
+            TagEnd::Heading(_) => {
+                self.flush();
+                self.in_heading = false;
+                if self.heading_level <= 2 {
+                    // Obsidian-style: a subtle separator under H1 and H2.
+                    let rule = self.rule('─', Style::default().fg(self.c.bg_highlight));
+                    self.lines.push(rule);
+                }
+                self.blank();
+            }
+            TagEnd::CodeBlock => self.close_code_block(),
+            TagEnd::List(_) => {
+                self.flush();
+                self.lists.pop();
+                if self.lists.is_empty() {
+                    self.item_indent = 0;
+                    self.blank();
+                }
+            }
+            TagEnd::Item => {
+                self.flush();
+                if let Some(level) = self.lists.last_mut() {
+                    level.counter += 1;
+                }
+                self.in_item = false;
+                self.checked_item = false;
+                self.item_marker = None;
+            }
+            TagEnd::Emphasis => self.emphasis = self.emphasis.saturating_sub(1),
+            TagEnd::Strong => self.strong = self.strong.saturating_sub(1),
+            TagEnd::Strikethrough => self.strike = self.strike.saturating_sub(1),
+            TagEnd::Link => {
+                if !self.link_url.is_empty() && !self.in_table {
+                    self.push_span(Span::styled(
+                        format!(" ↗ {}", self.link_url),
+                        Style::default().fg(self.c.comment),
+                    ));
+                }
+                self.in_link = false;
+                self.link_url.clear();
+            }
+            TagEnd::Image => {
+                if !self.link_url.is_empty() && !self.in_table {
+                    self.push_span(Span::styled(
+                        format!(" ({})", self.link_url),
+                        Style::default().fg(self.c.comment),
+                    ));
+                }
+                self.in_link = false;
+                self.link_url.clear();
+            }
+            TagEnd::BlockQuote => {
+                self.flush();
+                self.bq_depth = self.bq_depth.saturating_sub(1);
+                self.trim_trailing_blanks();
+                if self.bq_depth == 0 {
+                    self.callout_color = None;
+                    self.bq_first_line = false;
+                    self.blank();
+                }
+            }
+            TagEnd::FootnoteDefinition => {
+                self.flush();
+                self.in_item = false;
+                self.item_marker = None;
+                self.item_indent = 0;
+            }
+            TagEnd::TableCell => {
+                let cell = std::mem::take(&mut self.cell);
+                self.row.push(cell.trim().to_string());
+            }
+            TagEnd::TableHead => {
+                self.head = std::mem::take(&mut self.row);
+                self.in_head = false;
+            }
+            TagEnd::TableRow => {
+                let row = std::mem::take(&mut self.row);
+                if !self.in_head {
+                    self.rows.push(row);
+                }
+            }
+            TagEnd::Table => {
+                self.emit_table();
+                self.in_table = false;
+                self.blank();
+            }
+            TagEnd::MetadataBlock(_) => self.in_metadata = false,
+            TagEnd::HtmlBlock => {}
+        }
+    }
+
+    fn finish(mut self) -> Text<'static> {
+        // Trailing blank lines are noise at the bottom of the pane.
+        self.trim_trailing_blanks();
+        Text::from(self.lines)
+    }
+}
+
 /// Render markdown content to styled ratatui Text (Obsidian-like).
 ///
 /// `width` is the inner width of the preview pane in columns; full-width
-/// decorations (heading underlines, code-block borders, horizontal rules) are
-/// sized to it so they fill the pane exactly instead of wrapping into stub lines.
+/// decorations (heading underlines, code-block borders, horizontal rules) and
+/// table columns are sized to it so they fill the pane exactly instead of
+/// wrapping into stub lines.
 pub fn render_markdown_preview(content: &str, theme: &ThemeManager, width: usize) -> Text<'static> {
-    let c = theme.colors();
-    // Clamp to a sane floor so very narrow panes still render a short rule.
-    let rule_width = width.clamp(4, 400);
-    let parser = Parser::new_ext(content, pulldown_cmark::Options::all());
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut current_line: Vec<Span<'static>> = Vec::new();
-    let mut in_code_block = false;
-    let mut code_block_lang = String::new();
-    let mut in_heading = false;
-    let mut heading_level: u8 = 1;
-    let mut in_emphasis = false;
-    let mut in_strong = false;
-    let mut in_strikethrough = false;
-    let mut in_link = false;
-    let mut link_url = String::new();
+    let mut renderer = Renderer::new(theme, width);
+    renderer.run(content);
+    let text = renderer.finish();
 
-    // Blockquote state (depth for nesting)
-    let mut blockquote_depth: usize = 0;
-    let mut callout_color: Option<Color> = None;
-    let mut callout_first_text = false;
-
-    // List state — stack tracks ordered (Some(start)) vs unordered (None)
-    let mut list_stack: Vec<Option<u64>> = Vec::new();
-    let mut list_counters: Vec<u64> = Vec::new();
-    let mut is_task_item = false;
-    let mut is_checked_task = false;
-    let mut in_list_item = false;
-
-    // Table state
-    let mut in_table = false;
-    let mut in_table_head = false;
-    let mut table_rows: Vec<Vec<String>> = Vec::new();
-    let mut current_row: Vec<String> = Vec::new();
-    let mut current_cell = String::new();
-
-    // Helper: build blockquote prefix spans for current depth
-    let default_bq_color = c.comment;
-    let bq_prefix = |depth: usize, color: Option<Color>| -> Vec<Span<'static>> {
-        if depth == 0 {
-            return vec![];
-        }
-        let clr = color.unwrap_or(default_bq_color);
-        let bar = "▌ ".repeat(depth);
-        vec![Span::styled(bar, Style::default().fg(clr))]
-    };
-
-    for event in parser {
-        match event {
-            // ── Tag starts ──────────────────────────────────────────
-            Event::Start(tag) => {
-                match tag {
-                    Tag::Heading { level, .. } => {
-                        in_heading = true;
-                        heading_level = match level {
-                            HeadingLevel::H1 => 1,
-                            HeadingLevel::H2 => 2,
-                            HeadingLevel::H3 => 3,
-                            HeadingLevel::H4 => 4,
-                            HeadingLevel::H5 => 5,
-                            HeadingLevel::H6 => 6,
-                        };
-                        if !lines.is_empty() { lines.push(Line::from("")); }
-                    }
-                    Tag::CodeBlock(kind) => {
-                        in_code_block = true;
-                        code_block_lang = match kind {
-                            CodeBlockKind::Fenced(lang) => lang.to_string(),
-                            CodeBlockKind::Indented => String::new(),
-                        };
-                        if !current_line.is_empty() {
-                            lines.push(Line::from(current_line.clone()));
-                            current_line.clear();
-                        }
-                        let lang_label = if code_block_lang.is_empty() {
-                            " code ".to_string()
-                        } else {
-                            format!(" {} ", code_block_lang)
-                        };
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                format!("╭─{}─", "─".repeat(lang_label.len())),
-                                Style::default().fg(c.comment),
-                            ),
-                            Span::styled(
-                                lang_label,
-                                Style::default().fg(c.cyan).add_modifier(Modifier::BOLD),
-                            ),
-                        ]));
-                    }
-                    Tag::List(ordered) => {
-                        list_stack.push(ordered);
-                        list_counters.push(ordered.unwrap_or(1));
-                    }
-                    Tag::Item => {
-                        is_task_item = false; // will be set by TaskListMarker if present
-                        is_checked_task = false;
-                        in_list_item = true;
-                    }
-                    Tag::Emphasis      => { in_emphasis = true; }
-                    Tag::Strong        => { in_strong = true; }
-                    Tag::Strikethrough => { in_strikethrough = true; }
-                    Tag::Link { dest_url, .. } => {
-                        in_link = true;
-                        link_url = dest_url.to_string();
-                    }
-                    Tag::Image { dest_url, .. } => {
-                        // Show image placeholder with alt text coming via Text events
-                        current_line.push(Span::styled(
-                            "🖼 ",
-                            Style::default().fg(c.purple),
-                        ));
-                        // Store URL to show after alt text
-                        in_link = true;
-                        link_url = dest_url.to_string();
-                    }
-                    Tag::BlockQuote => {
-                        blockquote_depth += 1;
-                        callout_first_text = true;
-                        callout_color = None;
-                        if !current_line.is_empty() {
-                            lines.push(Line::from(current_line.clone()));
-                            current_line.clear();
-                        }
-                    }
-                    Tag::Table(_) => {
-                        in_table = true;
-                        table_rows.clear();
-                    }
-                    Tag::TableHead => { in_table_head = true; }
-                    Tag::TableRow  => { current_row.clear(); }
-                    Tag::TableCell => { current_cell.clear(); }
-                    _ => {}
-                }
-            }
-
-            // ── Tag ends ────────────────────────────────────────────
-            Event::End(tag_end) => {
-                match tag_end {
-                    TagEnd::Heading(_) => {
-                        in_heading = false;
-                        lines.push(Line::from(current_line.clone()));
-                        current_line.clear();
-                        // Obsidian-style: subtle separator under H1 and H2
-                        if heading_level <= 2 {
-                            lines.push(Line::from(Span::styled(
-                                "─".repeat(rule_width),
-                                Style::default().fg(c.bg_highlight),
-                            )));
-                        }
-                        lines.push(Line::from(""));
-                    }
-                    TagEnd::CodeBlock => {
-                        lines.push(Line::from(Span::styled(
-                            format!("╰{}", "─".repeat(rule_width.saturating_sub(1).max(3))),
-                            Style::default().fg(c.comment),
-                        )));
-                        in_code_block = false;
-                        code_block_lang.clear();
-                    }
-                    TagEnd::List(_) => {
-                        list_stack.pop();
-                        list_counters.pop();
-                    }
-                    TagEnd::Item => {
-                        // Only push if End(Paragraph) hasn't already flushed
-                        if !current_line.is_empty() {
-                            lines.push(Line::from(current_line.clone()));
-                            current_line.clear();
-                        }
-                        // Increment counter for ordered lists
-                        if let Some(n) = list_counters.last_mut() {
-                            *n += 1;
-                        }
-                        is_task_item = false;
-                        is_checked_task = false;
-                        in_list_item = false;
-                    }
-                    TagEnd::Emphasis      => { in_emphasis = false; }
-                    TagEnd::Strong        => { in_strong = false; }
-                    TagEnd::Strikethrough => { in_strikethrough = false; }
-                    TagEnd::Link => {
-                        // Append URL after link text (dimmed)
-                        if !link_url.is_empty() {
-                            current_line.push(Span::styled(
-                                format!(" ↗ {}", link_url),
-                                Style::default().fg(c.comment),
-                            ));
-                        }
-                        in_link = false;
-                        link_url.clear();
-                    }
-                    TagEnd::Image => {
-                        // Show image URL
-                        if !link_url.is_empty() {
-                            current_line.push(Span::styled(
-                                format!(" ({})", link_url),
-                                Style::default().fg(c.comment),
-                            ));
-                        }
-                        in_link = false;
-                        link_url.clear();
-                    }
-                    TagEnd::Paragraph => {
-                        if !in_table {
-                            if blockquote_depth > 0 {
-                                // Prepend blockquote bar if not already present
-                                let mut bq_line = bq_prefix(blockquote_depth, callout_color);
-                                bq_line.append(&mut current_line);
-                                lines.push(Line::from(bq_line));
-                            } else {
-                                lines.push(Line::from(current_line.clone()));
-                            }
-                            current_line.clear();
-                            // Don't add blank line inside list items (avoids double spacing)
-                            if !in_list_item {
-                                lines.push(Line::from(""));
-                            }
-                        }
-                    }
-                    TagEnd::BlockQuote => {
-                        blockquote_depth = blockquote_depth.saturating_sub(1);
-                        if blockquote_depth == 0 {
-                            callout_color = None;
-                        }
-                        if !current_line.is_empty() {
-                            lines.push(Line::from(current_line.clone()));
-                            current_line.clear();
-                        }
-                        lines.push(Line::from(""));
-                    }
-                    TagEnd::TableCell => {
-                        current_row.push(current_cell.clone());
-                        current_cell.clear();
-                    }
-                    TagEnd::TableHead => {
-                        let hdr_color = c.cyan;
-                        let header_spans: Vec<Span> = current_row.iter().enumerate().map(move |(i, cell)| {
-                            let sep = if i > 0 { " │ " } else { "" };
-                            let mut s = sep.to_string();
-                            s.push_str(cell);
-                            Span::styled(s, Style::default().fg(hdr_color).add_modifier(Modifier::BOLD))
-                        }).collect();
-                        lines.push(Line::from(header_spans));
-                        let sep_width: usize = current_row.iter().map(|cl| cl.len() + 3).sum::<usize>().saturating_sub(1);
-                        lines.push(Line::from(Span::styled(
-                            "─".repeat(sep_width.max(4)),
-                            Style::default().fg(c.fg_dark),
-                        )));
-                        table_rows.push(current_row.clone());
-                        current_row.clear();
-                        in_table_head = false;
-                    }
-                    TagEnd::TableRow => {
-                        if !in_table_head {
-                            let row_fg = c.fg;
-                            let row_spans: Vec<Span> = current_row.iter().enumerate().map(move |(i, cell)| {
-                                let sep = if i > 0 { " │ " } else { "" };
-                                Span::styled(format!("{}{}", sep, cell), Style::default().fg(row_fg))
-                            }).collect();
-                            lines.push(Line::from(row_spans));
-                        }
-                        current_row.clear();
-                    }
-                    TagEnd::Table => {
-                        in_table = false;
-                        lines.push(Line::from(""));
-                    }
-                    _ => {}
-                }
-            }
-
-            // ── Text content ────────────────────────────────────────
-            Event::Text(text) => {
-                if in_table {
-                    current_cell.push_str(&text);
-                } else if in_code_block {
-                    for (i, code_line) in text.lines().enumerate() {
-                        if i > 0 { lines.push(Line::from(current_line.clone())); current_line.clear(); }
-                        current_line.push(Span::styled("│ ", Style::default().fg(c.comment)));
-                        current_line.push(Span::styled(code_line.to_string(), theme.markdown_code_block()));
-                    }
-                    if !text.is_empty() {
-                        lines.push(Line::from(current_line.clone()));
-                        current_line.clear();
-                    }
-                } else if blockquote_depth > 0 && callout_first_text {
-                    // Check for Obsidian-style callout marker: [!type]
-                    callout_first_text = false;
-                    if let Some(info) = parse_callout(&text, &c) {
-                        callout_color = Some(info.color);
-                        // Render callout header line
-                        let mut header = bq_prefix(blockquote_depth, Some(info.color));
-                        header.push(Span::styled(
-                            format!("{} ", info.icon),
-                            Style::default().fg(info.color),
-                        ));
-                        header.push(Span::styled(
-                            info.label,
-                            Style::default().fg(info.color).add_modifier(Modifier::BOLD),
-                        ));
-                        lines.push(Line::from(header));
-                    } else {
-                        // Normal blockquote text — render with bar prefix + italic
-                        let style = {
-                            let mut s = Style::default().fg(c.fg_dark).add_modifier(Modifier::ITALIC);
-                            if in_strong   { s = s.add_modifier(Modifier::BOLD); }
-                            s
-                        };
-                        let mut bq_line = bq_prefix(blockquote_depth, callout_color);
-                        bq_line.push(Span::styled(text.to_string(), style));
-                        current_line = bq_line;
-                    }
-                } else if blockquote_depth > 0 {
-                    // Subsequent blockquote text
-                    if current_line.is_empty() {
-                        current_line = bq_prefix(blockquote_depth, callout_color);
-                    }
-                    let style = {
-                        let mut s = Style::default().fg(c.fg_dark).add_modifier(Modifier::ITALIC);
-                        if in_strong   { s = s.add_modifier(Modifier::BOLD); }
-                        if in_emphasis { s = s.add_modifier(Modifier::ITALIC); }
-                        s
-                    };
-                    current_line.push(Span::styled(text.to_string(), style));
-                } else {
-                    // Determine text style
-                    let style = if in_heading {
-                        match heading_level {
-                            1 => theme.markdown_h1(),
-                            2 => theme.markdown_h2(),
-                            3 => theme.markdown_h3(),
-                            _ => theme.markdown_h3(),
-                        }
-                    } else if in_link {
-                        theme.markdown_link()
-                    } else if is_checked_task {
-                        // Obsidian-style: completed tasks get dimmed + strikethrough
-                        Style::default().fg(c.comment).add_modifier(Modifier::CROSSED_OUT)
-                    } else {
-                        let mut base_style = Style::default().fg(c.fg);
-                        if in_strong        { base_style = base_style.add_modifier(Modifier::BOLD); }
-                        if in_emphasis      { base_style = base_style.add_modifier(Modifier::ITALIC); }
-                        if in_strikethrough { base_style = base_style.add_modifier(Modifier::CROSSED_OUT); }
-                        base_style
-                    };
-
-                    // List bullet / number prefix
-                    if !list_stack.is_empty() && current_line.is_empty() && !is_task_item {
-                        let depth = list_stack.len();
-                        let indent = "  ".repeat(depth.saturating_sub(1));
-                        let marker = match list_stack.last() {
-                            Some(Some(_)) => {
-                                // Ordered list — show current counter
-                                let n = list_counters.last().copied().unwrap_or(1);
-                                format!("{}{}. ", indent, n)
-                            }
-                            _ => format!("{}• ", indent),
-                        };
-                        current_line.push(Span::styled(marker, theme.markdown_list()));
-                    }
-
-                    // Heading: Obsidian hides the `#` prefix
-                    if in_heading && current_line.is_empty() {
-                        // No prefix — just render the heading text directly
-                    }
-
-                    current_line.push(Span::styled(text.to_string(), style));
-                }
-            }
-
-            // ── Inline code ─────────────────────────────────────────
-            Event::Code(text) => {
-                current_line.push(Span::styled(
-                    format!(" {} ", text),
-                    theme.markdown_code(),
-                ));
-            }
-
-            // ── Horizontal rule ─────────────────────────────────────
-            Event::Rule => {
-                if !current_line.is_empty() {
-                    lines.push(Line::from(current_line.clone()));
-                    current_line.clear();
-                }
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "━".repeat(rule_width),
-                    Style::default().fg(c.comment),
-                )));
-                lines.push(Line::from(""));
-            }
-
-            // ── Task list checkboxes ────────────────────────────────
-            Event::TaskListMarker(checked) => {
-                is_task_item = true;
-                is_checked_task = checked;
-                let depth = list_stack.len();
-                let indent = "  ".repeat(depth.saturating_sub(1));
-                let (icon, color) = if checked {
-                    ("☑ ", c.green)
-                } else {
-                    ("☐ ", c.fg_dark)
-                };
-                current_line.push(Span::styled(
-                    format!("{}{}", indent, icon),
-                    Style::default().fg(color),
-                ));
-            }
-
-            // ── HTML pass-through ───────────────────────────────────
-            Event::Html(html) => {
-                current_line.push(Span::styled(
-                    html.to_string(),
-                    Style::default().fg(c.orange),
-                ));
-            }
-
-            // ── Line breaks ─────────────────────────────────────────
-            Event::SoftBreak | Event::HardBreak => {
-                if blockquote_depth > 0 {
-                    // Push the current line with blockquote prefix
-                    if current_line.is_empty() {
-                        current_line = bq_prefix(blockquote_depth, callout_color);
-                    }
-                    lines.push(Line::from(current_line.clone()));
-                    current_line.clear();
-                } else {
-                    lines.push(Line::from(current_line.clone()));
-                    current_line.clear();
-                }
-            }
-
-            // ── Footnote reference ──────────────────────────────────
-            Event::FootnoteReference(name) => {
-                current_line.push(Span::styled(
-                    format!("[{}]", name),
-                    Style::default().fg(c.cyan).add_modifier(Modifier::BOLD),
-                ));
-            }
-
-            _ => {}
-        }
+    if text.lines.is_empty() {
+        let c = theme.colors();
+        return Text::from(vec![
+            Line::from(vec![
+                Span::styled("📝 ", Style::default().fg(c.cyan)),
+                Span::styled("Live Preview", theme.markdown_h2()),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Start typing in the editor to see the preview here...",
+                theme.help_text(),
+            )),
+        ]);
     }
-
-    // Add any remaining content
-    if !current_line.is_empty() {
-        lines.push(Line::from(current_line));
-    }
-
-    // Placeholder when empty
-    if lines.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("📝 ", Style::default().fg(c.cyan)),
-            Span::styled("Live Preview", theme.markdown_h2()),
-        ]));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Start typing in the editor to see the preview here...",
-            theme.help_text(),
-        )));
-    }
-
-    Text::from(lines)
+    text
 }
 
 /// Generate a sample preview showcasing all supported features
@@ -538,18 +808,25 @@ This is a **live markdown preview** that updates as you type.
 - ~~Strikethrough~~ text
 - `inline code` with highlighting
 - [Links](https://example.com) with URLs
+  - Nested items line up under their parent
 
 ### Task Lists
 
 - [x] Completed task
 - [ ] Pending task
-- [x] Another done item
 
 ### Ordered Lists
 
 1. First item
 2. Second item
 3. Third item
+
+### Tables
+
+| Feature | Chord | Notes |
+|---|---|---|
+| Preview | F2 | This pane |
+| Go to | Ctrl+P | Notes, tags, headings |
 
 ---
 
@@ -564,7 +841,7 @@ fn hello_world() {
 > This is a blockquote with beautiful styling
 
 > [!note] Callout Support
-> Obsidian-style callouts are now rendered!
+> Obsidian-style callouts are rendered here.
 
 > [!tip] Pro Tip
 > Use callouts to highlight important information.
@@ -572,4 +849,282 @@ fn hello_world() {
 Start editing your note to see the magic happen!"#;
 
     render_markdown_preview(sample_markdown, theme, width)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::ThemeManager;
+
+    fn theme() -> ThemeManager {
+        ThemeManager::new("tokyo-night")
+    }
+
+    /// The rendered pane as plain text — what the eye actually reads.
+    fn render(md: &str, width: usize) -> Vec<String> {
+        let text = render_markdown_preview(md, &theme(), width);
+        text.lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect()
+    }
+
+    /// Column the first vertical divider sits in, measured in display cells.
+    fn divider_column(line: &str) -> Option<usize> {
+        let mut col = 0;
+        for ch in line.chars() {
+            if ch == '│' || ch == '┼' {
+                return Some(col);
+            }
+            col += dwidth(ch.encode_utf8(&mut [0u8; 4]));
+        }
+        None
+    }
+
+    fn line_with(md: &str, needle: &str) -> String {
+        render(md, 40)
+            .into_iter()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no rendered line contains {:?}\n{:#?}", needle, render(md, 40)))
+    }
+
+    #[test]
+    fn blockquote_bar_is_not_doubled() {
+        for line in render("> a quoted line\n> second line\n", 40) {
+            assert!(
+                !line.starts_with("▌ ▌"),
+                "blockquote bar rendered twice: {:?}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn nested_blockquote_bar_matches_the_depth() {
+        let lines = render("> outer\n> > inner quote\n", 40);
+        assert!(lines.contains(&"▌ outer".to_string()), "{:#?}", lines);
+        assert!(lines.contains(&"▌ ▌ inner quote".to_string()), "{:#?}", lines);
+    }
+
+    #[test]
+    fn blockquote_paragraph_break_keeps_the_bar() {
+        let lines = render("> first para\n>\n> second para\n", 40);
+        assert!(
+            lines.iter().all(|l| l.starts_with('▌')),
+            "a line inside the quote lost its bar: {:#?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn callout_renders_its_icon_and_title() {
+        // `[!note]` is a link reference to CommonMark, so the parser hands it back
+        // in pieces — the marker has to be matched against the whole line.
+        let header = line_with("> [!note] Heads up\n> body\n", "Heads up");
+        assert!(header.contains('✎'), "callout icon missing: {:?}", header);
+        assert!(!header.contains("[!note]"), "raw marker left in: {:?}", header);
+    }
+
+    #[test]
+    fn callout_type_alone_is_titled_by_its_type() {
+        let header = line_with("> [!warning]\n> mind the gap\n", "⚠");
+        assert!(header.contains("Warning"), "{:?}", header);
+    }
+
+    #[test]
+    fn code_fence_borders_span_the_pane() {
+        let lines = render("```rust\nfn main() {}\n```\n", 40);
+        let head = &lines[0];
+        let foot = lines.iter().find(|l| l.starts_with('╰')).expect("no foot");
+        assert!(head.starts_with("╭─ rust "), "fence head malformed: {:?}", head);
+        assert_eq!(dwidth(head), 40, "fence head does not fill the pane: {:?}", head);
+        assert_eq!(dwidth(foot), 40, "fence foot does not fill the pane: {:?}", foot);
+    }
+
+    #[test]
+    fn code_block_keeps_its_blank_lines() {
+        let lines = render("```\na\n\nb\n```\n", 40);
+        let body: Vec<&String> = lines.iter().filter(|l| l.starts_with('│')).collect();
+        assert_eq!(body.len(), 3, "code body lines lost: {:#?}", lines);
+    }
+
+    #[test]
+    fn nested_lists_each_get_their_own_line() {
+        let lines = render("- a\n  - b\n    - c\n- d\n", 40);
+        assert_eq!(
+            lines,
+            vec!["• a", "  • b", "    • c", "• d"],
+            "nested items were glued together"
+        );
+    }
+
+    #[test]
+    fn ordered_list_numbers_itself_and_nests() {
+        let lines = render("1. one\n2. two\n   - inner\n3. three\n", 40);
+        assert_eq!(lines, vec!["1. one", "2. two", "  • inner", "3. three"]);
+    }
+
+    #[test]
+    fn ordered_list_honours_its_start_number() {
+        let lines = render("5. five\n6. six\n", 40);
+        assert_eq!(lines, vec!["5. five", "6. six"]);
+    }
+
+    #[test]
+    fn task_markers_replace_the_bullet_at_every_depth() {
+        let lines = render("- [ ] top\n  - [x] sub done\n", 40);
+        assert_eq!(lines, vec!["☐ top", "  ☑ sub done"]);
+    }
+
+    #[test]
+    fn item_starting_with_inline_code_keeps_its_bullet() {
+        let lines = render("- `cargo build` compiles it\n", 40);
+        assert_eq!(lines, vec!["• cargo build compiles it"]);
+    }
+
+    #[test]
+    fn second_paragraph_of_an_item_lines_up_under_it() {
+        let lines = render("- first para\n\n  second para\n- next\n", 40);
+        assert_eq!(lines, vec!["• first para", "", "  second para", "• next"]);
+    }
+
+    #[test]
+    fn table_columns_are_aligned() {
+        let lines = render(
+            "| Name | Qty |\n|---|---|\n| Widget | 3 |\n| Grommet assembly | 12 |\n",
+            40,
+        );
+        let widths: Vec<usize> = lines
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| divider_column(l).expect("no column divider"))
+            .collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "column divider does not line up: {:#?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn inline_code_in_a_cell_stays_in_the_cell() {
+        let lines = render("| A |\n|---|\n| the `small` one |\n", 40);
+        assert!(
+            lines.iter().any(|l| l.contains("the small one")),
+            "cell content lost: {:#?}",
+            lines
+        );
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("small")).count(),
+            1,
+            "inline code leaked out of the table: {:#?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn a_wide_table_is_shrunk_to_the_pane() {
+        let md = "| One | Two |\n|---|---|\n| a very long cell that will not fit | another long one |\n";
+        for line in render(md, 30) {
+            assert!(dwidth(&line) <= 30, "table line overflows the pane: {:?}", line);
+        }
+    }
+
+    #[test]
+    fn headings_are_separated_by_one_blank_line() {
+        let lines = render("# H1\n\ntext\n\n## H2\n", 40);
+        assert!(
+            !lines.windows(2).any(|w| w[0].is_empty() && w[1].is_empty()),
+            "double blank line between blocks: {:#?}",
+            lines
+        );
+        assert!(!lines.first().unwrap().is_empty(), "leading blank line");
+    }
+
+    #[test]
+    fn h1_and_h2_are_underlined_to_the_pane_width() {
+        let lines = render("# Title\n", 40);
+        assert_eq!(lines[0], "Title");
+        assert_eq!(dwidth(&lines[1]), 40, "underline does not fill the pane");
+    }
+
+    #[test]
+    fn inline_code_does_not_pad_itself_with_spaces() {
+        assert_eq!(render("use `x` here\n", 40), vec!["use x here"]);
+    }
+
+    #[test]
+    fn footnote_definition_is_labelled() {
+        let lines = render("text[^1]\n\n[^1]: the body\n", 40);
+        assert!(lines.contains(&"text[1]".to_string()), "{:#?}", lines);
+        assert!(
+            lines.contains(&"[1]: the body".to_string()),
+            "footnote definition is indistinguishable from a paragraph: {:#?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn frontmatter_is_not_rendered() {
+        let lines = render("---\ntitle: Note\n---\n\nBody text\n", 40);
+        assert_eq!(lines, vec!["Body text"], "frontmatter leaked into the preview");
+    }
+
+    #[test]
+    fn punctuation_is_shown_as_typed() {
+        let lines = render("she said \"hello\" -- really\n", 40);
+        assert_eq!(lines, vec!["she said \"hello\" -- really"]);
+    }
+
+    #[test]
+    fn a_checked_task_is_dimmed_and_struck_through() {
+        let text = render_markdown_preview("- [x] done\n", &theme(), 40);
+        let span = text.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("done"))
+            .expect("task text missing");
+        assert!(
+            span.style.add_modifier.contains(Modifier::CROSSED_OUT),
+            "completed task is not struck through"
+        );
+    }
+
+    #[test]
+    fn empty_content_shows_the_placeholder() {
+        let lines = render("", 40);
+        assert!(lines.iter().any(|l| l.contains("Live Preview")), "{:#?}", lines);
+    }
+
+    #[test]
+    fn full_width_decorations_never_overflow_the_pane() {
+        let md = "# Heading\n\n---\n\n```sh\necho hi\n```\n";
+        for width in [10usize, 24, 40, 80] {
+            for line in render(md, width) {
+                assert!(
+                    dwidth(&line) <= width,
+                    "line {:?} exceeds pane width {}",
+                    line,
+                    width
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_sample_preview_renders_every_feature_it_advertises() {
+        let text = generate_preview_sample(&theme(), 60);
+        let lines: Vec<String> = text
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect();
+        for needle in ["✎ Callout Support", "☑ Completed task", "╭─ rust ", "1. First item"] {
+            assert!(
+                lines.iter().any(|l| l.contains(needle)),
+                "sample preview is missing {:?}",
+                needle
+            );
+        }
+    }
 }
