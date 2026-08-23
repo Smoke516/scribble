@@ -180,7 +180,7 @@ impl TagManager {
     /// Get all tags sorted by frequency (most used first)
     pub fn get_tags_by_frequency(&self) -> Vec<&TagInfo> {
         let mut tags: Vec<&TagInfo> = self.tag_index.values().collect();
-        tags.sort_by(|a, b| b.count.cmp(&a.count));
+        tags.sort_by_key(|t| std::cmp::Reverse(t.count));
         tags
     }
 
