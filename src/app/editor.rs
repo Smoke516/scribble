@@ -30,7 +30,7 @@ impl App {
             
             // Calculate the absolute position in the content
             let trigger_abs_pos = line_start + self.autocomplete_state.trigger_start_pos;
-            let cursor_abs_pos = line_start + self.editor_cursor.1 as usize;
+            let cursor_abs_pos = self.cursor_byte_index();
             
             // Remove the trigger text and insert the completion
             let mut new_content = String::new();
@@ -74,7 +74,19 @@ impl App {
         self.autocomplete_state.deactivate();
     }
     
-    /// Get the absolute character position of the start of a line
+    /// Byte offset of the cursor in the buffer.
+    ///
+    /// The column counts characters; the buffer is indexed in bytes. Anything
+    /// that slices `editor_content` at the cursor must go through here, or it
+    /// lands inside a multi-byte character and panics.
+    pub(crate) fn cursor_byte_index(&self) -> usize {
+        crate::vim::offset_of(
+            &self.editor_content,
+            (self.editor_cursor.0 as usize, self.editor_cursor.1 as usize),
+        )
+    }
+
+    /// Byte offset of the start of a line.
     pub(crate) fn get_line_start_position(&self, line_index: usize) -> usize {
         let lines: Vec<&str> = self.editor_content.lines().collect();
         let mut pos = 0;
@@ -84,23 +96,26 @@ impl App {
         pos
     }
     
-    /// Update cursor position from absolute character position
+    /// Set the cursor from a byte offset in the buffer.
+    ///
+    /// The offset is in bytes and the column is in characters, so the conversion
+    /// has to count characters rather than subtract offsets.
     pub(crate) fn update_cursor_from_absolute_position(&mut self, abs_pos: usize) {
+        let mut consumed = 0;
         let lines: Vec<&str> = self.editor_content.lines().collect();
-        let mut current_pos = 0;
-        
-        for (line_index, line) in lines.iter().enumerate() {
-            if current_pos + line.len() >= abs_pos {
-                self.editor_cursor.0 = line_index as u16;
-                self.editor_cursor.1 = (abs_pos - current_pos) as u16;
+        for (row, line) in lines.iter().enumerate() {
+            if consumed + line.len() >= abs_pos {
+                let byte_col = abs_pos - consumed;
+                let col = line.char_indices().take_while(|(i, _)| *i < byte_col).count();
+                self.editor_cursor = (row as u16, col as u16);
                 return;
             }
-            current_pos += line.len() + 1; // +1 for newline
+            consumed += line.len() + 1; // +1 for the newline
         }
-        
-        // If we get here, position is at the end
-        self.editor_cursor.0 = lines.len().saturating_sub(1) as u16;
-        self.editor_cursor.1 = lines.last().unwrap_or(&"").len() as u16;
+        self.editor_cursor = (
+            lines.len().saturating_sub(1) as u16,
+            lines.last().map(|l| l.chars().count()).unwrap_or(0) as u16,
+        );
     }
 
     /// Hand the open note to the external editor.

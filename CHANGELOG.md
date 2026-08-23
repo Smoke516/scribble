@@ -27,6 +27,18 @@ item starting with inline code or a link, a bullet on the second paragraph of an
 item, inline code padding itself with spaces that doubled the ones around it, and
 footnote definitions rendered as bare paragraphs.
 
+### 🐛 Fixed — the app crashed
+
+- **Typing any character outside ASCII killed scribble.** An accent, an arrow, a
+  CJK character, an emoji, an em dash — the process panicked on the keystroke and
+  took everything since the last autosave with it. The cursor column counts
+  characters, because that is how the renderer paints it, but
+  `get_cursor_byte_index`, the autocomplete scan, `String::insert` and backspace
+  all consumed it as a byte offset. They agree exactly until a character is wider
+  than one byte, and then every slice lands mid-character. `vim.rs` already had
+  the conversion right; everything now goes through the same one. Eleven tests,
+  and a twelfth that renders a note full of multi-byte text in every mode.
+
 ### 🐛 Fixed — silent data loss
 
 - **`Enter` in the editor jumped to another note**, and took up to two seconds of

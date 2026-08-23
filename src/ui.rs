@@ -3052,6 +3052,28 @@ mod preview_tests {
         assert!(screen.contains('☐') && screen.contains('☑'), "task checkboxes not rendered");
     }
 
+    /// Painting the cursor, the current-line highlight and a search match all
+    /// slice the line the cursor sits on. Multi-byte text is where a byte-indexed
+    /// slice would land mid-character and take the whole app down mid-render.
+    #[test]
+    fn a_note_full_of_multi_byte_text_renders_in_every_mode() {
+        let content = "café → 日本語 🎉 naïve\n- [ ] tâche à faire\n**gras** et `code`";
+        for (mode, col) in [
+            (AppMode::Normal, 0u16),
+            (AppMode::Insert, 5),
+            (AppMode::Normal, 12),
+            (AppMode::Visual, 3),
+            (AppMode::NoteSearch, 2),
+        ] {
+            let mut app = app_with_preview(content);
+            app.mode = mode;
+            app.editor_cursor = (0, col);
+            app.search_query = "é".to_string();
+            let screen = render(&mut app, 100, 24);
+            assert!(screen.contains("café"), "the note did not survive the render");
+        }
+    }
+
     #[test]
     fn decorations_never_exceed_pane_width() {
         // Heading underlines, code-block borders and horizontal rules must fit

@@ -420,7 +420,10 @@ pub fn cut(content: &str, span: Span) -> (String, String, (usize, usize)) {
 }
 
 /// Byte offset of a (row, column) char position.
-fn offset_of(content: &str, (row, col): (usize, usize)) -> usize {
+///
+/// The editor's cursor column counts characters, not bytes — the renderer paints
+/// it that way — so every conversion to a byte index has to come through here.
+pub(crate) fn offset_of(content: &str, (row, col): (usize, usize)) -> usize {
     let mut offset = 0;
     for (i, line) in content.lines().enumerate() {
         if i == row {
