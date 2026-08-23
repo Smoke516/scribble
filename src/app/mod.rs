@@ -749,7 +749,35 @@ impl App {
         self.folder_tree_items.get(self.selected_folder_index)
     }
 
+    /// Fold the buffer back into the note it belongs to.
+    ///
+    /// The buffer only reaches the notebook through a save, and the autosave is a
+    /// two-second debounce, so anything that replaces `editor_content` without
+    /// coming through here throws away whatever was typed since.
+    fn flush_buffer_into_current_note(&mut self) {
+        let Some(note) = self.current_note.clone() else {
+            return;
+        };
+        if note.content == self.editor_content {
+            return;
+        }
+        let mut updated = note;
+        updated.update_content(self.editor_content.clone());
+        self.notebook.notes.insert(updated.id, updated.clone());
+        self.current_note = Some(updated.clone());
+        self.mark_note_dirty(updated.id);
+        self.mark_saved();
+    }
+
     pub fn select_note(&mut self, note_id: Uuid) {
+        // Re-opening the note already open must not reload it: that would swap a
+        // buffer with unsaved edits for the last thing written to disk.
+        if self.current_note.as_ref().is_some_and(|n| n.id == note_id) {
+            self.focused_pane = FocusedPane::Editor;
+            return;
+        }
+        self.flush_buffer_into_current_note();
+
         // Save cursor position for the note we're leaving
         if let Some(ref current) = self.current_note {
             self.note_cursor_map.insert(current.id, self.editor_cursor);
@@ -1121,6 +1149,15 @@ impl App {
         } else {
             false
         }
+    }
+
+    /// Whether the folder tree is on screen and can be acted on.
+    ///
+    /// With `ui.show_sidebar = false` — the default — the tree is a `Ctrl+E`
+    /// overlay and is never drawn, so its highlight is invisible: focusing it, or
+    /// renaming and deleting what it points at, is acting blind.
+    pub fn tree_is_visible(&self) -> bool {
+        self.config.ui.show_sidebar
     }
 
     pub fn welcome_move(&mut self, delta: isize) {

@@ -340,6 +340,15 @@ fn lookup_exact(
         .map(|b| b.action)
 }
 
+/// Whether a command aimed at "the selected item" should mean the tree's
+/// highlight rather than the note on screen.
+///
+/// Only when the tree is both focused and drawn: with the sidebar hidden its
+/// highlight cannot be seen, so acting on it is acting blind.
+fn acting_on_the_tree(app: &App) -> bool {
+    app.focused_pane == FocusedPane::Folders && app.tree_is_visible()
+}
+
 /// Resolve a key to an action.
 fn lookup(key: &KeyEvent, editor_focused: bool, on_welcome: bool) -> Option<Action> {
     let mods = effective_mods(key);
@@ -575,16 +584,25 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
             if app.editor_cursor.1 < line_len { app.editor_cursor.1 += 1; }
         }
         Action::CyclePane => {
+            // A pane that is not drawn is not in the cycle. With the sidebar
+            // hidden, Tab used to move focus into an invisible tree, where j/k
+            // moved a highlight nobody could see and Enter opened whatever it
+            // had landed on.
+            let tree = if app.tree_is_visible() {
+                FocusedPane::Folders
+            } else {
+                FocusedPane::Editor
+            };
             app.focused_pane = if app.preview_enabled {
                 match app.focused_pane {
                     FocusedPane::Folders => FocusedPane::Editor,
                     FocusedPane::Editor => FocusedPane::Preview,
-                    FocusedPane::Preview => FocusedPane::Folders,
+                    FocusedPane::Preview => tree,
                 }
             } else {
                 match app.focused_pane {
                     FocusedPane::Folders => FocusedPane::Editor,
-                    FocusedPane::Editor => FocusedPane::Folders,
+                    FocusedPane::Editor => tree,
                     FocusedPane::Preview => FocusedPane::Editor, // Fallback if preview gets disabled
                 }
             };
@@ -664,6 +682,13 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
         // note or folder.
         Action::DeleteLineOrConfirm => {
             if !editor_focused {
+                // Same target as rename and move: the highlight when the tree is
+                // the thing you are looking at, the open note otherwise. It used
+                // to offer to delete the tree's highlight from the preview pane,
+                // while `r` in that same pane renamed the note on screen.
+                if !acting_on_the_tree(app) {
+                    app.focus_tree_on_current_note();
+                }
                 if let Err(e) = app.start_delete_confirmation() {
                     app.set_message(e);
                 }
@@ -731,13 +756,15 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
             }
         }
         Action::MoveItem => {
-            // Act on the note in front of you, not on whatever the hidden tree
-            // selection happens to be pointing at.
-            app.focus_tree_on_current_note();
+            if !acting_on_the_tree(app) {
+                app.focus_tree_on_current_note();
+            }
             app.start_move_item();
         }
         Action::RenameItem => {
-            app.focus_tree_on_current_note();
+            if !acting_on_the_tree(app) {
+                app.focus_tree_on_current_note();
+            }
             app.start_rename_item();
         }
         Action::SaveNote => {
@@ -817,22 +844,42 @@ fn run_action(app: &mut App, action: Action, editor_focused: bool) {
 
         // --- scrolling ---
         Action::ScrollHalfUp => {
-            if (editor_focused || preview_focused) && app.current_note.is_some() {
+            if app.current_note.is_none() {
+            } else if preview_focused {
+                // j/k scroll the preview pane; paging has to follow the same pane
+                // or the keys disagree about which text they are moving through.
+                app.preview_scroll_page_up();
+            } else if editor_focused {
                 app.scroll_half_page_up();
             }
         }
         Action::ScrollHalfDown => {
-            if (editor_focused || preview_focused) && app.current_note.is_some() {
+            if app.current_note.is_none() {
+            } else if preview_focused {
+                // j/k scroll the preview pane; paging has to follow the same pane
+                // or the keys disagree about which text they are moving through.
+                app.preview_scroll_page_down();
+            } else if editor_focused {
                 app.scroll_half_page_down();
             }
         }
         Action::ScrollPageUp => {
-            if (editor_focused || preview_focused) && app.current_note.is_some() {
+            if app.current_note.is_none() {
+            } else if preview_focused {
+                // j/k scroll the preview pane; paging has to follow the same pane
+                // or the keys disagree about which text they are moving through.
+                app.preview_scroll_page_up();
+            } else if editor_focused {
                 app.scroll_page_up();
             }
         }
         Action::ScrollPageDown => {
-            if (editor_focused || preview_focused) && app.current_note.is_some() {
+            if app.current_note.is_none() {
+            } else if preview_focused {
+                // j/k scroll the preview pane; paging has to follow the same pane
+                // or the keys disagree about which text they are moving through.
+                app.preview_scroll_page_down();
+            } else if editor_focused {
                 app.scroll_page_down();
             }
         }
@@ -2723,6 +2770,7 @@ mod dispatch_tests {
     #[test]
     fn tab_into_the_tree_then_enter_stays_on_the_open_note() {
         let (mut app, open_id) = note_opened_while_the_tree_pointed_elsewhere();
+        app.config.ui.show_sidebar = true; // Tab only reaches a tree that is drawn
         app.focused_pane = FocusedPane::Editor;
 
         handle_normal_mode(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -3442,5 +3490,194 @@ mod dispatch_tests {
             a.selected_folder_index, b.selected_folder_index,
             "SHIFT must not change how 'G' dispatches"
         );
+    }
+}
+
+/// What a key does depends on which pane it was meant for. These are the ones
+/// that were aimed at the wrong one.
+#[cfg(test)]
+mod pane_targeting_tests {
+    use super::*;
+    use crate::models::Note;
+
+    /// Two notes, the first open, the tree's highlight moved to the other by hand.
+    fn app_with(pane: FocusedPane, sidebar: bool) -> (App, String, String) {
+        let mut app = App::default();
+        let open = Note::new("Open".to_string(), None);
+        let other = Note::new("Other".to_string(), None);
+        let (open_id, other_id) = (open.id, other.id);
+        app.notebook.add_note(open);
+        app.notebook.add_note(other);
+        app.refresh_tree_view();
+        app.select_note(open_id);
+        app.editor_content = "line one\nline two\nline three".to_string();
+        app.selected_folder_index = app
+            .folder_tree_items
+            .iter()
+            .position(|i| i.id == other_id)
+            .unwrap();
+        app.config.ui.show_sidebar = sidebar;
+        app.focused_pane = pane;
+        app.mode = AppMode::Normal;
+        (app, "Open".to_string(), "Other".to_string())
+    }
+
+    fn press(app: &mut App, c: char) {
+        handle_normal_mode(app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+
+    /// Re-opening the note already open must keep what is in the buffer. The
+    /// autosave is a two-second debounce, so reloading from the notebook throws
+    /// away everything typed since it last fired.
+    #[test]
+    fn reopening_the_open_note_keeps_unsaved_edits() {
+        let (mut app, _, _) = app_with(FocusedPane::Folders, true);
+        app.editor_content = "typed but not saved".to_string();
+        app.mark_modified();
+        let id = app.current_note.as_ref().unwrap().id;
+
+        app.select_note(id);
+
+        assert_eq!(app.editor_content, "typed but not saved", "the buffer was reloaded");
+    }
+
+    /// And switching away has to take the buffer with it, or the note being left
+    /// loses everything since the last autosave.
+    #[test]
+    fn switching_notes_keeps_the_buffer_of_the_one_being_left() {
+        let (mut app, _, _) = app_with(FocusedPane::Folders, true);
+        let leaving = app.current_note.as_ref().unwrap().id;
+        app.editor_content = "typed but not saved".to_string();
+        app.mark_modified();
+        let target = app
+            .notebook
+            .notes
+            .keys()
+            .copied()
+            .find(|id| *id != leaving)
+            .unwrap();
+
+        app.select_note(target);
+
+        assert_eq!(
+            app.notebook.notes.get(&leaving).unwrap().content,
+            "typed but not saved",
+            "the note being left lost the buffer"
+        );
+        assert!(app.disk.dirty_note_ids.contains(&leaving), "no write was queued");
+    }
+
+    /// From the tree, `r` and `m` mean the row you highlighted.
+    #[test]
+    fn rename_from_the_tree_acts_on_the_highlighted_item() {
+        let (mut app, _, other) = app_with(FocusedPane::Folders, true);
+        press(&mut app, 'r');
+        assert_eq!(app.input_buffer, other, "renamed the note on screen instead");
+    }
+
+    #[test]
+    fn move_from_the_tree_acts_on_the_highlighted_item() {
+        let (mut app, _, other) = app_with(FocusedPane::Folders, true);
+        press(&mut app, 'm');
+        assert_eq!(
+            app.get_selected_item().map(|i| i.name.clone()),
+            Some(other),
+            "moved the note on screen instead"
+        );
+    }
+
+    /// From the editor or the preview the tree's highlight may be invisible, so
+    /// these act on the note in front of you.
+    #[test]
+    fn rename_away_from_the_tree_acts_on_the_open_note() {
+        for pane in [FocusedPane::Editor, FocusedPane::Preview] {
+            let (mut app, open, _) = app_with(pane.clone(), true);
+            press(&mut app, 'r');
+            assert_eq!(app.input_buffer, open, "renamed something else from {:?}", pane);
+        }
+    }
+
+    /// `d` used to disagree with its siblings: from the preview it offered to
+    /// delete the tree's highlight while `r` renamed the note on screen.
+    #[test]
+    fn delete_from_the_preview_targets_the_note_on_screen() {
+        let (mut app, open, _) = app_with(FocusedPane::Preview, true);
+        press(&mut app, 'd');
+        assert_eq!(app.mode, AppMode::DeleteConfirm);
+        assert_eq!(
+            app.get_selected_item().map(|i| i.name.clone()),
+            Some(open),
+            "offered to delete a note that is not on screen"
+        );
+    }
+
+    #[test]
+    fn delete_from_the_tree_targets_the_highlighted_item() {
+        let (mut app, _, other) = app_with(FocusedPane::Folders, true);
+        press(&mut app, 'd');
+        assert_eq!(app.mode, AppMode::DeleteConfirm);
+        assert_eq!(app.get_selected_item().map(|i| i.name.clone()), Some(other));
+    }
+
+    /// With the sidebar hidden — the default — the tree is a Ctrl+E overlay and
+    /// is never drawn. Focus has no business there.
+    #[test]
+    fn tab_skips_a_sidebar_that_is_not_drawn() {
+        let (mut app, _, _) = app_with(FocusedPane::Editor, false);
+        for _ in 0..4 {
+            handle_normal_mode(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+            assert_ne!(
+                app.focused_pane,
+                FocusedPane::Folders,
+                "Tab moved focus into a pane nobody can see"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_still_reaches_a_sidebar_that_is_drawn() {
+        let (mut app, _, _) = app_with(FocusedPane::Editor, true);
+        let mut seen = false;
+        for _ in 0..4 {
+            handle_normal_mode(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+            seen |= app.focused_pane == FocusedPane::Folders;
+        }
+        assert!(seen, "Tab never reached the tree");
+    }
+
+    /// And with it hidden, a command aimed at the selection means the open note
+    /// even if focus somehow sits on the tree.
+    #[test]
+    fn a_hidden_tree_never_becomes_the_target() {
+        let (mut app, open, _) = app_with(FocusedPane::Folders, false);
+        press(&mut app, 'r');
+        assert_eq!(app.input_buffer, open, "acted on an invisible highlight");
+    }
+
+    /// j/k scroll the preview pane, so paging must too.
+    #[test]
+    fn paging_follows_the_focused_pane() {
+        let keys = [
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        ];
+        for key in keys {
+            let (mut app, _, _) = app_with(FocusedPane::Preview, true);
+            app.editor_content = (1..=40).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+            handle_normal_mode(&mut app, key);
+            assert_eq!(app.editor_scroll, 0, "paging in the preview scrolled the editor");
+            assert!(app.preview_scroll > 0, "the preview did not move");
+        }
+    }
+
+    #[test]
+    fn paging_back_up_follows_the_focused_pane_too() {
+        let (mut app, _, _) = app_with(FocusedPane::Preview, true);
+        app.editor_content = (1..=40).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        app.editor_scroll = 10;
+        app.preview_scroll = 10;
+        handle_normal_mode(&mut app, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(app.editor_scroll, 10, "paging in the preview scrolled the editor");
+        assert!(app.preview_scroll < 10, "the preview did not move");
     }
 }

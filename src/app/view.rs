@@ -117,6 +117,15 @@ impl App {
         }
     }
 
+    /// Page the preview, by the same ten lines the editor moves.
+    pub fn preview_scroll_page_up(&mut self) {
+        self.preview_scroll = self.preview_scroll.saturating_sub(10);
+    }
+
+    pub fn preview_scroll_page_down(&mut self) {
+        self.preview_scroll = (self.preview_scroll + 10).min(self.preview_max_scroll());
+    }
+
     pub fn preview_scroll_to_bottom(&mut self) {
         self.preview_scroll = self.preview_max_scroll();
     }
