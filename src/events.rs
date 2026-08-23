@@ -2294,9 +2294,9 @@ mod dispatch_tests {
         handle_normal_mode(app, KeyEvent::new(KeyCode::Char(c), mods));
     }
 
-    /// Two notes, the first one open with unsaved edits, the tree's selection
-    /// still sitting on the second — which is the ordinary state after opening a
-    /// note from the palette, the task panel or the landing page.
+    /// Two notes, the first open, the tree's highlight moved to the second by hand
+    /// — j/k in the tree moves the highlight without opening anything, so the two
+    /// can legitimately differ.
     fn two_notes_with_selection_elsewhere() -> (App, Uuid, Uuid) {
         let mut app = App::default();
         let mut open = Note::new("Open".to_string(), None);
@@ -2383,6 +2383,87 @@ mod dispatch_tests {
         press_enter(&mut app);
 
         assert_eq!(app.editor_cursor, (1, 4), "Enter should land on the first non-blank");
+    }
+
+    /// A note opened while the tree was highlighting a different one — what the
+    /// landing page, its 1-9 shortcuts, the explorer and a freshly created note
+    /// all do, none of which touch the tree.
+    fn note_opened_while_the_tree_pointed_elsewhere() -> (App, Uuid) {
+        let mut app = App::default();
+        let open = Note::new("Open".to_string(), None);
+        let other = Note::new("Other".to_string(), None);
+        let (open_id, other_id) = (open.id, other.id);
+        app.notebook.add_note(open);
+        app.notebook.add_note(other);
+        app.refresh_tree_view();
+        app.selected_folder_index = app
+            .folder_tree_items
+            .iter()
+            .position(|i| i.id == other_id)
+            .expect("other note missing from the tree");
+
+        app.select_note(open_id);
+        app.mode = AppMode::Normal;
+        (app, open_id)
+    }
+
+    /// The tree's highlight must land on whatever note is open, whichever route
+    /// opened it — otherwise the highlight is pointing at a note you have not
+    /// looked at, and every command that acts on the selection acts on that one.
+    #[test]
+    fn opening_a_note_points_the_tree_at_it() {
+        let (app, open_id) = note_opened_while_the_tree_pointed_elsewhere();
+
+        assert_eq!(
+            app.get_selected_item().map(|i| i.id),
+            Some(open_id),
+            "the tree is still highlighting a note that is not open"
+        );
+    }
+
+    /// The reported sequence: a note open in normal mode, Tab into the folder
+    /// pane, Enter — and you are looking at a different note, because the
+    /// highlight never followed the note you opened.
+    #[test]
+    fn tab_into_the_tree_then_enter_stays_on_the_open_note() {
+        let (mut app, open_id) = note_opened_while_the_tree_pointed_elsewhere();
+        app.focused_pane = FocusedPane::Editor;
+
+        handle_normal_mode(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.focused_pane, FocusedPane::Folders, "Tab did not reach the tree");
+        press_enter(&mut app);
+
+        assert_eq!(
+            app.current_note.as_ref().map(|n| n.id),
+            Some(open_id),
+            "Tab then Enter jumped to whatever row the tree had left selected"
+        );
+    }
+
+    /// A note inside a collapsed folder has no row to highlight, so revealing it
+    /// has to expand the folder first.
+    #[test]
+    fn opening_a_note_reveals_it_inside_a_collapsed_folder() {
+        use crate::models::Folder;
+        let mut app = App::default();
+        let folder = Folder::new("Work".to_string(), None);
+        let folder_id = folder.id;
+        app.notebook.add_folder(folder);
+        if let Some(f) = app.notebook.folders.get_mut(&folder_id) {
+            f.expanded = false;
+        }
+        let buried = Note::new("Buried".to_string(), Some(folder_id));
+        let buried_id = buried.id;
+        app.notebook.add_note(buried);
+        app.refresh_tree_view();
+
+        app.select_note(buried_id);
+
+        assert_eq!(
+            app.get_selected_item().map(|i| i.id),
+            Some(buried_id),
+            "the note was not revealed in the tree"
+        );
     }
 
     /// Global Ctrl-shortcuts must keep working while the editor pane is focused.

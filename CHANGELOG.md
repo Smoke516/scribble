@@ -39,6 +39,17 @@ footnote definitions rendered as bare paragraphs.
   business; in the editor `Enter` moves down a line to its first non-blank, as
   vim's `<CR>` does.
 
+- **The tree's highlight did not follow the note you opened.** Only the routes
+  through `open_note_by_id` pointed it; opening from the landing page, its `1`-`9`
+  shortcuts, the explorer, or creating a note left the highlight on an unrelated
+  row. Tab into the folder pane, press `Enter`, and you were reading a note you
+  never asked for — with the same two-second autosave window at stake. Opening a
+  note now points the tree at it, whichever route opened it.
+- **Revealing a note inside a collapsed folder revealed nothing.**
+  `navigate_to_note` looked for the note's row before expanding the folder that
+  hid it, and a collapsed folder has no row to find. It expands first now, all
+  the way up a nested chain.
+
 ### ✨ Changed
 
 - Frontmatter is hidden in the preview rather than rendered as a rule and a
