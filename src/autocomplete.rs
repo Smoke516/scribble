@@ -1,19 +1,75 @@
-use std::collections::HashMap;
+//! Snippet completion for markdown.
+//!
+//! The rule this table lives by: a suggestion earns its place only if accepting
+//! it leaves the note different from what you typed. Ten of the previous
+//! seventeen replaced the trigger with itself — `- ` became `- ` — so the popup
+//! appeared over every list item and every heading, swallowed the `Tab` that
+//! would have indented it, and gave nothing back.
 
-#[derive(Debug, Clone)]
-pub struct AutocompleteSuggestion {
-    pub trigger: String,       // What the user types to trigger this
-    pub completion: String,    // What gets inserted
-    pub description: String,   // User-friendly description
-    pub cursor_offset: i16,    // Where to position cursor after insertion (negative = back from end)
+/// Where on a line a trigger is allowed to fire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Where {
+    /// Any position — `[` opens a link mid-sentence as readily as at the margin.
+    Anywhere,
+    /// Only with nothing but whitespace before it. A table or a fence that began
+    /// halfway through a sentence would not be one.
+    LineStart,
 }
+
+/// A snippet, and the text that summons it.
+#[derive(Debug, Clone, Copy)]
+pub struct AutocompleteSuggestion {
+    /// Typed by hand, and replaced when the suggestion is accepted.
+    pub trigger: &'static str,
+    /// What replaces the trigger. `$0` marks where the cursor lands.
+    pub template: &'static str,
+    pub description: &'static str,
+    pub place: Where,
+}
+
+impl AutocompleteSuggestion {
+    /// The text to insert, and the byte offset within it for the cursor.
+    pub fn expand(&self) -> (String, usize) {
+        match self.template.split_once("$0") {
+            Some((before, after)) => (format!("{}{}", before, after), before.len()),
+            None => (self.template.to_string(), self.template.len()),
+        }
+    }
+}
+
+const fn snip(
+    trigger: &'static str,
+    template: &'static str,
+    description: &'static str,
+    place: Where,
+) -> AutocompleteSuggestion {
+    AutocompleteSuggestion { trigger, template, description, place }
+}
+
+/// Every snippet, longest trigger first for readability; the match picks the
+/// longest one regardless of order.
+const SNIPPETS: &[AutocompleteSuggestion] = &[
+    snip("```", "```\n$0\n```", "Code block", Where::LineStart),
+    snip("![", "![$0](image.png)", "Image", Where::Anywhere),
+    snip("**", "**$0**", "Bold", Where::Anywhere),
+    snip("[", "[$0](url)", "Link", Where::Anywhere),
+    snip("`", "`$0`", "Inline code", Where::Anywhere),
+    snip("*", "*$0*", "Italic", Where::Anywhere),
+    snip(
+        "|",
+        "| $0 | Header |\n|---|---|\n| Cell | Cell |",
+        "Table",
+        Where::LineStart,
+    ),
+];
 
 #[derive(Debug, Clone)]
 pub struct AutocompleteState {
     pub active: bool,
     pub suggestions: Vec<AutocompleteSuggestion>,
     pub selected_index: usize,
-    pub trigger_start_pos: usize, // Position where the trigger started
+    /// Byte offset within the line where the trigger starts.
+    pub trigger_start_pos: usize,
 }
 
 impl AutocompleteState {
@@ -60,158 +116,23 @@ impl AutocompleteState {
     }
 }
 
-pub struct MarkdownAutocomplete {
-    suggestions: HashMap<String, Vec<AutocompleteSuggestion>>,
+impl Default for AutocompleteState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
+
+pub struct MarkdownAutocomplete;
 
 impl MarkdownAutocomplete {
     pub fn new() -> Self {
-        let mut autocomplete = Self {
-            suggestions: HashMap::new(),
-        };
-        autocomplete.initialize_suggestions();
-        autocomplete
+        Self
     }
 
-    fn initialize_suggestions(&mut self) {
-        // Headers
-        self.add_suggestion("# ", AutocompleteSuggestion {
-            trigger: "#".to_string(),
-            completion: "# ".to_string(),
-            description: "Heading 1".to_string(),
-            cursor_offset: 0,
-        });
-
-        self.add_suggestion("## ", AutocompleteSuggestion {
-            trigger: "##".to_string(),
-            completion: "## ".to_string(),
-            description: "Heading 2".to_string(),
-            cursor_offset: 0,
-        });
-
-        self.add_suggestion("### ", AutocompleteSuggestion {
-            trigger: "###".to_string(),
-            completion: "### ".to_string(),
-            description: "Heading 3".to_string(),
-            cursor_offset: 0,
-        });
-
-        // Lists
-        self.add_suggestion("- ", AutocompleteSuggestion {
-            trigger: "-".to_string(),
-            completion: "- ".to_string(),
-            description: "Bullet list item".to_string(),
-            cursor_offset: 0,
-        });
-
-        self.add_suggestion("* ", AutocompleteSuggestion {
-            trigger: "*".to_string(),
-            completion: "* ".to_string(),
-            description: "Bullet list item (alt)".to_string(),
-            cursor_offset: 0,
-        });
-
-        self.add_suggestion("1. ", AutocompleteSuggestion {
-            trigger: "1.".to_string(),
-            completion: "1. ".to_string(),
-            description: "Numbered list item".to_string(),
-            cursor_offset: 0,
-        });
-
-        // Checkboxes
-        self.add_suggestion("- [ ] ", AutocompleteSuggestion {
-            trigger: "- [".to_string(),
-            completion: "- [ ] ".to_string(),
-            description: "Todo checkbox (unchecked)".to_string(),
-            cursor_offset: 0,
-        });
-
-        self.add_suggestion("- [x] ", AutocompleteSuggestion {
-            trigger: "- [x".to_string(),
-            completion: "- [x] ".to_string(),
-            description: "Todo checkbox (checked)".to_string(),
-            cursor_offset: 0,
-        });
-
-        // Code blocks
-        self.add_suggestion("```", AutocompleteSuggestion {
-            trigger: "```".to_string(),
-            completion: "```\n\n```".to_string(),
-            description: "Code block".to_string(),
-            cursor_offset: -4, // Position cursor inside the code block
-        });
-
-        self.add_suggestion("`", AutocompleteSuggestion {
-            trigger: "`".to_string(),
-            completion: "``".to_string(),
-            description: "Inline code".to_string(),
-            cursor_offset: -1, // Position cursor between the backticks
-        });
-
-        // Emphasis
-        self.add_suggestion("**", AutocompleteSuggestion {
-            trigger: "**".to_string(),
-            completion: "****".to_string(),
-            description: "Bold text".to_string(),
-            cursor_offset: -2,
-        });
-
-        self.add_suggestion("*", AutocompleteSuggestion {
-            trigger: "*".to_string(),
-            completion: "**".to_string(),
-            description: "Italic text".to_string(),
-            cursor_offset: -1,
-        });
-
-        // Links and images
-        self.add_suggestion("[", AutocompleteSuggestion {
-            trigger: "[".to_string(),
-            completion: "[](url)".to_string(),
-            description: "Link".to_string(),
-            cursor_offset: -5, // Position cursor at the beginning of link text
-        });
-
-        self.add_suggestion("![", AutocompleteSuggestion {
-            trigger: "![".to_string(),
-            completion: "![alt text](image.png)".to_string(),
-            description: "Image".to_string(),
-            cursor_offset: -17, // Position cursor at alt text
-        });
-
-        // Blockquotes
-        self.add_suggestion("> ", AutocompleteSuggestion {
-            trigger: ">".to_string(),
-            completion: "> ".to_string(),
-            description: "Blockquote".to_string(),
-            cursor_offset: 0,
-        });
-
-        // Tables
-        self.add_suggestion("| ", AutocompleteSuggestion {
-            trigger: "|".to_string(),
-            completion: "| Header 1 | Header 2 |\n|----------|----------|\n| Cell 1   | Cell 2   |".to_string(),
-            description: "Table".to_string(),
-            cursor_offset: -49, // Position cursor at first header
-        });
-
-        // Horizontal rule
-        self.add_suggestion("---", AutocompleteSuggestion {
-            trigger: "---".to_string(),
-            completion: "---".to_string(),
-            description: "Horizontal rule".to_string(),
-            cursor_offset: 0,
-        });
-    }
-
-    fn add_suggestion(&mut self, trigger: &str, suggestion: AutocompleteSuggestion) {
-        self.suggestions
-            .entry(trigger.to_string())
-            .or_default()
-            .push(suggestion);
-    }
-
-
-    /// Check if the current cursor position should trigger autocompletion
+    /// Snippets triggered by the text immediately before the cursor.
+    ///
+    /// `col` counts characters, as the cursor does; the returned position is a
+    /// byte offset within the line, as the buffer is indexed.
     pub fn check_for_completions(
         &self,
         content: &str,
@@ -219,52 +140,122 @@ impl MarkdownAutocomplete {
         col: usize,
     ) -> Option<(Vec<AutocompleteSuggestion>, usize)> {
         let lines: Vec<&str> = content.lines().collect();
-        if line >= lines.len() {
-            return None;
-        }
+        let current_line = lines.get(line)?;
 
-        let current_line = lines[line];
         // `col` counts characters; the slice below is in bytes.
         let byte_col = match current_line.char_indices().nth(col) {
             Some((byte, _)) => byte,
             None if col == current_line.chars().count() => current_line.len(),
             None => return None,
         };
+        let before_cursor = &current_line[..byte_col];
 
-        // Extract text from start of line up to cursor
-        let line_up_to_cursor = &current_line[..byte_col];
-        
-        // Only trigger at the beginning of a line or after whitespace
-        let should_trigger = line_up_to_cursor.is_empty() 
-            || line_up_to_cursor.chars().all(|c| c.is_whitespace())
-            || line_up_to_cursor.ends_with(' ');
+        let best = SNIPPETS
+            .iter()
+            .filter(|s| before_cursor.ends_with(s.trigger))
+            .filter(|s| match s.place {
+                Where::Anywhere => true,
+                Where::LineStart => before_cursor[..before_cursor.len() - s.trigger.len()]
+                    .chars()
+                    .all(char::is_whitespace),
+            })
+            .max_by_key(|s| s.trigger.len())?;
 
-        if !should_trigger {
-            return None;
+        Some((vec![*best], before_cursor.len() - best.trigger.len()))
+    }
+}
+
+impl Default for MarkdownAutocomplete {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at_end(line: &str) -> Option<(Vec<AutocompleteSuggestion>, usize)> {
+        MarkdownAutocomplete::new().check_for_completions(line, 0, line.chars().count())
+    }
+
+    fn label(line: &str) -> Option<&'static str> {
+        at_end(line).map(|(s, _)| s[0].description)
+    }
+
+    /// The seven that could never fire before: `should_trigger` demanded the text
+    /// before the cursor end in a space, and none of these do.
+    #[test]
+    fn every_snippet_can_actually_be_reached() {
+        assert_eq!(label("["), Some("Link"));
+        assert_eq!(label("!["), Some("Image"));
+        assert_eq!(label("**"), Some("Bold"));
+        assert_eq!(label("*"), Some("Italic"));
+        assert_eq!(label("`"), Some("Inline code"));
+        assert_eq!(label("```"), Some("Code block"));
+        assert_eq!(label("|"), Some("Table"));
+    }
+
+    /// Nothing fires for the markers that used to offer to replace themselves.
+    #[test]
+    fn the_no_op_suggestions_are_gone() {
+        for line in ["- ", "# ", "## ", "### ", "> ", "1. ", "- [ ] ", "---"] {
+            assert_eq!(label(line), None, "{:?} still opens the popup", line);
         }
+    }
 
-        // Find the longest matching trigger
-        let mut best_match: Option<(String, usize)> = None;
-        
-        for trigger in self.suggestions.keys() {
-            if line_up_to_cursor.ends_with(trigger) {
-                let trigger_start = line_up_to_cursor.len() - trigger.len();
-                if let Some((_, current_start)) = &best_match {
-                    if trigger_start < *current_start {
-                        best_match = Some((trigger.clone(), trigger_start));
-                    }
-                } else {
-                    best_match = Some((trigger.clone(), trigger_start));
-                }
-            }
+    #[test]
+    fn the_longest_trigger_wins() {
+        assert_eq!(label("**"), Some("Bold"));
+        assert_eq!(label("```"), Some("Code block"));
+        assert_eq!(label("!["), Some("Image"));
+    }
+
+    #[test]
+    fn a_link_fires_mid_sentence_but_a_table_does_not() {
+        assert_eq!(label("see the ["), Some("Link"));
+        assert_eq!(label("a | b |"), None, "a table began mid-sentence");
+        assert_eq!(label("  |"), Some("Table"), "indented table did not fire");
+    }
+
+    #[test]
+    fn a_space_after_the_trigger_dismisses_it() {
+        assert_eq!(label("* "), None);
+        assert_eq!(label("[ "), None);
+    }
+
+    #[test]
+    fn every_template_places_the_cursor() {
+        for snippet in SNIPPETS {
+            let (text, cursor) = snippet.expand();
+            assert!(
+                snippet.template.contains("$0"),
+                "{} has nowhere to put the cursor",
+                snippet.description
+            );
+            assert!(cursor <= text.len());
+            assert!(!text.contains("$0"), "the marker was left in {}", snippet.description);
+            assert_ne!(
+                text, snippet.trigger,
+                "{} replaces the trigger with itself",
+                snippet.description
+            );
         }
+    }
 
-        if let Some((trigger, start_pos)) = best_match {
-            if let Some(suggestions) = self.suggestions.get(&trigger) {
-                return Some((suggestions.clone(), start_pos));
-            }
-        }
+    #[test]
+    fn the_reported_position_is_where_the_trigger_starts() {
+        let (_, pos) = at_end("see the [").unwrap();
+        assert_eq!(pos, "see the ".len());
+    }
 
-        None
+    /// The scan runs on every keystroke, including in text that is not ASCII.
+    #[test]
+    fn a_multi_byte_line_is_scanned_by_character() {
+        assert_eq!(label("café ["), Some("Link"));
+        assert_eq!(label("日本語 **"), Some("Bold"));
+        assert!(MarkdownAutocomplete::new()
+            .check_for_completions("café", 0, 4)
+            .is_none());
     }
 }

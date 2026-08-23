@@ -83,6 +83,37 @@ impl App {
         }
     }
 
+    /// Indent or outdent the list item the cursor is on, by one level.
+    ///
+    /// Returns false when the line is not a list item, so the caller can fall
+    /// back to whatever `Tab` means elsewhere. Two spaces, matching the nesting
+    /// the preview renders.
+    pub fn indent_list_item(&mut self, outdent: bool) -> bool {
+        let row = self.editor_cursor.0 as usize;
+        let lines: Vec<&str> = self.editor_content.lines().collect();
+        let Some(line) = lines.get(row).copied() else {
+            return false;
+        };
+        if !is_list_item(line) {
+            return false;
+        }
+
+        let start = self.get_line_start_position(row);
+        if outdent {
+            let removable = line.chars().take_while(|c| *c == ' ').count().min(2);
+            if removable > 0 {
+                self.editor_content.replace_range(start..start + removable, "");
+                self.editor_cursor.1 = self.editor_cursor.1.saturating_sub(removable as u16);
+                self.mark_modified();
+            }
+        } else {
+            self.editor_content.insert_str(start, "  ");
+            self.editor_cursor.1 += 2;
+            self.mark_modified();
+        }
+        true
+    }
+
     /// Move cursor to the start of the current line (0).
     pub fn cursor_to_line_start(&mut self) {
         self.editor_cursor.1 = 0;
@@ -379,4 +410,14 @@ impl App {
         self.mark_modified();
     }
 
+}
+
+/// A bullet, task or numbered list item — the lines `Tab` should indent.
+fn is_list_item(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
+        return true;
+    }
+    let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+    digits > 0 && trimmed[digits..].starts_with(". ")
 }

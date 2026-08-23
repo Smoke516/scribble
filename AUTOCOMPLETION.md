@@ -1,70 +1,49 @@
-# Markdown Autocompletion Feature
+# Markdown snippets
 
-## Overview
+Scribble offers a snippet when the text just before the cursor is one that has
+something to add. Accepting it leaves the note different from what you typed —
+that is the whole rule, and it is why there is no suggestion for `- ` or `# `.
 
-The Scribble editor now includes intelligent markdown autocompletion that triggers as you type common markdown patterns. This feature helps speed up markdown writing by automatically suggesting completions for headers, lists, code blocks, and other markdown elements.
+## Using it
 
-## How It Works
+- **Accept**: `Tab`
+- **Dismiss**: `Esc` (a second `Esc` leaves insert mode, as usual)
+- **Navigate**: `↑` / `↓`
+- `Enter` always breaks the line. It never accepts a snippet.
 
-- **Automatic Triggering**: As you type specific markdown triggers (like `#`, `-`, `*`, etc.), a popup will appear showing available completions
-- **Navigation**: Use `↑` and `↓` arrow keys to navigate through suggestions
-- **Application**: Press `Tab` or `Enter` to apply the selected suggestion
-- **Cancellation**: Press `Escape` to close the autocompletion popup
+The popup goes away as soon as you type something the trigger no longer matches.
 
-## Supported Completions
+## The snippets
 
-### Headers
-- Type `#` → Suggests "# " (Heading 1)
-- Type `##` → Suggests "## " (Heading 2)  
-- Type `###` → Suggests "### " (Heading 3)
+| Type | You get | Cursor lands |
+|---|---|---|
+| `[` | `[](url)` | between the brackets |
+| `![` | `![](image.png)` | in the alt text |
+| `**` | `****` | between them |
+| `*` | `**` | between them |
+| `` ` `` | ` `` ` | between them |
+| ```` ``` ```` | a fenced block | on the empty line inside |
+| `\|` | a three-column table skeleton | in the first header |
 
-### Lists
-- Type `-` → Suggests "- " (Bullet list item)
-- Type `*` → Suggests "* " (Bullet list item - alternative)
-- Type `1.` → Suggests "1. " (Numbered list item)
+The fence and the table only fire with nothing but whitespace before them on the
+line — one that began halfway through a sentence would not be one. The rest fire
+anywhere, so `see the [` opens a link mid-sentence.
 
-### Checkboxes
-- Type `- [` → Suggests "- [ ] " (Unchecked todo item)
-- Type `- [x` → Suggests "- [x] " (Checked todo item)
+## Tab
 
-### Code
-- Type ``` → Suggests code block with proper formatting
-- Type ` → Suggests inline code with backticks
+Inside a list item, `Tab` indents it by one level and `Shift+Tab` outdents it.
+Two spaces, matching the nesting the preview renders. Everywhere else `Tab`
+inserts four spaces.
 
-### Emphasis
-- Type `**` → Suggests bold text formatting
-- Type `*` → Suggests italic text formatting
+## History
 
-### Links and Images
-- Type `[` → Suggests link format "[](url)"
-- Type `![` → Suggests image format "![alt text](image.png)"
+Until 3.2 this table held seventeen entries, and it did not work:
 
-### Other Elements
-- Type `>` → Suggests "> " (Blockquote)
-- Type `|` → Suggests complete table structure
-- Type `---` → Suggests horizontal rule
-
-## Smart Cursor Positioning
-
-Many completions include smart cursor positioning:
-- **Code blocks**: Cursor positioned inside the block
-- **Emphasis**: Cursor positioned between the markers
-- **Links**: Cursor positioned for easy text entry
-- **Tables**: Cursor positioned at the first header cell
-
-## Usage Tips
-
-1. **Context Aware**: Autocompletion only triggers at the beginning of lines or after spaces for most patterns
-2. **Immediate Feedback**: The popup appears instantly when a trigger pattern is detected
-3. **Non-intrusive**: If you don't want to use a suggestion, simply continue typing or press Escape
-4. **Visual Indicators**: Each suggestion shows an appropriate icon and description
-
-## Integration with Editor
-
-The autocompletion feature is seamlessly integrated with the editor's insert mode:
-- Works alongside existing vim-like key bindings
-- Respects the current cursor position and scroll state
-- Automatically saves content when suggestions are applied
-- Compatible with syntax highlighting and preview mode
-
-This feature significantly improves the markdown editing experience by reducing typing overhead and ensuring consistent formatting across your notes.
+- **Seven could never fire.** The scan demanded the text before the cursor end in
+  a space, and `[`, `![`, `**`, `*`, `` ` ``, ```` ``` ```` and `---` do not.
+- **Ten replaced the trigger with itself.** Typing `- ` offered "Bullet list
+  item", and accepting it turned `- ` into `- `.
+- Because a popup was up over every list item, `Tab` could not indent one and the
+  first `Esc` did not leave insert mode.
+- Every cursor offset in the unreachable half was wrong, which nothing noticed
+  because nothing could reach them.

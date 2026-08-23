@@ -919,11 +919,18 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Tab => {
             if app.autocomplete_state.active {
                 app.apply_autocomplete();
+            } else if app.indent_list_item(false) {
+                // Inside a list, Tab nests the item — which is what it is for
+                // there, and what the popup used to swallow.
             } else {
                 insert_str_at_cursor(app, "    "); // 4 spaces
                 app.mark_modified();
                 app.update_autocompletion();
             }
+        }
+
+        KeyCode::BackTab => {
+            app.indent_list_item(true);
         }
         
         KeyCode::Up => {
@@ -1016,9 +1023,11 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
         }
 
         KeyCode::Enter => {
-            if app.autocomplete_state.active {
-                app.apply_autocomplete();
-            } else {
+            {
+                // Enter always breaks the line. Accepting a snippet is Tab's job:
+                // a key that sometimes makes a newline and sometimes does not is
+                // the kind of surprise you cannot plan around while typing.
+                app.cancel_autocomplete();
                 app.push_undo_snapshot(); // word boundary
                 insert_char_at_cursor(app, '\n');
                 app.mark_modified();
@@ -2365,22 +2374,22 @@ mod utf8_cursor_tests {
         let mut app = typing_app("");
         type_str(&mut app, "café ");
         assert_eq!(app.editor_content, "café ");
-        type_str(&mut app, "- ");
+        type_str(&mut app, "[");
         assert!(app.autocomplete_state.active, "the trigger stopped being found");
     }
 
     #[test]
     fn applying_a_completion_after_multi_byte_text_keeps_the_text() {
         let mut app = typing_app("");
-        type_str(&mut app, "café | ");
+        type_str(&mut app, "café [");
         assert!(app.autocomplete_state.active);
         handle_insert_mode(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert!(
-            app.editor_content.starts_with("café "),
-            "the completion ate the text before it: {:?}",
-            app.editor_content
+        assert_eq!(
+            app.editor_content, "café [](url)",
+            "the completion ate the text before it"
         );
-        assert!(app.editor_content.contains("Header 1"));
+        // The cursor sits between the brackets, counted in characters.
+        assert_eq!(app.editor_cursor, (0, 6));
     }
 
     #[test]
@@ -2397,6 +2406,163 @@ mod utf8_cursor_tests {
         app.update_cursor_from_absolute_position(6); // after two 3-byte characters
         assert_eq!(app.editor_cursor, (0, 2));
         assert_eq!(app.cursor_byte_index(), 6, "the round trip did not close");
+    }
+}
+
+/// What `Tab` and the popup do while a note is being written.
+#[cfg(test)]
+mod typing_tests {
+    use super::*;
+    use crate::models::Note;
+
+    fn typing_app(content: &str) -> App {
+        let mut app = App::default();
+        let mut note = Note::new("N".to_string(), None);
+        note.content = content.to_string();
+        app.notebook.add_note(note.clone());
+        app.current_note = Some(note);
+        app.editor_content = content.to_string();
+        app.editor_cursor = (0, content.chars().count() as u16);
+        app.mode = AppMode::Insert;
+        app
+    }
+
+    fn type_str(app: &mut App, s: &str) {
+        for ch in s.chars() {
+            handle_insert_mode(app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        handle_insert_mode(app, KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    /// The one that made nested lists untypeable: after `- ` the popup was up,
+    /// so Tab applied a completion that replaced `- ` with `- `.
+    #[test]
+    fn tab_indents_a_list_item() {
+        let mut app = typing_app("");
+        type_str(&mut app, "- milk");
+        assert!(!app.autocomplete_state.active, "the popup is back over list items");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.editor_content, "  - milk");
+        assert_eq!(app.editor_cursor.1, 8, "the cursor did not move with the text");
+    }
+
+    #[test]
+    fn shift_tab_outdents_a_list_item() {
+        let mut app = typing_app("    - milk");
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.editor_content, "  - milk");
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.editor_content, "- milk");
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.editor_content, "- milk", "outdenting past the margin");
+    }
+
+    #[test]
+    fn tab_indents_every_kind_of_list_item() {
+        for line in ["- a", "* a", "+ a", "1. a", "12. a", "- [ ] a", "  - a"] {
+            let mut app = typing_app(line);
+            press(&mut app, KeyCode::Tab);
+            assert_eq!(
+                app.editor_content,
+                format!("  {}", line),
+                "{:?} was not indented",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn tab_outside_a_list_still_inserts_spaces() {
+        let mut app = typing_app("prose");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.editor_content, "prose    ");
+    }
+
+    /// Accepting a snippet has to leave the note different from what was typed.
+    #[test]
+    fn accepting_a_snippet_inserts_it_and_places_the_cursor() {
+        let cases = [
+            ("[", "[](url)", (0u16, 1u16)),
+            ("**", "****", (0, 2)),
+            ("`", "``", (0, 1)),
+            ("![", "![](image.png)", (0, 2)),
+        ];
+        for (typed, expected, cursor) in cases {
+            let mut app = typing_app("");
+            type_str(&mut app, typed);
+            assert!(app.autocomplete_state.active, "{:?} did not open the popup", typed);
+            press(&mut app, KeyCode::Tab);
+            assert_eq!(app.editor_content, expected, "{:?} expanded wrong", typed);
+            assert_eq!(app.editor_cursor, cursor, "{:?} left the cursor wrong", typed);
+        }
+    }
+
+    #[test]
+    fn a_fence_puts_the_cursor_on_the_empty_line_inside_it() {
+        let mut app = typing_app("");
+        type_str(&mut app, "```");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.editor_content, "```
+
+```");
+        assert_eq!(app.editor_cursor, (1, 0));
+    }
+
+    #[test]
+    fn a_table_lands_the_cursor_in_the_first_header() {
+        let mut app = typing_app("");
+        type_str(&mut app, "|");
+        press(&mut app, KeyCode::Tab);
+        assert!(app.editor_content.starts_with("| "), "{:?}", app.editor_content);
+        assert_eq!(app.editor_cursor, (0, 2), "the cursor missed the first header");
+    }
+
+    /// With the no-op popups gone, the first Esc leaves insert mode again.
+    #[test]
+    fn esc_after_a_list_marker_leaves_insert_mode() {
+        let mut app = typing_app("");
+        type_str(&mut app, "- milk");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, AppMode::Normal, "Esc was eaten by a popup");
+    }
+
+    /// And where a popup is genuinely up, Esc still dismisses it first.
+    #[test]
+    fn esc_dismisses_a_real_popup_before_leaving_insert_mode() {
+        let mut app = typing_app("");
+        type_str(&mut app, "[");
+        assert!(app.autocomplete_state.active);
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.autocomplete_state.active);
+        assert_eq!(app.mode, AppMode::Insert);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    /// Enter is for breaking the line, always — it used to accept the popup
+    /// instead, so after typing `- ` it did not even make a newline.
+    #[test]
+    fn enter_breaks_the_line_even_with_the_popup_up() {
+        let mut app = typing_app("");
+        type_str(&mut app, "[");
+        assert!(app.autocomplete_state.active);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.editor_content, "[\n");
+        assert_eq!(app.editor_cursor, (1, 0));
+        assert!(!app.autocomplete_state.active);
+    }
+
+    /// Typing on past a trigger has to put the popup away again.
+    #[test]
+    fn typing_past_a_trigger_closes_the_popup() {
+        let mut app = typing_app("");
+        type_str(&mut app, "[");
+        assert!(app.autocomplete_state.active);
+        type_str(&mut app, "x");
+        assert!(!app.autocomplete_state.active, "the popup outstayed its trigger");
     }
 }
 
