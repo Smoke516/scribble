@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::models::{Folder, Note, NotebookData};
-use crate::storage::{NotebookStorage, VaultStorage};
+use crate::storage::VaultStorage;
 
 /// How far a title may run before it stops being a title and starts being the note.
 const MAX_TITLE_LEN: usize = 60;

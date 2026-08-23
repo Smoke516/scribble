@@ -1182,7 +1182,7 @@ fn draw_command_dialog(f: &mut Frame, app: &App) {
             Span::styled("File: ", Style::default().fg(TokyoNightTheme::COMMENT)),
             Span::styled(":w :q :wq", Style::default().fg(TokyoNightTheme::GREEN)),
             Span::styled(" • Export: ", Style::default().fg(TokyoNightTheme::COMMENT)),
-            Span::styled(":export :backup :backups", Style::default().fg(TokyoNightTheme::GREEN)),
+            Span::styled(":export :import", Style::default().fg(TokyoNightTheme::GREEN)),
         ]),
         Line::from(vec![
             Span::styled("Theme: ", Style::default().fg(TokyoNightTheme::COMMENT)),
@@ -1893,7 +1893,6 @@ fn draw_help_dialog(f: &mut Frame, app: &App) {
         Line::from("    :export html <path>   Export HTML to custom path"),
         Line::from("    :export [path]        Export as markdown files"),
         Line::from("    :import <dir>         Import markdown files"),
-        Line::from("    :backup              Create backup          :backups  List backups"),
         Line::from(""),
         Line::from(vec![Span::styled("  Spell Check:", Style::default().fg(TokyoNightTheme::CYAN).add_modifier(Modifier::BOLD))]),
         Line::from("    :spell  :spellon      Enable spell check"),

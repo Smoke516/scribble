@@ -51,6 +51,37 @@ footnote definitions rendered as bare paragraphs.
   the conversion right; everything now goes through the same one. Eleven tests,
   and a twelfth that renders a note full of multi-byte text in every mode.
 
+### 🧹 Removed — the JSON storage backend
+
+Roadmap section 5. Notes are markdown files in a vault, and now that is the only
+way they are stored.
+
+- **`Storage`, the single-file JSON backend**, and the `NotebookStorage` trait
+  that existed to abstract over the two. `VaultStorage` was the only remaining
+  implementation, and it overrode every default the trait provided, so the trait
+  was indirection with nothing on the other side of it.
+- **`:backup` and `:backups`, and the `behavior.backup_on_import` setting.** The
+  backup copied `notebook.json` — for anyone using a vault, a 182-byte stub with
+  none of their notes in it. It reported success either way, including as the
+  "backup before import" that ran at the one moment you would be relying on it.
+  A backup you trust and that holds nothing is worse than no backup; the vault is
+  in a sync client and usually a git repo, which is where this belongs.
+- Three `StorageError` variants and an `IoResultExt` method that only the JSON
+  backend constructed, plus `restore_from_backup`, `export_note_to_file` and
+  `Storage::import_note_from_file`, which had no callers at all.
+
+Two behaviours moved rather than disappeared:
+
+- **With no vault configured, scribble now creates one** at
+  `~/.local/share/scribble/vault` and records it, instead of falling back to a
+  different storage format.
+- **`:export` with no path** writes to `~/Documents/scribble_export`, the same
+  place `:export html` already defaulted to, rather than into the deleted
+  backend's data directory.
+
+If notes are still sitting in an old `notebook.json`, scribble says so on exit
+rather than starting up empty without a word. 317 lines deleted, 144 added.
+
 ### ✅ Added — performance guardrails
 
 Startup and typing responsiveness were features nothing protected. Four tests now

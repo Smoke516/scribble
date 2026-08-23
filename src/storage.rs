@@ -69,36 +69,6 @@ fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
 }
 
 // Abstract trait for different storage backends
-pub trait NotebookStorage {
-    fn load_notebook(&self) -> Result<NotebookData, StorageError>;
-    fn save_notebook(&self, notebook: &NotebookData) -> Result<(), StorageError>;
-
-    /// Write only the `dirty` notes and delete `deleted_paths`. Default: fall back
-    /// to a full save (correct, just not incremental) — used by single-file backends
-    /// where it's already cheap.
-    fn save_incremental(
-        &self,
-        notebook: &NotebookData,
-        _dirty: &[Uuid],
-        _deleted_paths: &[PathBuf],
-    ) -> Result<SaveReport, StorageError> {
-        self.save_notebook(notebook)?;
-        Ok(SaveReport::default())
-    }
-
-    /// Move/rename a folder's directory (and all its files) on disk from one
-    /// vault-relative path to another, returning the updated absolute paths for
-    /// every note that lived under it. Default: no-op (single-file backends have
-    /// no folder directories).
-    fn relocate_folder(
-        &self,
-        _notebook: &NotebookData,
-        _old_rel: &Path,
-        _new_rel: &Path,
-    ) -> Result<Vec<(Uuid, PathBuf)>, StorageError> {
-        Ok(Vec::new())
-    }
-}
 
 /// Split a leading YAML frontmatter block off `content`, returning `(yaml, body)`.
 ///
@@ -489,8 +459,13 @@ impl VaultStorage {
     }
 }
 
-impl NotebookStorage for VaultStorage {
-    fn load_notebook(&self) -> Result<NotebookData, StorageError> {
+/// The one way notes are stored: a directory of markdown files.
+///
+/// This was a trait with two implementations until the JSON backend was deleted;
+/// a trait with one implementation is indirection with nothing on the other side
+/// of it.
+impl VaultStorage {
+    pub fn load_notebook(&self) -> Result<NotebookData, StorageError> {
         let mut notebook = NotebookData::new();
         let mut folders_created = HashMap::new();
         
@@ -611,7 +586,7 @@ impl NotebookStorage for VaultStorage {
         Ok(notebook)
     }
     
-    fn save_notebook(&self, notebook: &NotebookData) -> Result<(), StorageError> {
+    pub fn save_notebook(&self, notebook: &NotebookData) -> Result<(), StorageError> {
         self.ensure_folders(notebook)?;
 
         // Iterate in id order so collision-disambiguation is stable across saves
@@ -627,7 +602,7 @@ impl NotebookStorage for VaultStorage {
         Ok(())
     }
 
-    fn save_incremental(
+    pub fn save_incremental(
         &self,
         notebook: &NotebookData,
         dirty: &[Uuid],
@@ -661,7 +636,7 @@ impl NotebookStorage for VaultStorage {
         Ok(report)
     }
 
-    fn relocate_folder(
+    pub fn relocate_folder(
         &self,
         notebook: &NotebookData,
         old_rel: &Path,
@@ -702,155 +677,6 @@ impl NotebookStorage for VaultStorage {
             }
         }
         Ok(updated)
-    }
-}
-
-#[derive(Debug)]
-pub struct Storage {
-    data_dir: PathBuf,
-    notebook_file: PathBuf,
-}
-
-
-impl Storage {
-    pub fn new() -> Result<Self, StorageError> {
-        let data_dir = Self::get_data_dir()?;
-        fs::create_dir_all(&data_dir).create_dir_ctx(&data_dir)?;
-        
-        let notebook_file = data_dir.join("notebook.json");
-        
-        Ok(Self {
-            data_dir,
-            notebook_file,
-        })
-    }
-
-    fn get_data_dir() -> Result<PathBuf, StorageError> {
-        let data_dir = if let Some(data_dir) = dirs::data_dir() {
-            data_dir.join("scribble")
-        } else {
-            // Fallback to home directory if data_dir is not available
-            if let Some(home_dir) = dirs::home_dir() {
-                home_dir.join(".scribble")
-            } else {
-                PathBuf::from(".scribble")
-            }
-        };
-        Ok(data_dir)
-    }
-
-    pub fn load_notebook(&self) -> Result<NotebookData, StorageError> {
-        if self.notebook_file.exists() {
-            let contents =
-                fs::read_to_string(&self.notebook_file).read_ctx(&self.notebook_file)?;
-            let notebook: NotebookData =
-                serde_json::from_str(&contents).map_err(|source| StorageError::Parse {
-                    path: self.notebook_file.clone(),
-                    source,
-                })?;
-            Ok(notebook)
-        } else {
-            // Return empty notebook if file doesn't exist
-            Ok(NotebookData::new())
-        }
-    }
-
-    pub fn save_notebook(&self, notebook: &NotebookData) -> Result<(), StorageError> {
-        let json = serde_json::to_string_pretty(notebook).map_err(StorageError::Serialize)?;
-        // Single-file backend: a truncated write here loses the whole notebook,
-        // not one note, so atomicity matters even more than in vault mode.
-        write_atomic(&self.notebook_file, &json).write_ctx(&self.notebook_file)?;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub fn get_notes_dir(&self) -> PathBuf {
-        self.data_dir.join("notes")
-    }
-
-    #[allow(dead_code)]
-    pub fn export_note_to_file(&self, note_id: &str, content: &str) -> Result<PathBuf, StorageError> {
-        let notes_dir = self.get_notes_dir();
-        fs::create_dir_all(&notes_dir).create_dir_ctx(&notes_dir)?;
-        
-        let file_path = notes_dir.join(format!("{}.md", note_id));
-        write_atomic(&file_path, content).write_ctx(&file_path)?;
-        Ok(file_path)
-    }
-
-    #[allow(dead_code)]
-    pub fn import_note_from_file(&self, file_path: &PathBuf) -> Result<String, StorageError> {
-        let content = fs::read_to_string(file_path).read_ctx(file_path)?;
-        Ok(content)
-    }
-
-    #[allow(dead_code)]
-    pub fn backup_data(&self) -> Result<PathBuf, StorageError> {
-        let backup_dir = self.data_dir.join("backups");
-        fs::create_dir_all(&backup_dir).create_dir_ctx(&backup_dir)?;
-        
-        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-        let backup_file = backup_dir.join(format!("notebook_backup_{}.json", timestamp));
-        
-        if self.notebook_file.exists() {
-            fs::copy(&self.notebook_file, &backup_file).write_ctx(&backup_file)?;
-        }
-        
-        Ok(backup_file)
-    }
-
-    #[allow(dead_code)]
-    pub fn list_backups(&self) -> Result<Vec<PathBuf>, StorageError> {
-        let backup_dir = self.data_dir.join("backups");
-        
-        if !backup_dir.exists() {
-            return Ok(Vec::new());
-        }
-        
-        let mut backups = Vec::new();
-        
-        for entry in fs::read_dir(&backup_dir).read_ctx(&backup_dir)? {
-            let entry = entry.read_ctx(&backup_dir)?;
-            let path = entry.path();
-            
-            if path.is_file() && path.extension().map(|s| s == "json").unwrap_or(false) {
-                if let Some(file_name) = path.file_name() {
-                    if file_name.to_string_lossy().starts_with("notebook_backup_") {
-                        backups.push(path);
-                    }
-                }
-            }
-        }
-        
-        // Sort backups by filename (which includes timestamp)
-        backups.sort();
-        backups.reverse(); // Most recent first
-        
-        Ok(backups)
-    }
-
-    #[allow(dead_code)]
-    pub fn restore_from_backup(&self, backup_file: &PathBuf) -> Result<(), StorageError> {
-        if backup_file.exists() {
-            fs::copy(backup_file, &self.notebook_file).write_ctx(&self.notebook_file)?;
-        }
-        Ok(())
-    }
-}
-
-impl NotebookStorage for Storage {
-    fn load_notebook(&self) -> Result<NotebookData, StorageError> {
-        self.load_notebook()
-    }
-    
-    fn save_notebook(&self, notebook: &NotebookData) -> Result<(), StorageError> {
-        self.save_notebook(notebook)
-    }
-}
-
-impl Default for Storage {
-    fn default() -> Self {
-        Self::new().expect("Failed to initialize storage")
     }
 }
 

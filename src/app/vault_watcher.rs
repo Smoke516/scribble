@@ -344,7 +344,7 @@ impl App {
 #[cfg(test)]
 mod conflict_tests {
     use super::*;
-    use crate::storage::{NotebookStorage, VaultStorage};
+    use crate::storage::VaultStorage;
     use std::fs;
 
     /// A vault with one note, loaded into an App the way main.rs does it.
