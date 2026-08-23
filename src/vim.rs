@@ -682,6 +682,8 @@ mod tests {
     }
 
     #[test]
+    // `dG` is the vim command under test; snake case would hide which one.
+    #[allow(non_snake_case)]
     fn dG_deletes_to_the_end_of_the_buffer() {
         let (removed, left) = cut_with(
             "one\ntwo\nthree\n",

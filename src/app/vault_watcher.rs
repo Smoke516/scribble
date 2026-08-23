@@ -355,9 +355,11 @@ mod conflict_tests {
         fs::write(dir.join("Note.md"), body).unwrap();
 
         let storage = VaultStorage::new(dir.clone()).unwrap();
-        let mut app = App::default();
-        app.notebook = storage.load_notebook().unwrap();
-        app.vault_path = Some(dir.clone());
+        let app = App {
+            notebook: storage.load_notebook().unwrap(),
+            vault_path: Some(dir.clone()),
+            ..Default::default()
+        };
         let id = *app.notebook.notes.keys().next().unwrap();
         (app, dir, id)
     }

@@ -266,6 +266,9 @@ mod tag_visibility_tests {
     }
 
     #[test]
+    // Spelled out rather than relying on the default, since the absence of a note
+    // is the whole subject of the test.
+    #[allow(clippy::field_reassign_with_default)]
     fn with_no_note_open_there_are_no_tags() {
         let mut app = App::default();
         app.current_note = None;
