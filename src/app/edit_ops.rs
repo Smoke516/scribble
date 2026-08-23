@@ -31,7 +31,6 @@ impl App {
             self.editor_content = content;
             self.editor_cursor = cursor;
             self.mark_modified();
-            self.update_preview_content();
             true
         } else {
             false
@@ -49,7 +48,6 @@ impl App {
             self.editor_content = content;
             self.editor_cursor = cursor;
             self.mark_modified();
-            self.update_preview_content();
             true
         } else {
             false
@@ -152,7 +150,6 @@ impl App {
                 self.editor_cursor.1 = new_len as u16;
             }
             self.mark_modified();
-            self.update_preview_content();
         }
     }
 
@@ -204,7 +201,6 @@ impl App {
         self.editor_cursor.1 = 0;
         self.adjust_scroll_to_cursor();
         self.mark_modified();
-        self.update_preview_content();
         let preview: String = text.chars().take(40).collect();
         self.set_operation_info(format!("Pasted: \"{}\"", preview), Some("📋".to_string()));
     }
@@ -230,7 +226,6 @@ impl App {
         }
         self.adjust_scroll_to_cursor();
         self.mark_modified();
-        self.update_preview_content();
     }
 
     /// Paste yank buffer on a new line below the cursor (p).
@@ -266,7 +261,6 @@ impl App {
             self.editor_cursor.1 += yanked.chars().count() as u16;
             self.clamp_cursor_to_content();
             self.mark_modified();
-            self.update_preview_content();
             return;
         }
 
@@ -286,7 +280,6 @@ impl App {
         self.editor_cursor.1 = 0;
         self.adjust_scroll_to_cursor();
         self.mark_modified();
-        self.update_preview_content();
     }
 
     /// Run an operator over the span a motion or text object selects.
@@ -344,7 +337,6 @@ impl App {
 
         self.clamp_cursor_to_content();
         self.mark_modified();
-        self.update_preview_content();
     }
 
     /// Forget any half-typed operator sequence.

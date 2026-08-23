@@ -396,7 +396,6 @@ pub struct App {
     pub show_recent_files: bool,
     
     // Live preview
-    pub preview_content: String,
     pub preview_scroll: u16,
     
     // Vault switching
@@ -582,7 +581,6 @@ impl App {
             show_recent_files: false,
             
             // Live preview
-            preview_content: String::new(),
             preview_scroll: 0,
             
             // Vault switching
@@ -780,9 +778,6 @@ impl App {
             
             // Track recent file access
             self.notebook.add_recent_file(note_id);
-            
-            // Update preview if enabled
-            self.update_preview_content();
 
             // Run spell check if enabled
             if self.spell.enabled && self.spell.aspell_available {
@@ -905,10 +900,7 @@ impl App {
             self.notebook.notes.insert(updated_note.id, updated_note.clone());
             self.current_note = Some(updated_note);
             self.refresh_tree_view();
-            
-            // Update preview content
-            self.update_preview_content();
-            
+
             self.mark_saved();
             // The actual disk write is performed by the main loop.
             if let Some(id) = self.current_note.as_ref().map(|n| n.id) {
@@ -2003,7 +1995,6 @@ impl App {
         let start = self.get_line_start_position(row) + col;
         // `[ ]` and `[x]` are both 3 bytes, so the cursor stays valid.
         self.editor_content.replace_range(start..start + 3, new);
-        self.update_preview_content();
         self.mark_modified();
     }
 
@@ -2143,7 +2134,6 @@ impl App {
         }
         self.editor_cursor = start;
         self.mark_modified();
-        self.update_preview_content();
         self.mode = AppMode::Normal;
     }
 
@@ -2183,7 +2173,6 @@ impl App {
             self.editor_scroll = 0;
             self.preview_scroll = 0;
             self.mark_modified();
-            self.update_preview_content();
         }
         self.mode = AppMode::Insert;
     }

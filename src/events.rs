@@ -58,7 +58,6 @@ pub fn handle_paste(app: &mut App, text: &str) -> Result<(), Box<dyn std::error:
 
             app.adjust_scroll_to_cursor();
             app.mark_modified();
-            app.update_preview_content();
         }
         AppMode::Search | AppMode::SearchAdvanced | AppMode::SearchReplace
         | AppMode::Command | AppMode::InputNote | AppMode::InputFolder
@@ -1000,7 +999,6 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                 insert_char_at_cursor(app, c);
                 app.mark_modified();
                 app.update_autocompletion();
-                app.update_preview_content(); // Update preview as we type
             }
         }
 
@@ -1015,7 +1013,6 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                 app.editor_cursor.1 = 0;
                 app.adjust_scroll_to_cursor();
                 app.update_autocompletion();
-                app.update_preview_content();
             }
         }
         
@@ -1023,7 +1020,6 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
             delete_char_before_cursor(app);
             app.mark_modified();
             app.update_autocompletion();
-            app.update_preview_content();
         }
         
         // Page Up/Down scrolling in insert mode
