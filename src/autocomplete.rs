@@ -224,12 +224,15 @@ impl MarkdownAutocomplete {
         }
 
         let current_line = lines[line];
-        if col > current_line.len() {
-            return None;
-        }
+        // `col` counts characters; the slice below is in bytes.
+        let byte_col = match current_line.char_indices().nth(col) {
+            Some((byte, _)) => byte,
+            None if col == current_line.chars().count() => current_line.len(),
+            None => return None,
+        };
 
         // Extract text from start of line up to cursor
-        let line_up_to_cursor = &current_line[..col];
+        let line_up_to_cursor = &current_line[..byte_col];
         
         // Only trigger at the beginning of a line or after whitespace
         let should_trigger = line_up_to_cursor.is_empty() 

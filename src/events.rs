@@ -50,10 +50,10 @@ pub fn handle_paste(app: &mut App, text: &str) -> Result<(), Box<dyn std::error:
             if newline_count > 0 {
                 app.editor_cursor.0 += newline_count as u16;
                 // Set column to length of last line of pasted text
-                let last_line_len = text.rsplit('\n').next().map(|l| l.len()).unwrap_or(0);
+                let last_line_len = text.rsplit('\n').next().map(|l| l.chars().count()).unwrap_or(0);
                 app.editor_cursor.1 = last_line_len as u16;
             } else {
-                app.editor_cursor.1 += text.len() as u16;
+                app.editor_cursor.1 += text.chars().count() as u16;
             }
 
             app.adjust_scroll_to_cursor();
@@ -935,8 +935,9 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                     // Ensure cursor column doesn't exceed the new line length
                     let lines: Vec<&str> = app.editor_content.lines().collect();
                     if let Some(current_line) = lines.get(app.editor_cursor.0 as usize) {
-                        if app.editor_cursor.1 > current_line.len() as u16 {
-                            app.editor_cursor.1 = current_line.len() as u16;
+                        let chars = current_line.chars().count() as u16;
+                        if app.editor_cursor.1 > chars {
+                            app.editor_cursor.1 = chars;
                         }
                     }
                     app.adjust_scroll_to_cursor();
@@ -953,8 +954,9 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                     app.editor_cursor.0 += 1;
                     // Ensure cursor column doesn't exceed the new line length
                     if let Some(current_line) = lines.get(app.editor_cursor.0 as usize) {
-                        if app.editor_cursor.1 > current_line.len() as u16 {
-                            app.editor_cursor.1 = current_line.len() as u16;
+                        let chars = current_line.chars().count() as u16;
+                        if app.editor_cursor.1 > chars {
+                            app.editor_cursor.1 = chars;
                         }
                     }
                     app.adjust_scroll_to_cursor();
@@ -1053,7 +1055,7 @@ fn handle_insert_mode(app: &mut App, key: KeyEvent) {
                 .lines()
                 .nth(app.editor_cursor.0 as usize)
                 .unwrap_or("");
-            if (app.editor_cursor.1 as usize) < current_line.len() {
+            if (app.editor_cursor.1 as usize) < current_line.chars().count() {
                 app.editor_cursor.1 += 1;
                 app.update_autocompletion();
             }
@@ -1393,25 +1395,7 @@ fn handle_input_folder_mode(app: &mut App, key: KeyEvent) {
 
 
 fn get_cursor_byte_index(app: &App) -> usize {
-    let lines: Vec<&str> = app.editor_content.lines().collect();
-    let mut byte_index = 0;
-    
-    // Add up all the characters from previous lines
-    for (i, line) in lines.iter().enumerate() {
-        if i < app.editor_cursor.0 as usize {
-            byte_index += line.len() + 1; // +1 for the newline character
-        } else {
-            break;
-        }
-    }
-    
-    // Add the column position within the current line
-    if let Some(current_line) = lines.get(app.editor_cursor.0 as usize) {
-        byte_index += (app.editor_cursor.1 as usize).min(current_line.len());
-    }
-    
-    // Make sure we don't exceed the content length
-    byte_index.min(app.editor_content.len())
+    app.cursor_byte_index()
 }
 
 fn insert_char_at_cursor(app: &mut App, c: char) {
@@ -1425,9 +1409,9 @@ fn insert_char_at_cursor(app: &mut App, c: char) {
 fn insert_str_at_cursor(app: &mut App, s: &str) {
     let cursor_index = get_cursor_byte_index(app);
     app.editor_content.insert_str(cursor_index, s);
-    
-    // Move cursor forward by the length of inserted string
-    app.editor_cursor.1 += s.len() as u16;
+
+    // Forward by characters: the column counts those, not bytes.
+    app.editor_cursor.1 += s.chars().count() as u16;
 }
 
 fn delete_char_before_cursor(app: &mut App) {
@@ -1437,8 +1421,14 @@ fn delete_char_before_cursor(app: &mut App) {
     
     let cursor_index = get_cursor_byte_index(app);
     if cursor_index > 0 {
-        app.editor_content.remove(cursor_index - 1);
-        
+        // Remove the previous character, which may be several bytes wide.
+        let prev = app.editor_content[..cursor_index]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        app.editor_content.replace_range(prev..cursor_index, "");
+
         // Move cursor back
         if app.editor_cursor.1 > 0 {
             app.editor_cursor.1 -= 1;
@@ -1447,7 +1437,7 @@ fn delete_char_before_cursor(app: &mut App) {
             app.editor_cursor.0 -= 1;
             let lines: Vec<&str> = app.editor_content.lines().collect();
             if let Some(prev_line) = lines.get(app.editor_cursor.0 as usize) {
-                app.editor_cursor.1 = prev_line.len() as u16;
+                app.editor_cursor.1 = prev_line.chars().count() as u16;
             }
         }
     }
@@ -2270,6 +2260,146 @@ fn handle_explorer_mode(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// Typing anything outside ASCII used to panic the app.
+///
+/// The column counts characters and the buffer is indexed in bytes; the two
+/// agree until you type an accent, an arrow, a CJK character or an emoji, and
+/// then every slice at the cursor lands mid-character. `String::insert` and the
+/// autocomplete scan both assert on that, so the process died on the keystroke.
+#[cfg(test)]
+mod utf8_cursor_tests {
+    use super::*;
+    use crate::models::Note;
+
+    fn typing_app(content: &str) -> App {
+        let mut app = App::default();
+        let mut note = Note::new("N".to_string(), None);
+        note.content = content.to_string();
+        app.notebook.add_note(note.clone());
+        app.current_note = Some(note);
+        app.editor_content = content.to_string();
+        app.editor_cursor = (0, content.chars().count() as u16);
+        app.mode = AppMode::Insert;
+        app
+    }
+
+    fn type_str(app: &mut App, s: &str) {
+        for ch in s.chars() {
+            handle_insert_mode(app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+    }
+
+    #[test]
+    fn typing_past_a_multi_byte_character_does_not_panic() {
+        for word in ["café", "naïve", "日本語", "a→b", "🎉"] {
+            let mut app = typing_app("");
+            type_str(&mut app, word);
+            type_str(&mut app, " tail");
+            assert_eq!(
+                app.editor_content,
+                format!("{} tail", word),
+                "typing after {:?} went wrong",
+                word
+            );
+            assert_eq!(
+                app.editor_cursor.1 as usize,
+                app.editor_content.chars().count(),
+                "the column stopped counting characters after {:?}",
+                word
+            );
+        }
+    }
+
+    #[test]
+    fn typing_in_the_middle_of_multi_byte_text_inserts_where_the_cursor_is() {
+        let mut app = typing_app("café");
+        app.editor_cursor = (0, 3); // between 'f' and 'é'
+        type_str(&mut app, "X");
+        assert_eq!(app.editor_content, "cafXé");
+    }
+
+    #[test]
+    fn backspace_removes_a_whole_multi_byte_character() {
+        let mut app = typing_app("café");
+        handle_insert_mode(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.editor_content, "caf");
+        assert_eq!(app.editor_cursor.1, 3);
+    }
+
+    #[test]
+    fn backspace_over_a_newline_lands_at_the_end_of_the_line_above() {
+        let mut app = typing_app("café\n");
+        app.editor_cursor = (1, 0);
+        handle_insert_mode(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.editor_content, "café");
+        assert_eq!(app.editor_cursor, (0, 4), "column counted bytes, not characters");
+    }
+
+    #[test]
+    fn end_of_line_is_a_character_count() {
+        let mut app = typing_app("日本語");
+        app.cursor_to_line_end();
+        assert_eq!(app.editor_cursor.1, 3);
+    }
+
+    #[test]
+    fn moving_between_lines_clamps_by_characters() {
+        let mut app = typing_app("a→b→c\nxy");
+        app.editor_cursor = (0, 5);
+        app.cursor_down_normal();
+        assert_eq!(app.editor_cursor, (1, 2), "clamped to a byte length");
+        app.cursor_up_normal();
+        assert_eq!(app.editor_cursor.0, 0);
+    }
+
+    #[test]
+    fn the_right_arrow_stops_at_the_last_character() {
+        let mut app = typing_app("é");
+        app.editor_cursor = (0, 1);
+        handle_insert_mode(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.editor_cursor.1, 1, "the cursor ran past the end of the line");
+    }
+
+    #[test]
+    fn autocomplete_scans_a_multi_byte_line_without_panicking() {
+        let mut app = typing_app("");
+        type_str(&mut app, "café ");
+        assert_eq!(app.editor_content, "café ");
+        type_str(&mut app, "- ");
+        assert!(app.autocomplete_state.active, "the trigger stopped being found");
+    }
+
+    #[test]
+    fn applying_a_completion_after_multi_byte_text_keeps_the_text() {
+        let mut app = typing_app("");
+        type_str(&mut app, "café | ");
+        assert!(app.autocomplete_state.active);
+        handle_insert_mode(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(
+            app.editor_content.starts_with("café "),
+            "the completion ate the text before it: {:?}",
+            app.editor_content
+        );
+        assert!(app.editor_content.contains("Header 1"));
+    }
+
+    #[test]
+    fn pasting_multi_byte_text_advances_the_column_by_characters() {
+        let mut app = typing_app("");
+        handle_paste(&mut app, "héllo").unwrap();
+        assert_eq!(app.editor_cursor.1, 5, "the column counted bytes");
+    }
+
+    /// Round-tripping a byte offset back to a cursor has to land on characters.
+    #[test]
+    fn a_byte_offset_maps_back_to_a_character_column() {
+        let mut app = typing_app("日本語");
+        app.update_cursor_from_absolute_position(6); // after two 3-byte characters
+        assert_eq!(app.editor_cursor, (0, 2));
+        assert_eq!(app.cursor_byte_index(), 6, "the round trip did not close");
+    }
+}
+
 #[cfg(test)]
 mod dispatch_tests {
     use super::*;
@@ -2294,9 +2424,9 @@ mod dispatch_tests {
         handle_normal_mode(app, KeyEvent::new(KeyCode::Char(c), mods));
     }
 
-    /// Two notes, the first one open with unsaved edits, the tree's selection
-    /// still sitting on the second — which is the ordinary state after opening a
-    /// note from the palette, the task panel or the landing page.
+    /// Two notes, the first open, the tree's highlight moved to the second by hand
+    /// — j/k in the tree moves the highlight without opening anything, so the two
+    /// can legitimately differ.
     fn two_notes_with_selection_elsewhere() -> (App, Uuid, Uuid) {
         let mut app = App::default();
         let mut open = Note::new("Open".to_string(), None);
@@ -2383,6 +2513,87 @@ mod dispatch_tests {
         press_enter(&mut app);
 
         assert_eq!(app.editor_cursor, (1, 4), "Enter should land on the first non-blank");
+    }
+
+    /// A note opened while the tree was highlighting a different one — what the
+    /// landing page, its 1-9 shortcuts, the explorer and a freshly created note
+    /// all do, none of which touch the tree.
+    fn note_opened_while_the_tree_pointed_elsewhere() -> (App, Uuid) {
+        let mut app = App::default();
+        let open = Note::new("Open".to_string(), None);
+        let other = Note::new("Other".to_string(), None);
+        let (open_id, other_id) = (open.id, other.id);
+        app.notebook.add_note(open);
+        app.notebook.add_note(other);
+        app.refresh_tree_view();
+        app.selected_folder_index = app
+            .folder_tree_items
+            .iter()
+            .position(|i| i.id == other_id)
+            .expect("other note missing from the tree");
+
+        app.select_note(open_id);
+        app.mode = AppMode::Normal;
+        (app, open_id)
+    }
+
+    /// The tree's highlight must land on whatever note is open, whichever route
+    /// opened it — otherwise the highlight is pointing at a note you have not
+    /// looked at, and every command that acts on the selection acts on that one.
+    #[test]
+    fn opening_a_note_points_the_tree_at_it() {
+        let (app, open_id) = note_opened_while_the_tree_pointed_elsewhere();
+
+        assert_eq!(
+            app.get_selected_item().map(|i| i.id),
+            Some(open_id),
+            "the tree is still highlighting a note that is not open"
+        );
+    }
+
+    /// The reported sequence: a note open in normal mode, Tab into the folder
+    /// pane, Enter — and you are looking at a different note, because the
+    /// highlight never followed the note you opened.
+    #[test]
+    fn tab_into_the_tree_then_enter_stays_on_the_open_note() {
+        let (mut app, open_id) = note_opened_while_the_tree_pointed_elsewhere();
+        app.focused_pane = FocusedPane::Editor;
+
+        handle_normal_mode(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.focused_pane, FocusedPane::Folders, "Tab did not reach the tree");
+        press_enter(&mut app);
+
+        assert_eq!(
+            app.current_note.as_ref().map(|n| n.id),
+            Some(open_id),
+            "Tab then Enter jumped to whatever row the tree had left selected"
+        );
+    }
+
+    /// A note inside a collapsed folder has no row to highlight, so revealing it
+    /// has to expand the folder first.
+    #[test]
+    fn opening_a_note_reveals_it_inside_a_collapsed_folder() {
+        use crate::models::Folder;
+        let mut app = App::default();
+        let folder = Folder::new("Work".to_string(), None);
+        let folder_id = folder.id;
+        app.notebook.add_folder(folder);
+        if let Some(f) = app.notebook.folders.get_mut(&folder_id) {
+            f.expanded = false;
+        }
+        let buried = Note::new("Buried".to_string(), Some(folder_id));
+        let buried_id = buried.id;
+        app.notebook.add_note(buried);
+        app.refresh_tree_view();
+
+        app.select_note(buried_id);
+
+        assert_eq!(
+            app.get_selected_item().map(|i| i.id),
+            Some(buried_id),
+            "the note was not revealed in the tree"
+        );
     }
 
     /// Global Ctrl-shortcuts must keep working while the editor pane is focused.

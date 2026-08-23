@@ -65,7 +65,7 @@ impl App {
             self.editor_cursor.0 += 1;
             let lines: Vec<&str> = self.editor_content.lines().collect();
             if let Some(line) = lines.get(self.editor_cursor.0 as usize) {
-                self.editor_cursor.1 = self.editor_cursor.1.min(line.len() as u16);
+                self.editor_cursor.1 = self.editor_cursor.1.min(line.chars().count() as u16);
             }
             self.adjust_scroll_to_cursor();
         }
@@ -77,7 +77,7 @@ impl App {
             self.editor_cursor.0 -= 1;
             let lines: Vec<&str> = self.editor_content.lines().collect();
             if let Some(line) = lines.get(self.editor_cursor.0 as usize) {
-                self.editor_cursor.1 = self.editor_cursor.1.min(line.len() as u16);
+                self.editor_cursor.1 = self.editor_cursor.1.min(line.chars().count() as u16);
             }
             self.adjust_scroll_to_cursor();
         }
@@ -105,7 +105,7 @@ impl App {
     pub fn cursor_to_line_end(&mut self) {
         let lines: Vec<&str> = self.editor_content.lines().collect();
         if let Some(line) = lines.get(self.editor_cursor.0 as usize) {
-            self.editor_cursor.1 = line.len() as u16;
+            self.editor_cursor.1 = line.chars().count() as u16;
         }
     }
 
@@ -232,10 +232,10 @@ impl App {
         let newline_count = text.chars().filter(|&c| c == '\n').count();
         if newline_count > 0 {
             self.editor_cursor.0 += newline_count as u16;
-            let last_line_len = text.rsplit('\n').next().map(|l| l.len()).unwrap_or(0);
+            let last_line_len = text.rsplit('\n').next().map(|l| l.chars().count()).unwrap_or(0);
             self.editor_cursor.1 = last_line_len as u16;
         } else {
-            self.editor_cursor.1 += text.len() as u16;
+            self.editor_cursor.1 += text.chars().count() as u16;
         }
         self.adjust_scroll_to_cursor();
         self.mark_modified();

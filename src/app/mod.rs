@@ -776,6 +776,13 @@ impl App {
             self.pending_key = None;
             self.clear_note_search();
             
+            // Point the tree at the note now open. Only the routes that go
+            // through open_note_by_id used to do this, so opening from the
+            // landing page, its 1-9 shortcuts, the explorer or a new note left
+            // the highlight on an unrelated row — and every command that acts on
+            // the selection, Enter included, then acted on that one.
+            self.navigate_to_note(note_id);
+
             // Track recent file access
             self.notebook.add_recent_file(note_id);
 
@@ -786,42 +793,41 @@ impl App {
         }
     }
     
+    /// Open a note and focus the editor.
+    ///
+    /// Kept as its own name for the twenty call sites that read better for it;
+    /// `select_note` now points the tree and focuses the editor by itself.
     pub fn open_note_by_id(&mut self, note_id: Uuid) {
-        // First, select the note (load it into the editor)
         self.select_note(note_id);
-        
-        // Then, update the tree selection to highlight the note
-        self.navigate_to_note(note_id);
-        
-        // Make sure editor is focused
-        self.focused_pane = FocusedPane::Editor;
     }
     
+    /// Point the tree at a note, expanding whatever hides it.
+    ///
+    /// The expansion has to come first: a note inside a collapsed folder has no
+    /// row in the tree at all, so looking for its row before expanding finds
+    /// nothing and reveals nothing.
     pub(crate) fn navigate_to_note(&mut self, note_id: Uuid) {
-        // Find the note in the tree items and select it
-        for (index, item) in self.folder_tree_items.iter().enumerate() {
-            if item.id == note_id && item.item_type == TreeItemType::Note {
-                self.selected_folder_index = index;
-                
-                // If the note is in a folder, make sure the folder is expanded
-                if let Some(note) = self.notebook.notes.get(&note_id) {
-                    if let Some(folder_id) = note.folder_id {
-                        if let Some(folder) = self.notebook.folders.get_mut(&folder_id) {
-                            folder.expanded = true;
-                            self.refresh_tree_view(); // Refresh to show the expanded folder
-                            
-                            // Re-find the note index after refresh
-                            for (idx, item) in self.folder_tree_items.iter().enumerate() {
-                                if item.id == note_id && item.item_type == TreeItemType::Note {
-                                    self.selected_folder_index = idx;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                break;
+        let mut folder_id = self.notebook.notes.get(&note_id).and_then(|n| n.folder_id);
+        let mut expanded_any = false;
+        // Bounded, so a malformed parent chain cannot spin here forever.
+        for _ in 0..64 {
+            let Some(id) = folder_id else { break };
+            let Some(folder) = self.notebook.folders.get_mut(&id) else { break };
+            if !folder.expanded {
+                folder.expanded = true;
+                expanded_any = true;
             }
+            folder_id = folder.parent_id;
+        }
+        if expanded_any {
+            self.refresh_tree_view();
+        }
+        if let Some(index) = self
+            .folder_tree_items
+            .iter()
+            .position(|item| item.id == note_id && item.item_type == TreeItemType::Note)
+        {
+            self.selected_folder_index = index;
         }
     }
 
