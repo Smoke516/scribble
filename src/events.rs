@@ -3681,3 +3681,90 @@ mod pane_targeting_tests {
         assert!(app.preview_scroll < 10, "the preview did not move");
     }
 }
+
+/// The other half of the performance guardrails; see `storage::perf_tests` for
+/// why each one is measured two ways.
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+    use crate::models::Note;
+    use std::time::{Duration, Instant};
+
+    fn app_with_lines(lines: usize) -> App {
+        let content: String = (1..=lines)
+            .map(|i| format!("line {} with a reasonable amount of text on it\n", i))
+            .collect();
+        let mut app = App::default();
+        let mut note = Note::new("Big".to_string(), None);
+        note.content = content.clone();
+        app.notebook.add_note(note.clone());
+        app.current_note = Some(note);
+        app.editor_content = content;
+        // The far end of the note is the expensive place to type: everything that
+        // converts the cursor to a byte offset walks the lines above it.
+        app.editor_cursor = (lines as u16 - 1, 5);
+        app.mode = AppMode::Insert;
+        app
+    }
+
+    /// Median cost of one keystroke, sampled under a deadline.
+    ///
+    /// The deadline is what makes a bad regression fail fast: a keystroke that
+    /// has gone quadratic takes seconds, and collecting a full sample set of
+    /// those would hang the run instead of failing it.
+    fn median_keystroke(app: &mut App, samples: usize) -> Duration {
+        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        for _ in 0..20 {
+            if Instant::now() >= deadline {
+                break;
+            }
+            handle_insert_mode(app, key);
+        }
+        let mut times: Vec<Duration> = Vec::with_capacity(samples);
+        for _ in 0..samples {
+            let t = Instant::now();
+            handle_insert_mode(app, key);
+            times.push(t.elapsed());
+            if Instant::now() >= deadline {
+                break;
+            }
+        }
+        times.sort();
+        times[times.len() / 2]
+    }
+
+    /// Typing has to stay imperceptible in a long note. Measured at ~0.7ms at the
+    /// end of a 5,000-line note in a debug build; a keystroke you can feel is
+    /// somewhere north of 15ms, and the budget sits between the two.
+    #[test]
+    fn a_keystroke_in_a_long_note_stays_within_budget() {
+        let mut app = app_with_lines(5000);
+        let took = median_keystroke(&mut app, 101);
+
+        assert!(
+            took < Duration::from_millis(10),
+            "a keystroke at the end of a 5,000-line note took {:?}, budget is 10ms",
+            took
+        );
+    }
+
+    /// Ten times the note must not cost far more than ten times the keystroke.
+    /// Measured at 9.8x — very nearly linear — against a threshold of 25. An
+    /// injected cursor conversion per line took it to 95x, and to 1.8s per
+    /// keystroke.
+    #[test]
+    fn keystroke_cost_scales_with_the_length_of_the_note() {
+        let short = median_keystroke(&mut app_with_lines(500), 101);
+        let long = median_keystroke(&mut app_with_lines(5000), 101);
+
+        let ratio = long.as_secs_f64() / short.as_secs_f64().max(1e-9);
+        assert!(
+            ratio < 25.0,
+            "10x the note cost {:.1}x the keystroke ({:?} -> {:?}); typing is no longer linear in note size",
+            ratio,
+            short,
+            long
+        );
+    }
+}
