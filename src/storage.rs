@@ -1609,3 +1609,99 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 }
+
+/// Guardrails for the two things that have to stay fast, and that nothing else
+/// was watching: opening a vault, and typing in a note (see `events.rs`).
+///
+/// Two guards each, because one alone is a bad trade. An absolute ceiling is the
+/// only thing that catches "everything got slower", but it has to be loose enough
+/// to survive a shared CI runner, which makes it blind to a 5x regression. A
+/// ratio between two sizes on the same machine is immune to how fast that machine
+/// is, and catches the change that actually hurts: work that stops being linear.
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Build a vault of `count` notes and return its path.
+    fn synthetic_vault(tag: &str, count: usize) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("scribble_perf_{}_{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let body = "Some body text on a line.\n".repeat(20);
+        for i in 0..count {
+            let note = format!(
+                "---\nscribble_id: {}\ntitle: Note {}\ncreated_at: 2026-08-23T00:00:00Z\n\
+                 modified_at: 2026-08-23T00:00:00Z\ntags:\n- perf\n---\n# Note {}\n\n{}",
+                uuid::Uuid::new_v4(),
+                i,
+                i,
+                body
+            );
+            fs::write(dir.join(format!("note_{:05}.md", i)), note).unwrap();
+        }
+        dir
+    }
+
+    /// Median of several loads, so one scheduling hiccup cannot fail the run.
+    fn median_load(dir: &std::path::Path, runs: usize) -> Duration {
+        let storage = VaultStorage::new(dir.to_path_buf()).unwrap();
+        let _ = storage.load_notebook().unwrap(); // warm the page cache
+        // Bounded, so a load that has gone quadratic fails the run instead of
+        // hanging it.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut times: Vec<Duration> = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let t = Instant::now();
+            let _ = storage.load_notebook().unwrap();
+            times.push(t.elapsed());
+            if Instant::now() >= deadline {
+                break;
+            }
+        }
+        times.sort();
+        times[times.len() / 2]
+    }
+
+    /// Opening a vault is the first thing that happens and the easiest thing to
+    /// make slow without noticing. Measured at ~36ms for 1,000 notes in a debug
+    /// build; the ceiling is far above that so a loaded runner cannot trip it,
+    /// and far below a vault that has become unusable.
+    #[test]
+    fn a_thousand_note_vault_loads_within_budget() {
+        let dir = synthetic_vault("load", 1000);
+        let took = median_load(&dir, 5);
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(
+            took < Duration::from_secs(3),
+            "loading 1,000 notes took {:?}, budget is 3s",
+            took
+        );
+    }
+
+    /// The guard that survives a slow machine: four times the notes must not cost
+    /// far more than four times the work. Measured at 3.9x, and stable across
+    /// runs; quadratic loading would be 16x. The threshold leaves room for a
+    /// loaded runner without leaving room for an accidental scan-per-note, which
+    /// measured 9.6x when injected deliberately — the absolute budget above did
+    /// not notice that at all, which is why both guards are here.
+    #[test]
+    fn vault_load_scales_with_the_number_of_notes() {
+        let small_dir = synthetic_vault("scale_small", 250);
+        let large_dir = synthetic_vault("scale_large", 1000);
+        let small = median_load(&small_dir, 5);
+        let large = median_load(&large_dir, 5);
+        let _ = fs::remove_dir_all(&small_dir);
+        let _ = fs::remove_dir_all(&large_dir);
+
+        let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-6);
+        assert!(
+            ratio < 8.0,
+            "4x the notes cost {:.1}x the time ({:?} -> {:?}); loading is no longer linear",
+            ratio,
+            small,
+            large
+        );
+    }
+}

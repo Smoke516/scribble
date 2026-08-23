@@ -51,6 +51,24 @@ footnote definitions rendered as bare paragraphs.
   the conversion right; everything now goes through the same one. Eleven tests,
   and a twelfth that renders a note full of multi-byte text in every mode.
 
+### ✅ Added — performance guardrails
+
+Startup and typing responsiveness were features nothing protected. Four tests now
+do, two for each:
+
+- **Loading a 1,000-note vault** — under a 3 second ceiling (measured: 36ms), and
+  4x the notes must not cost more than 8x the time (measured: 3.9x).
+- **A keystroke at the end of a 5,000-line note** — under 10ms (measured: 0.7ms),
+  and 10x the note must not cost more than 25x the keystroke (measured: 9.8x).
+
+Each pair exists because neither guard is sufficient alone. An absolute ceiling
+has to be loose enough to survive a shared CI runner, which makes it blind to a
+5x regression — an injected directory-scan-per-note sailed under the 3s budget at
+172ms while the ratio caught it at 9.6x. A ratio is immune to how fast the
+machine is but says nothing about a uniform slowdown. Both were verified by
+injecting the regression they exist to catch, and both measurements bail out
+early so a bad regression fails the run in seconds instead of hanging it.
+
 ### ✨ Changed — markdown snippets
 
 Autocomplete offered seventeen suggestions and helped with none of them.
