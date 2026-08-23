@@ -2430,6 +2430,8 @@ mod persistence_tests {
     /// A reload can shorten the note under the cursor, and get_cursor_byte_index
     /// trusts whatever row and column it is handed.
     #[test]
+    // The note is assigned twice on purpose — shortening it is the subject.
+    #[allow(clippy::field_reassign_with_default)]
     fn the_cursor_is_pulled_back_inside_a_shortened_note() {
         let mut app = App::default();
         app.editor_content = "a much longer first line\nand a second\n".to_string();
