@@ -107,38 +107,6 @@ impl App {
             .collect()
     }
 
-    // Live Preview functionality
-    pub fn update_preview_content(&mut self) {
-        if self.preview_enabled {
-            self.preview_content = self.render_markdown_preview(&self.editor_content);
-        }
-    }
-
-    pub(crate) fn render_markdown_preview(&self, content: &str) -> String {
-        // Simple markdown-to-text conversion for now
-        // In the future, this could use pulldown-cmark for proper rendering
-        content.lines()
-            .map(|line| {
-                if let Some(rest) = line.strip_prefix("# ") {
-                    format!("▉ {}", rest)
-                } else if let Some(rest) = line.strip_prefix("## ") {
-                    format!("▊ {}", rest)
-                } else if let Some(rest) = line.strip_prefix("### ") {
-                    format!("▋ {}", rest)
-                } else if line.starts_with("- ") || line.starts_with("* ") {
-                    format!("• {}", &line[2..])
-                } else if let Some(rest) = line.strip_prefix("> ") {
-                    format!("│ {}", rest)
-                } else if line.starts_with("```") {
-                    "┌─────────────────────────────────────┐".to_string()
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     pub fn preview_scroll_up(&mut self) {
         self.preview_scroll = self.preview_scroll.saturating_sub(1);
     }
