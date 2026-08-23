@@ -40,7 +40,7 @@ footnote definitions rendered as bare paragraphs.
   one read. It ran from seventeen call sites including every keystroke in insert
   mode, reformatted the whole note, and threw the result away.
 
-Tests went 235 → 260.
+Tests went 234 → 260: twenty-six for the preview, where there were none.
 
 ## [3.1.0] - 2026-08-16
 
