@@ -27,6 +27,18 @@ item starting with inline code or a link, a bullet on the second paragraph of an
 item, inline code padding itself with spaces that doubled the ones around it, and
 footnote definitions rendered as bare paragraphs.
 
+### 🐛 Fixed — a horizontal rule swallowed the note
+
+- **`---` in a note made everything up to the next `---` vanish from the
+  preview.** Hiding frontmatter was left to pulldown-cmark's
+  `ENABLE_YAML_STYLE_METADATA_BLOCKS`, which treats any pair of `---` lines as a
+  metadata block wherever they appear — so a horizontal rule opened one and the
+  parser handed back the whole middle of the note as frontmatter to hide. A note
+  with three `---` separators showed its heading, then jumped to the text after
+  the second one. Frontmatter is now stripped directly: only at the very top,
+  only when it closes, and only when the line after the opening marker is a
+  `key:` — a note that opens with a horizontal rule keeps it.
+
 ### 🐛 Fixed — the app crashed
 
 - **Typing any character outside ASCII killed scribble.** An accent, an arrow, a
@@ -86,7 +98,8 @@ renders). `Enter` always breaks the line.
 ### ✨ Changed
 
 - Frontmatter is hidden in the preview rather than rendered as a rule and a
-  heading.
+  heading. It is stripped directly rather than by the parser, which treats *any*
+  pair of `---` lines as a metadata block — see below.
 - Smart punctuation is off: the preview shows the quotes and dashes you typed.
 - A blockquote spanning two paragraphs keeps its bar across the gap.
 
