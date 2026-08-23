@@ -307,7 +307,7 @@ Earlier releases are in [CHANGELOG.md](CHANGELOG.md).
 |-----|--------|
 | `j/k` or `↓/↑` | Navigate up/down in folder tree |
 | `g/G` | Go to top/bottom |
-| `Enter` | Open note or toggle folder expansion |
+| `Enter` | In the tree: open note or toggle folder expansion. In the editor: down a line, to its first non-blank (vim's `<CR>`) |
 | `Tab` | Switch between folder pane and editor |
 | `n` | Create new note |
 | `N` | Create new note from a template |

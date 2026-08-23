@@ -89,6 +89,19 @@ impl App {
     }
 
     /// Move cursor to the end of the current line ($).
+    /// Vim's `<CR>`: down a line, landing on its first non-blank character.
+    ///
+    /// On the last line the cursor stays put, as vim does.
+    pub fn cursor_to_next_line_start(&mut self) {
+        let lines: Vec<&str> = self.editor_content.lines().collect();
+        let next = self.editor_cursor.0 as usize + 1;
+        if let Some(line) = lines.get(next) {
+            let indent = line.chars().take_while(|c| c.is_whitespace()).count();
+            self.editor_cursor = (next as u16, indent as u16);
+            self.adjust_scroll_to_cursor();
+        }
+    }
+
     pub fn cursor_to_line_end(&mut self) {
         let lines: Vec<&str> = self.editor_content.lines().collect();
         if let Some(line) = lines.get(self.editor_cursor.0 as usize) {
