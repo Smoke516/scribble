@@ -61,6 +61,44 @@ fn parse_callout(text: &str, c: &ThemeColors) -> Option<CalloutInfo> {
     Some(CalloutInfo { icon, label, color })
 }
 
+/// Content with a leading YAML frontmatter block removed.
+///
+/// Done here rather than by the parser: `ENABLE_YAML_STYLE_METADATA_BLOCKS` treats
+/// *any* pair of `---` lines as a metadata block, so a horizontal rule halfway
+/// down a note opened one and swallowed everything up to the next rule.
+/// Frontmatter is only frontmatter at the very top, and only when it closes.
+fn strip_frontmatter(content: &str) -> &str {
+    let Some(rest) = content.strip_prefix("---\n") else {
+        return content;
+    };
+    // A note may legitimately open with a horizontal rule. What tells the two
+    // apart is what comes next: frontmatter starts with a key, immediately.
+    if !rest.lines().next().is_some_and(is_yaml_key) {
+        return content;
+    }
+    let mut offset = "---\n".len();
+    for line in rest.lines() {
+        let line_len = line.len() + 1; // the line and its newline
+        if line.trim_end() == "---" {
+            return content.get(offset + line_len..).unwrap_or("");
+        }
+        offset += line_len;
+    }
+    // Never closed, so it was not frontmatter. Leave the note alone.
+    content
+}
+
+/// A `key:` line, the way a frontmatter block always opens.
+fn is_yaml_key(line: &str) -> bool {
+    let Some((key, _)) = line.split_once(':') else {
+        return false;
+    };
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// Display width of a string in terminal columns.
 fn dwidth(s: &str) -> usize {
     Span::raw(s).width()
@@ -155,8 +193,6 @@ struct Renderer<'a> {
     head: Vec<String>,
     rows: Vec<Vec<String>>,
 
-    // Frontmatter
-    in_metadata: bool,
 }
 
 impl<'a> Renderer<'a> {
@@ -193,7 +229,6 @@ impl<'a> Renderer<'a> {
             row: Vec::new(),
             head: Vec::new(),
             rows: Vec::new(),
-            in_metadata: false,
         }
     }
 
@@ -505,16 +540,15 @@ impl<'a> Renderer<'a> {
             | Options::ENABLE_FOOTNOTES
             | Options::ENABLE_STRIKETHROUGH
             | Options::ENABLE_TASKLISTS
-            | Options::ENABLE_HEADING_ATTRIBUTES
-            | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS;
+            | Options::ENABLE_HEADING_ATTRIBUTES;
 
+        let content = strip_frontmatter(content);
         for event in Parser::new_ext(content, options) {
             match event {
                 Event::Start(tag) => self.start(tag),
                 Event::End(tag) => self.end(tag),
                 Event::Text(text) => {
-                    if self.in_metadata {
-                    } else if self.in_table {
+                    if self.in_table {
                         self.cell.push_str(&text);
                     } else if self.in_code {
                         self.code_buf.push_str(&text);
@@ -657,8 +691,7 @@ impl<'a> Renderer<'a> {
             }
             Tag::TableRow => self.row.clear(),
             Tag::TableCell => self.cell.clear(),
-            Tag::MetadataBlock(_) => self.in_metadata = true,
-            Tag::HtmlBlock => {}
+            Tag::HtmlBlock | Tag::MetadataBlock(_) => {}
         }
     }
 
@@ -756,8 +789,7 @@ impl<'a> Renderer<'a> {
                 self.in_table = false;
                 self.blank();
             }
-            TagEnd::MetadataBlock(_) => self.in_metadata = false,
-            TagEnd::HtmlBlock => {}
+            TagEnd::HtmlBlock | TagEnd::MetadataBlock(_) => {}
         }
     }
 
@@ -1064,6 +1096,65 @@ mod tests {
         );
     }
 
+    /// Reported from a real note: three `---` separators, and everything between
+    /// the first two vanished from the preview.
+    ///
+    /// `ENABLE_YAML_STYLE_METADATA_BLOCKS` treats any pair of `---` lines as a
+    /// metadata block, wherever they are, so the rule opened one and the parser
+    /// handed back the whole middle of the note as frontmatter to hide.
+    #[test]
+    fn a_horizontal_rule_does_not_swallow_the_note() {
+        let note = "# Yomi\n\n---\n  - Milk\n- I think that this is fixed\n\n1. No more auto numbering\n2. This is the better way\n\n---\n\nThis is what I want\n\n---\n";
+        let lines = render(note, 40);
+        for needle in [
+            "Yomi",
+            "Milk",
+            "I think that this is fixed",
+            "No more auto numbering",
+            "This is the better way",
+            "This is what I want",
+        ] {
+            assert!(
+                lines.iter().any(|l| l.contains(needle)),
+                "{:?} disappeared from the preview:\n{:#?}",
+                needle,
+                lines
+            );
+        }
+        assert_eq!(
+            lines.iter().filter(|l| l.starts_with('━')).count(),
+            3,
+            "not every rule was drawn: {:#?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn two_rules_in_a_row_keep_what_lies_between_them() {
+        let lines = render("---\n\nmiddle\n\n---\n\nend\n", 40);
+        assert!(lines.iter().any(|l| l.contains("middle")), "{:#?}", lines);
+        assert!(lines.iter().any(|l| l.contains("end")), "{:#?}", lines);
+    }
+
+    /// An opening `---` with no closing one is a rule, not the start of
+    /// frontmatter that eats the rest of the file.
+    #[test]
+    fn an_unclosed_leading_marker_is_left_alone() {
+        let lines = render("---\n\nstill here\n", 40);
+        assert!(
+            lines.iter().any(|l| l.contains("still here")),
+            "the note was treated as unterminated frontmatter: {:#?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn frontmatter_is_only_stripped_from_the_very_top() {
+        let lines = render("intro\n\n---\ntitle: not frontmatter\n---\n\ntail\n", 40);
+        assert!(lines.iter().any(|l| l.contains("title: not frontmatter")), "{:#?}", lines);
+        assert!(lines.iter().any(|l| l.contains("tail")), "{:#?}", lines);
+    }
+
     #[test]
     fn frontmatter_is_not_rendered() {
         let lines = render("---\ntitle: Note\n---\n\nBody text\n", 40);
@@ -1128,3 +1219,4 @@ mod tests {
         }
     }
 }
+
